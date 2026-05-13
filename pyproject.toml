@@ -47,13 +47,12 @@ dev = [
     "flake8",
     "mypy",
 ]
-sim = [
-    "libero>=0.1.0",
-    "robosuite>=1.4.0",
-    "scipy>=1.9.0",
-    "mujoco>=2.3.0",
-    "gymnasium>=0.26.0",
-]
+# NOTE: the lightweight `sim` extra (libero / robosuite / mujoco / gymnasium)
+# was removed in 0.3.0 — that backend now lives in `strands-robots` and is
+# installed via `pip install 'strands-robots[sim-mujoco]'`. Heavy GPU-only
+# backends (Isaac Sim, Newton) will land here behind `[isaac]` / `[newton]`
+# extras in upcoming releases. See examples/MIGRATION.md and
+# https://github.com/strands-labs/robots-sim/issues/8.
 
 [project.urls]
 Homepage = "https://github.com/strands-labs/robots-sim"
