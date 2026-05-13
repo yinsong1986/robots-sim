@@ -7,9 +7,12 @@ on:
         required: true
         type: string
 
+# Until backend code lands in R7 (Isaac) / R11 (Newton) this repo is a
+# minimal plugin stub — there's nothing to test beyond "the package still
+# imports". Heavy GPU CI is tracked separately in R10 / R14.
 jobs:
-  test-lint:
-    name: Test and Lint
+  smoke:
+    name: Build + import smoke
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,5 +36,5 @@ jobs:
       - name: Run lint
         run: hatch run lint
 
-      - name: Run tests
+      - name: Run import smoke
         run: hatch run test
