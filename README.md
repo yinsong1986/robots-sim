@@ -4,7 +4,7 @@
 
 For the default lightweight **MuJoCo** backend, use [`strands-robots`](https://github.com/strands-labs/robots) directly — both backends in this repo plug into the same `Simulation` AgentTool / `SimEngine` ABC and load via entry points, so the user-facing API is identical across all three.
 
-> **Status:** v0.3.0 is a re-scoped foundation release. The legacy `SimEnv` / `SteppedSimEnv` / GR00T policy code path moved upstream — see [`examples/MIGRATION.md`](examples/MIGRATION.md). Backend code lands in v0.4.0+ (Isaac) and v0.5.0+ (Newton). Track the rollout in [#8](https://github.com/strands-labs/robots-sim/issues/8).
+> **Status:** v0.2.0 is a re-scoped foundation release. The legacy `SimEnv` / `SteppedSimEnv` / GR00T policy code path moved upstream — see [`examples/MIGRATION.md`](examples/MIGRATION.md). Backend code lands in v0.3.0+ (Isaac) and v0.4.0+ (Newton). Track the rollout in [#8](https://github.com/strands-labs/robots-sim/issues/8).
 
 ---
 
@@ -114,21 +114,21 @@ Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
   - [ ] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
 - **Stage 2 — MuJoCo LIBERO baseline**
   - [ ] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero_mujoco.py` + `examples/README.md`
-- **Stage 3 — Isaac Sim** (ships with v0.4.0)
+- **Stage 3 — Isaac Sim** (ships with v0.3.0)
   - [ ] R6 / [#13](https://github.com/strands-labs/robots-sim/issues/13) — entry-point backend registration
   - [ ] R7 / [#14](https://github.com/strands-labs/robots-sim/issues/14) — `IsaacSimulation(SimEngine)` backend
   - [ ] R8 / [#15](https://github.com/strands-labs/robots-sim/issues/15) — `examples/libero_isaac.py`
   - [ ] R9 / [#16](https://github.com/strands-labs/robots-sim/issues/16) — `examples/isaac_replicator_synthdata.py`
   - [ ] R10 / [#17](https://github.com/strands-labs/robots-sim/issues/17) — nightly GPU CI
-- **Stage 4 — Newton** (ships with v0.5.0)
+- **Stage 4 — Newton** (ships with v0.4.0)
   - [ ] R11 / [#18](https://github.com/strands-labs/robots-sim/issues/18) — `NewtonSimulation(SimEngine)` backend
   - [ ] R12 / [#19](https://github.com/strands-labs/robots-sim/issues/19) — Newton LIBERO examples
   - [ ] R13 / [#20](https://github.com/strands-labs/robots-sim/issues/20) — `examples/newton_diffsim_toy.py`
   - [ ] R14 / [#21](https://github.com/strands-labs/robots-sim/issues/21) — extend nightly GPU CI for Newton
-- **Stage 5 — Flagship**
+- **Stage 5 — Flagship** (ships with v0.5.0)
   - [ ] R15 / [#22](https://github.com/strands-labs/robots-sim/issues/22) — `examples/libero_backend_matrix.py`
 
-Migrating from the 0.2.x API: [`examples/MIGRATION.md`](examples/MIGRATION.md).
+Migrating from the 0.1.x API: [`examples/MIGRATION.md`](examples/MIGRATION.md).
 
 ---
 
