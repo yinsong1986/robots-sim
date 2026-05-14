@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 # NOTE: heavy runtime deps (lerobot / torch / opencv-python-headless / pyzmq /
-# msgpack) were dropped in 0.3.0 — those are pulled in transitively via
+# msgpack) were dropped in 0.2.0 — those are pulled in transitively via
 # `strands-robots` once the heavy backends land in R6+. The tiny default set
 # below is what the no-op stub itself uses.
 dependencies = [
@@ -43,7 +43,7 @@ dev = [
     "flake8",
 ]
 # NOTE: the lightweight `sim` extra (libero / robosuite / mujoco / gymnasium)
-# was removed in 0.3.0 — that backend now lives in `strands-robots` and is
+# was removed in 0.2.0 — that backend now lives in `strands-robots` and is
 # installed via `pip install 'strands-robots[sim-mujoco]'`. Heavy GPU-only
 # backends (Isaac Sim, Newton) will land here behind `[isaac]` / `[newton]`
 # extras in upcoming releases. See examples/MIGRATION.md and
