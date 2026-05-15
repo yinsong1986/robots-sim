@@ -93,14 +93,18 @@ Per-backend examples:
 - `examples/libero_newton.py` — single-env GPU ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))
 - `examples/libero_newton_fleet.py` — 4096 envs ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))
 
-Comparison skeleton (numbers committed as each variant lands):
+Comparison skeleton (numbers committed as each variant lands; all runs
+use the first registered LIBERO spatial task, 10 episodes, mock policy
+— same parameters R5 / R8 / R12 ship by default and R15 aggregates):
 
-| Backend | `n_envs` | Wall-time (50 eps, `libero-spatial-pick_up_the_red_cube`) | Notes |
+| Backend | `n_envs` | Wall-time | Notes |
 |---|---:|---|---|
-| `mujoco` | 1 | TBD (R5) | macOS OK |
-| `newton` | 1 | TBD (R12) | CUDA only |
-| `newton` | 4096 | TBD (R12) | fleet |
-| `isaac` | 1 | TBD (R8) | RTX path-traced |
+| `mujoco` | 1 | ~0.8 s (R5 / [#26](https://github.com/strands-labs/robots-sim/pull/26))* | macOS / CPU OK |
+| `newton` | 1 | TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19)) | CUDA only |
+| `newton` | 4096 | TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19)) | fleet |
+| `isaac` | 1 | TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15)) | RTX path-traced |
+
+\* Single-CPU dev box, mock policy; depends on upstream [`strands-labs/robots#147`](https://github.com/strands-labs/robots/pull/147) for `load_libero_suite` to register tasks.
 
 ---
 
