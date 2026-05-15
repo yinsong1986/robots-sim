@@ -109,20 +109,20 @@ Verification status (`--policy=groot` end-to-end)
   connect to the server and serialise/deserialise messages.
 
 **Blocked on upstream gaps** that the Step-2e command above doesn't
-side-step today:
+side-step today. All three are tracked in a single combined issue:
+`strands-labs/robots#148 <https://github.com/strands-labs/robots/issues/148>`_.
 
 1. ``Simulation`` doesn't auto-load LIBERO BDDL scenes — there's no
    ``agentview`` / wrist camera in the world, so ``video.image`` /
-   ``video.wrist_image`` keys never reach the server. Filing as upstream
-   issue.
+   ``video.wrist_image`` keys never reach the server. (#148, Failure 1)
 2. ``Gr00tPolicy._build_service_observation`` adds only a batch dim,
    but the N1.7 server expects ``(B, T, H, W, C)`` for video and
    ``(B, T, D)`` for state with ``T=1``; state must be ``float32`` (not
-   ``float64``). Filing as upstream issue.
+   ``float64``). (#148, Failure 2)
 3. The Strands ``gr00t_inference`` tool wraps the older
    ``scripts/inference_service.py --server`` entrypoint that no longer
    exists in N1.7. The bare-Docker workflow in Step 2d is the way until
-   the tool is updated. Filing as upstream issue.
+   the tool is updated. (#148, Failure 3)
 
 So ``--policy=groot`` exits cleanly today only after points 1-3 are
 resolved upstream. Until then, ``--policy=mock`` is the contract you
