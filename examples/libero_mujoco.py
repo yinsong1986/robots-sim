@@ -24,33 +24,52 @@ Usage
     #    `--task libero-spatial-pick_up_the_red_cube`, the right
     #    subfolder is `libero_spatial/`.
     #
-    #    Step 2a — download just the sub-checkpoint you need:
+    #    Step 2a — build the GR00T container from upstream
+    #    (no pre-built image is published; build locally from the
+    #    n1.7-release tag):
     #
-    #        uv run hf download nvidia/GR00T-N1.7-LIBERO \\
+    #        git clone --depth 1 --branch n1.7-release --recurse-submodules \\
+    #            https://github.com/NVIDIA/Isaac-GR00T.git
+    #        cd Isaac-GR00T && DOCKER_BUILDKIT=1 bash docker/build.sh
+    #        # → produces image `gr00t:latest` (~28 GB)
+    #
+    #    Step 2b — download just the sub-checkpoint you need
+    #    (`nvidia/Cosmos-Reason2-2B`, the VLM backbone, is a *gated*
+    #    repo — accept the terms once at huggingface.co/nvidia/Cosmos-
+    #    Reason2-2B and make sure your `~/.cache/huggingface/token`
+    #    has access):
+    #
+    #        hf download nvidia/GR00T-N1.7-LIBERO \\
     #            --include 'libero_spatial/*' \\
     #            --local-dir checkpoints/GR00T-N1.7-LIBERO
     #
-    #    Step 2b — start the inference service against that subfolder.
-    #    Either via the Strands tool wrapper:
+    #    Step 2c — start the container with HF token + cache mounted
+    #    so the gated VLM backbone download works:
     #
-    #        from strands_robots.tools import gr00t_inference
-    #        gr00t_inference(
-    #            action="start",
-    #            checkpoint_path="checkpoints/GR00T-N1.7-LIBERO/libero_spatial",
-    #            port=8000,
-    #            data_config="libero",
-    #        )
+    #        docker run -d --gpus all --ipc=host --name gr00t \\
+    #            -v "$(pwd)/checkpoints":/data/checkpoints \\
+    #            -v "$HOME/.cache/huggingface":/root/.cache/huggingface \\
+    #            -e HF_TOKEN="$(cat ~/.cache/huggingface/token)" \\
+    #            -p 8000:8000 \\
+    #            gr00t tail -f /dev/null
     #
-    #    …or with the equivalent bare Docker invocation:
+    #    Step 2d — start the inference server *inside* the container.
+    #    N1.7 uses the new `gr00t.eval.run_gr00t_server` module, NOT
+    #    the older `scripts/inference_service.py --server` entrypoint
+    #    that the Strands `gr00t_inference` tool currently wraps:
     #
-    #        docker run --gpus all -p 8000:8000 \\
-    #            -v "$(pwd)/checkpoints:/data" \\
-    #            nvcr.io/nvidia/isaac-gr00t:latest serve \\
-    #            --checkpoint /data/GR00T-N1.7-LIBERO/libero_spatial \\
-    #            --data-config libero \\
-    #            --port 8000
+    #        docker exec -d gr00t bash -c '
+    #            python -m gr00t.eval.run_gr00t_server \\
+    #                --model-path /data/checkpoints/GR00T-N1.7-LIBERO/libero_spatial \\
+    #                --embodiment-tag libero_sim \\
+    #                --port 8000 \\
+    #                --host 0.0.0.0 \\
+    #                --use-sim-policy-wrapper'
     #
-    #    Step 2c — run the eval against it:
+    #    The model loads in ~80 s on an L4 (~6 GB GPU memory). Server
+    #    listens on port 8000 via ZMQ.
+    #
+    #    Step 2e — run the eval against it (THIS file):
     python examples/libero_mujoco.py --policy groot --port 8000 --n-episodes 50
 
     # 3) Different LIBERO suite + task. Suite is auto-derived from --task,
@@ -76,6 +95,40 @@ invocation produces **one** MP4 capturing every episode in sequence.
 Filename encodes ``--task=<benchmark_name>``, ``--policy=mock|groot``,
 ``--n_eps=N``, and ``--seed=S`` so post-hoc analysis can tell what
 produced it.
+
+Verification status (`--policy=groot` end-to-end)
+-------------------------------------------------
+**Verified locally**:
+
+- The ``nvidia/GR00T-N1.7-LIBERO/libero_<suite>/`` checkpoint loads on a
+  single NVIDIA L4 (uses ~6 GB of 23 GB VRAM after warm-up).
+- The new ``python -m gr00t.eval.run_gr00t_server --embodiment-tag
+  libero_sim --use-sim-policy-wrapper`` entrypoint serves on port 8000
+  and resolves the embodiment tag to ``EmbodimentTag.LIBERO_PANDA``.
+- The strands-robots ``Gr00tPolicy(data_config="libero_panda")`` can
+  connect to the server and serialise/deserialise messages.
+
+**Blocked on upstream gaps** that the Step-2e command above doesn't
+side-step today:
+
+1. ``Simulation`` doesn't auto-load LIBERO BDDL scenes — there's no
+   ``agentview`` / wrist camera in the world, so ``video.image`` /
+   ``video.wrist_image`` keys never reach the server. Filing as upstream
+   issue.
+2. ``Gr00tPolicy._build_service_observation`` adds only a batch dim,
+   but the N1.7 server expects ``(B, T, H, W, C)`` for video and
+   ``(B, T, D)`` for state with ``T=1``; state must be ``float32`` (not
+   ``float64``). Filing as upstream issue.
+3. The Strands ``gr00t_inference`` tool wraps the older
+   ``scripts/inference_service.py --server`` entrypoint that no longer
+   exists in N1.7. The bare-Docker workflow in Step 2d is the way until
+   the tool is updated. Filing as upstream issue.
+
+So ``--policy=groot`` exits cleanly today only after points 1-3 are
+resolved upstream. Until then, ``--policy=mock`` is the contract you
+can rely on; PR #26's matrix-table number stays TBD pending those
+upstream merges (or a contributor with a way to side-step them
+locally — patches welcome).
 """
 
 from __future__ import annotations
@@ -134,19 +187,21 @@ def main() -> None:
     suite = _suite_for_task(args.task)
 
     if args.policy == "groot":
-        # `data_config="libero"` matches the `--data-config libero` flag the
-        # GR00T inference service is started with (see docstring) — the
-        # client side passes the same identifier so the service knows which
-        # state-key map to apply. If the local `Gr00tPolicy` registry
-        # rejects this string with `Unknown data_config 'libero'`, fall
-        # back to `data_config="libero_panda"` (the registered key) — both
-        # should produce equivalent observation maps for LIBERO.
+        # Client-side `data_config="libero_panda"` — this is the registered
+        # key in `strands_robots.policies.groot.DATA_CONFIG_MAP` that tells
+        # the local `Gr00tPolicy` how to format LIBERO observations into the
+        # GR00T-N1.7 input layout. Note this is *separate from* the server's
+        # `--embodiment-tag libero_sim` (an alias of `LIBERO_PANDA` per the
+        # checkpoint's `embodiment_id.json`); the two sides happen to mean
+        # the same thing but the strings are not interchangeable.
+        # Verified locally against `nvidia/GR00T-N1.7-LIBERO/libero_10` —
+        # client `libero_panda` + server `libero_sim` is the working pair.
         policy_kwargs = {
             "policy_provider": "groot",
             "policy_config": {
                 "host": "localhost",
                 "port": args.port,
-                "data_config": "libero",
+                "data_config": "libero_panda",
             },
         }
     else:
