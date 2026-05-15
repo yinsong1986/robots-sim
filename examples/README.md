@@ -4,62 +4,90 @@ Per-backend tutorials for running LIBERO benchmarks against each
 `SimEngine` shipped by `strands-robots-sim` and its upstream sibling
 `strands-robots`.
 
-## Two flavours
+## Two execution patterns
 
-Each backend ships **two** files. Pick the one that matches your situation:
+Each backend ships **two sibling files** that mirror the two patterns
+the deleted `SimEnv` / `SteppedSimEnv` API used to cover.
 
-| File suffix | Driver | LLM required | Output | Used by R15 matrix |
-|---|---|---|---|---|
-| `*.py` | direct Python API on `Simulation` | no | `success_rate=… wall_time=…s` | yes |
-| `*_agent.py` | `Agent(tools=[sim])` + natural-language prompt | yes (Bedrock by default) | LLM-generated summary | no |
+| File suffix | Pattern | Replaces | Best for |
+|---|---|---|---|
+| `<backend>.py` | **One-shot** — `evaluate_benchmark(...)` runs to completion, prints success rate + wall-time | `SimEnv` | CI / benchmark numbers / R15 matrix table |
+| `<backend>_stepped.py` | **Iterative supervision** — `start_policy(...)` + poll `get_state` / `render` in a System-2 loop | `SteppedSimEnv` | Agent-driven adaptation, demoing the iterative pattern |
 
-The direct-API files are the **deterministic, CI-runnable smoke tests**
-that R15 ([`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22))
-ingests for the side-by-side comparison table — output lines are
-intentionally grep-stable.
+The one-shot files print two grep-stable lines (`benchmark_name=...` and
+`policy=... success_rate=... wall_time=...s`) that R15
+([`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22))
+subprocess-and-parses for the side-by-side comparison table. The
+stepped files are for human inspection — output is human-readable, not
+matrix-ingested.
 
-The agent files are the **headline pedagogical demos** showing why the
-Strands integration buys you anything beyond direct method calls. Both
-files in a pair use the same upstream `Simulation` AgentTool and the same
-LIBERO adapter — only the *driver* changes.
+## Two policy choices
+
+Both files in every pair accept `--policy {mock,groot}`:
+
+| Flag | Provider | When | Reproducibility |
+|---|---|---|---|
+| `--policy mock` (default) | random-action stub in `strands_robots.policies.mock` | smoke tests / CI / no-GPU dev boxes / "did the plumbing work" sanity check | deterministic given `--seed` |
+| `--policy groot` | NVIDIA GR00T VLA, served via `nvcr.io/nvidia/isaac-gr00t` Docker (or `gr00t_inference` Strands tool) on `--port 8000` against the public `nvidia/GR00T-N1.7-LIBERO` checkpoint | real LIBERO success-rate measurements | depends on the GR00T checkpoint + service config |
+
+Service-start commands (Strands tool *and* bare-Docker fallback) live in
+`libero_mujoco.py`'s docstring; `libero_mujoco_stepped.py` points back
+at it rather than duplicating.
+
+The mock invocation's wall-time is a smoke-test reference only; **the
+canonical mujoco baseline number for the matrix table is the
+`--policy=groot` measurement**.
 
 ## Backend matrix
 
-Same task, three backends. Numbers fill in as each row's example lands.
+Same task — first registered LIBERO spatial task, 10 episodes, seed 42 —
+on every available backend with success rate and wall-time recorded
+side-by-side. Numbers come from the *one-shot* file with `--policy=groot`
+unless a row note says otherwise; mock-policy smoke runs are listed
+below the table for reference.
 
-| Example | Backend | `n_envs` | Wall-time (`libero-spatial`, 10 episodes, mock policy) | Notes |
+| Example | Backend | `n_envs` | Wall-time @ success rate | Notes |
 |---|---|---:|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~0.8 s* | macOS / CPU OK |
+| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | TBD (groot) — see smoke note below | macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
+| `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
 | `libero_newton_fleet.py` | Newton / Warp | 4096 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | fleet |
 
-\* Measured on a single-CPU dev machine with `policy_provider="mock"`; with a
-real policy the wall-time is dominated by inference, not physics. Re-measure
-on reference hardware once the matrix is stable. The exact task picked is
-the first registered LIBERO spatial task — currently
-`libero-spatial-pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate`.
+**Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
-The flagship that runs all four side-by-side and prints the comparison
-table from a single command lives in
-[R15 / #22](https://github.com/strands-labs/robots-sim/issues/22) (`libero_backend_matrix.py`).
+- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~0.8 s on
+  a single-CPU dev box (success rate 0.0 — mock can't satisfy goals).
+
+The `--policy=groot` MuJoCo number drops in once the upstream BDDL fix
+([`strands-labs/robots#147`](https://github.com/strands-labs/robots/pull/147))
+lands on PyPI and a contributor with a GPU + Docker measures it.
+
+The flagship driver
+[`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)
+(R15) walks all five rows and prints a unified table.
 
 ## Running the MuJoCo baseline
 
 ```bash
 pip install 'strands-robots[sim-mujoco,benchmark-libero]'
 
-# 1. Direct-API, deterministic, no LLM. R15 ingests this output.
-python examples/libero_mujoco.py
-#   benchmark_name=libero-spatial-<task>
-#   success_rate=0.00  wall_time=0.8s
+# 1) Smoke test, no GPU needed:
+python examples/libero_mujoco.py --policy mock --n-episodes 5
 
-# 2. Strands-Agent + natural language. Requires an LLM provider
-#    (Bedrock by default — see https://strandsagents.com/ for setup).
-pip install strands-agents
-python examples/libero_mujoco_agent.py
-#   <LLM-generated summary of the benchmark run>
+# 2) Iterative supervision pattern (also works without a GPU, mock policy):
+python examples/libero_mujoco_stepped.py --policy mock --max-iters 20
+
+# 3) Real eval against nvidia/GR00T-N1.7-LIBERO. Start the inference
+#    service first per `libero_mujoco.py`'s docstring, then:
+python examples/libero_mujoco.py --policy groot --port 8000 --n-episodes 50
 ```
+
+Each invocation produces an MP4 under `rollouts/YYYY_MM_DD/`; filenames
+encode `policy=mock|groot`, the seed, and the suite / episode count
+(one-shot) or `--stepped` marker (iterative) so post-hoc analysis can
+tell what produced each file. The filename convention is preserved from
+the deleted `SimEnv` so existing `rollouts/` scrapers keep working.
 
 > **Note:** the `[sim-mujoco]` and `[benchmark-libero]` extras are
 > currently on `strands-robots` `main` only and will land in the next
@@ -67,17 +95,15 @@ python examples/libero_mujoco_agent.py
 > `pip install 'strands-robots[sim-mujoco,benchmark-libero] @ git+https://github.com/strands-labs/robots.git@main'`.
 
 > **Note:** `load_libero_suite(...)` requires upstream
-> [strands-labs/robots#147](https://github.com/strands-labs/robots/pull/147)
+> [`strands-labs/robots#147`](https://github.com/strands-labs/robots/pull/147)
 > (case-insensitive BDDL parsing) to register tasks from real LIBERO
-> BDDL files. Without it every task is skipped.
-
-`policy_provider="mock"` is the default in both files — the point is to
-exercise the engine + benchmark adapter, not to bench a real policy.
-Each file documents how to swap in `groot` / `lerobot` / a custom
-`Policy` instance.
+> BDDL files. Without it every task is skipped and both example files
+> raise on suite registration.
 
 ## Migration from the legacy 0.1.x API
 
 `strands-robots-sim` 0.1.x shipped `SimEnv` / `SteppedSimEnv` with a
 LIBERO env layer baked in. Those code paths moved upstream in 0.2.0 — see
-[`MIGRATION.md`](MIGRATION.md) for the old → new mapping.
+[`MIGRATION.md`](MIGRATION.md) for the explicit
+`SimEnv → libero_mujoco.py` and `SteppedSimEnv → libero_mujoco_stepped.py`
+mapping.
