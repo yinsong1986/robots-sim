@@ -25,9 +25,9 @@ For the default lightweight **MuJoCo** backend, use [`strands-robots`](https://g
 
 Authoritative sources: [`strands-labs/robots#96`](https://github.com/strands-labs/robots/issues/96) (Newton design), [`strands-labs/robots#97`](https://github.com/strands-labs/robots/issues/97) (Isaac Sim design).
 
-- **Pick MuJoCo** for fast iteration, debugging, and macOS contributors.
-- **Pick Newton** for fleet-scale RL training and differentiable workloads.
-- **Pick Isaac Sim** for synthetic-data generation and photoreal teleop scenes.
+- **Pick MuJoCo** for fast iteration, debugging, and macOS / Apple Silicon contributors.
+- **Pick Newton** for differentiable physics, multi-solver workloads, or fleet RL where rendering can be off.
+- **Pick Isaac Sim** for fleet RL with photoreal observations, USD-native scenes, or Replicator synth-data.
 
 ---
 
@@ -84,23 +84,17 @@ state = sim.get_state()                         # batched [4096, ...] tensors
 
 ## LIBERO backend matrix
 
-The flagship — same LIBERO task on every backend, side-by-side success-rate + wall-time — lives in `examples/libero_backend_matrix.py` (filed as [R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)).
+Same task — `libero-spatial-pick_up_the_red_cube` (Panda picks a red cube from a tabletop and places it in a target zone), 50 episodes, seed 42 — run on every available backend with success rate and wall-time recorded side-by-side. Numbers are committed as each example lands, measured on a reference machine (recorded in each example file's header).
 
-Per-backend examples:
+The flagship driver `examples/libero_backend_matrix.py` ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) walks all five rows and prints a unified table; each row also has a stand-alone example you can run in isolation.
 
-- `examples/libero_mujoco.py` — default MuJoCo baseline ([R5 / #12](https://github.com/strands-labs/robots-sim/issues/12))
-- `examples/libero_isaac.py` — RTX path-traced ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))
-- `examples/libero_newton.py` — single-env GPU ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))
-- `examples/libero_newton_fleet.py` — 4096 envs ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))
-
-Comparison skeleton (numbers committed as each variant lands):
-
-| Backend | `n_envs` | Wall-time (50 eps, `libero-spatial-pick_up_the_red_cube`) | Notes |
-|---|---:|---|---|
-| `mujoco` | 1 | TBD (R5) | macOS OK |
-| `newton` | 1 | TBD (R12) | CUDA only |
-| `newton` | 4096 | TBD (R12) | fleet |
-| `isaac` | 1 | TBD (R8) | RTX path-traced |
+| Backend | `n_envs` | Renderer | Why use this row | Wall-time | Example | Issue |
+|---|---:|---|---|---|---|---|
+| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | TBD | `libero_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
+| `isaac` | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | TBD | `libero_isaac.py` | [R8 / #15](https://github.com/strands-labs/robots-sim/issues/15) |
+| `isaac` | 4096 | RTX off / minimal | IsaacLab-style fleet RL with USD scenes | TBD | `libero_isaac_fleet.py` | [R23 / #27](https://github.com/strands-labs/robots-sim/issues/27) |
+| `newton` | 1 | OpenGL | GPU-physics baseline; entry point for diffsim work | TBD | `libero_newton.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
+| `newton` | 4096 | OpenGL / null | Multi-solver fleet RL, lowest per-env compute | TBD | `libero_newton_fleet.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
 
 ---
 
@@ -109,9 +103,9 @@ Comparison skeleton (numbers committed as each variant lands):
 Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
 
 - **Stage 1 — Foundation cleanup**
-  - [ ] R2 / [#9](https://github.com/strands-labs/robots-sim/issues/9) — remove legacy `SimEnv` / `SteppedSimEnv` / Libero env layer
-  - [ ] R3 / [#10](https://github.com/strands-labs/robots-sim/issues/10) — remove duplicated GR00T policy / inference tool / tests / scripts / docs
-  - [ ] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
+  - [x] R2 / [#9](https://github.com/strands-labs/robots-sim/issues/9) — remove legacy `SimEnv` / `SteppedSimEnv` / Libero env layer
+  - [x] R3 / [#10](https://github.com/strands-labs/robots-sim/issues/10) — remove duplicated GR00T policy / inference tool / tests / scripts / docs
+  - [x] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
 - **Stage 2 — MuJoCo LIBERO baseline**
   - [ ] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero_mujoco.py` + `examples/README.md`
 - **Stage 3 — Isaac Sim** (ships with v0.3.0)
