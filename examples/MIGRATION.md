@@ -1,6 +1,6 @@
-# Migration: `strands-robots-sim` 0.2.x → 0.3.0
+# Migration: `strands-robots-sim` 0.1.x → 0.2.0
 
-`strands-robots-sim` 0.3.0 is a re-scoping release. The legacy `SimEnv`,
+`strands-robots-sim` 0.2.0 is a re-scoping release. The legacy `SimEnv`,
 `SteppedSimEnv`, and Libero-direct environment layer have been **removed**.
 That lightweight MuJoCo + LIBERO code path now lives in
 [`strands-labs/robots`](https://github.com/strands-labs/robots), accessible
@@ -34,7 +34,7 @@ pip install 'strands-robots[sim-mujoco]'
 
 ## API mapping
 
-| Before (0.2.x, this package) | After (0.3.0, `strands-robots`) | Why the shape changed |
+| Before (0.1.x, this package) | After (0.2.0+, `strands-robots`) | Why the shape changed |
 |---|---|---|
 | `from strands_robots_sim import SimEnv` | `from strands_robots.simulation import Simulation` | The agent-facing async lifecycle is now the 58-action `Simulation` AgentTool; episode rollout is one of those actions. See its `action=` enum. |
 | `SimEnv(env_type="libero", task_suite="libero_spatial")` | `from strands_robots.benchmarks.libero import load_libero_suite` then `load_libero_suite("libero_spatial")` | Benchmarks register globally through `BenchmarkProtocol`; the simulation engine is selected separately (default MuJoCo). |
@@ -47,7 +47,7 @@ pip install 'strands-robots[sim-mujoco]'
 
 ## Side-by-side example
 
-### Before — 0.2.x with this package
+### Before — 0.1.x with this package
 
 ```python
 from strands import Agent
@@ -70,7 +70,7 @@ agent.tool.my_sim(
 )
 ```
 
-### After — 0.3.0 with `strands-robots` (default MuJoCo backend)
+### After — 0.2.0 with `strands-robots` (default MuJoCo backend)
 
 ```python
 from strands_robots.simulation import Simulation
