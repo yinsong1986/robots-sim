@@ -17,59 +17,23 @@ Usage
     # 1) Smoke test, no GPU required:
     python examples/libero_mujoco.py --policy mock --n-episodes 5
 
-    # 2) Real LIBERO eval against `nvidia/GR00T-N1.7-LIBERO`. The HF repo
-    #    is a tree of four sub-checkpoints (`libero_spatial/`,
-    #    `libero_10/`, `libero_object/`, `libero_goal/`) — pick the
-    #    subfolder matching your `--task`. For the default
-    #    `--task libero-spatial-pick_up_the_red_cube`, the right
-    #    subfolder is `libero_spatial/`.
+    # 2) Real LIBERO eval against `nvidia/GR00T-N1.7-LIBERO`. This script
+    #    expects an inference server already listening on `--port`; the
+    #    setup commands (build the n1.7 container, download the suite-
+    #    specific sub-checkpoint, run the container, start the server)
+    #    live in `strands-labs/robots#148`'s "Reproduction" section so
+    #    there's one source of truth. Once that issue lands the
+    #    container-lifecycle expansion of `gr00t_inference`, this whole
+    #    sequence becomes one call —
     #
-    #    Step 2a — build the GR00T container from upstream
-    #    (no pre-built image is published; build locally from the
-    #    n1.7-release tag):
+    #        gr00t_inference(action="lifecycle", lifecycle="full",
+    #                        repo_tag="n1.7-release",
+    #                        checkpoint=f"nvidia/GR00T-N1.7-LIBERO/libero_{suite}",
+    #                        embodiment_tag="libero_sim",
+    #                        port=args.port)
     #
-    #        git clone --depth 1 --branch n1.7-release --recurse-submodules \\
-    #            https://github.com/NVIDIA/Isaac-GR00T.git
-    #        cd Isaac-GR00T && DOCKER_BUILDKIT=1 bash docker/build.sh
-    #        # → produces image `gr00t:latest` (~28 GB)
-    #
-    #    Step 2b — download just the sub-checkpoint you need
-    #    (`nvidia/Cosmos-Reason2-2B`, the VLM backbone, is a *gated*
-    #    repo — accept the terms once at huggingface.co/nvidia/Cosmos-
-    #    Reason2-2B and make sure your `~/.cache/huggingface/token`
-    #    has access):
-    #
-    #        hf download nvidia/GR00T-N1.7-LIBERO \\
-    #            --include 'libero_spatial/*' \\
-    #            --local-dir checkpoints/GR00T-N1.7-LIBERO
-    #
-    #    Step 2c — start the container with HF token + cache mounted
-    #    so the gated VLM backbone download works:
-    #
-    #        docker run -d --gpus all --ipc=host --name gr00t \\
-    #            -v "$(pwd)/checkpoints":/data/checkpoints \\
-    #            -v "$HOME/.cache/huggingface":/root/.cache/huggingface \\
-    #            -e HF_TOKEN="$(cat ~/.cache/huggingface/token)" \\
-    #            -p 8000:8000 \\
-    #            gr00t tail -f /dev/null
-    #
-    #    Step 2d — start the inference server *inside* the container.
-    #    N1.7 uses the new `gr00t.eval.run_gr00t_server` module, NOT
-    #    the older `scripts/inference_service.py --server` entrypoint
-    #    that the Strands `gr00t_inference` tool currently wraps:
-    #
-    #        docker exec -d gr00t bash -c '
-    #            python -m gr00t.eval.run_gr00t_server \\
-    #                --model-path /data/checkpoints/GR00T-N1.7-LIBERO/libero_spatial \\
-    #                --embodiment-tag libero_sim \\
-    #                --port 8000 \\
-    #                --host 0.0.0.0 \\
-    #                --use-sim-policy-wrapper'
-    #
-    #    The model loads in ~80 s on an L4 (~6 GB GPU memory). Server
-    #    listens on port 8000 via ZMQ.
-    #
-    #    Step 2e — run the eval against it (THIS file):
+    #    and we wire it in here. Until then, do the manual steps from
+    #    #148, then run:
     python examples/libero_mujoco.py --policy groot --port 8000 --n-episodes 50
 
     # 3) Different LIBERO suite + task. Suite is auto-derived from --task,
