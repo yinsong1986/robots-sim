@@ -64,37 +64,28 @@ produced it.
 
 Verification status (`--policy=groot` end-to-end)
 -------------------------------------------------
-**Verified locally** with the L4 / Docker dev box (`strands-labs/robots`
-`main` post-#148 + #155):
+Pipeline runs end-to-end on the L4 / Docker dev box against
+``strands-robots`` ``main`` post-catch-up (PRs #147 / #149 / #150 /
+#151 / #152 / #155 / #161 / #162):
 
-- ``gr00t_inference(action="lifecycle", lifecycle="full", ...)`` brings
-  the container, server, and checkpoint up cleanly. Idempotent on
-  re-runs (skips the build / download / container-start when artefacts
-  already exist).
-- The ``nvidia/GR00T-N1.7-LIBERO/libero_<suite>/`` checkpoint loads on a
-  single NVIDIA L4 in ~80 s on cold cache, ~25 s warm. Steady-state ~12.7 GB
-  GPU memory.
-- ``Simulation`` installs the ``image`` / ``wrist_image`` cameras the
-  ``libero_panda`` ``Gr00tDataConfig`` expects (per upstream #151) when
-  the LIBERO adapter's ``on_episode_start`` runs.
-- The strands-robots ``Gr00tPolicy(data_config="libero_panda",
-  groot_version="n1.7")`` builds the right ``(B, T, H, W, C)`` /
-  ``(B, T, D)`` float32 wire format and the server accepts the request
-  past the input-validation layer.
+- ``--auto-server`` brings up the n1.7 container, downloads the right
+  ``libero_<suite>/`` sub-checkpoint, starts the inference server, and
+  waits for model readiness in one call. Idempotent on re-runs.
+- ``Simulation.evaluate_benchmark`` round-trips a real GR00T inference:
+  cameras (``image`` / ``wrist_image``) installed by ``LiberoAdapter``,
+  state (``x`` / ``y`` / ``z`` / ``roll`` / ``pitch`` / ``yaw`` /
+  ``gripper``) bridged from Panda joint state via the new FK / quat
+  / mirrored-finger helpers.
+- Output: two grep-stable lines + an MP4 under ``rollouts/<date>/``.
 
-**One upstream gap still blocks the actual eval call**:
-``Simulation.get_observation`` returns joint-space keys (``joint1``..
-``joint7``, ``finger_joint*``) but the ``libero_panda``
-``Gr00tDataConfig`` declares Cartesian end-effector state keys
-(``state.x`` / ``state.y`` / ``state.z`` / ``state.roll`` /
-``state.pitch`` / ``state.yaw`` / ``state.gripper``). Nothing currently
-bridges Panda joint state → end-effector pose for the data_config to
-consume, so the server rejects with ``State key 'state.x' must be in
-observation``. Tracked as
-`strands-labs/robots#156 <https://github.com/strands-labs/robots/issues/156>`_;
-not gating R5 — once #156 lands, ``--policy=groot`` runs end-to-end via
-this file with no example-side changes (the lifecycle tool, the
-serializer, and the camera install are all already wired and verified).
+**One open gap** affects the *number*, not the *pipeline*:
+``load_libero_suite`` registers BDDL goal predicates but doesn't load
+the LIBERO scene MJCFs (the ``libero`` pip package only ships BDDL
+files, not the corresponding MJCF scenes), so the policy runs against
+a bare Panda + per-task object jitter rather than the trained
+living-room scene. Wall-time IS authoritative for engine + policy +
+I/O; success rate is consistently ~0 on the OOD setup. Real success
+rate waits on a procedural BDDL → MJCF path upstream.
 """
 
 from __future__ import annotations

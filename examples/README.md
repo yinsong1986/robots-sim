@@ -68,7 +68,7 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---:|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | TBD @ TBD (groot) — see smoke note below | macOS / CPU OK |
+| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~62 s/ep @ 0.00 (groot, no LIBERO scene) — see smoke note below | macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -79,10 +79,17 @@ the table for reference.
 - `libero_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~0.8 s on
   a single-CPU dev box (success rate 0.0 — mock can't satisfy goals).
 
-The `--policy=groot` MuJoCo number drops in once the upstream BDDL fix
-([`strands-labs/robots#147`](https://github.com/strands-labs/robots/pull/147))
-lands on PyPI and a contributor with a GPU + Docker measures it
-against `libero_spatial/`.
+The `--policy=groot` MuJoCo number above (~62 s/ep on an L4) is
+measured against `nvidia/GR00T-N1.7-LIBERO/libero_10` after the
+upstream catch-up landed (#147 / #149 / #150 / #151 / #152 / #155 /
+#161 / #162). The 0.00 success rate is consistent with the still-open
+LIBERO scene-loading gap — `load_libero_suite` registers BDDL goal
+predicates but doesn't load the real LIBERO MJCFs (the `libero` pip
+package only ships BDDL files), so the policy runs against a bare
+Panda + per-task object jitter rather than the trained living-room
+scene. Real success rate waits on a procedural BDDL → MJCF
+scene-loading path; the wall-time IS authoritative for the engine +
+policy + I/O round-trip.
 
 The flagship driver
 [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)
