@@ -324,7 +324,45 @@ def main() -> None:
             f"--seed={args.seed}--policy={args.policy}"
         )
         video_dir = _date_dir()
-        sim.start_cameras_recording(cameras=["default"], output_dir=video_dir, name=rec_name)
+        # Pick the camera to record from. The LIBERO scene auto-loaded by
+        # `LiberoAdapter` (per `strands-labs/robots#165`) supplies cameras
+        # named `image` (third-person agentview) and `wrist_image`
+        # (gripper view). Without LIBERO loaded — e.g. on `--policy=mock`
+        # paths that hit the scene-gen ImportError fallback — only the
+        # world's `default` camera exists.
+        recording_camera = "image" if args.policy == "groot" else "default"
+
+        # Pre-warm the scene so `image` actually exists at recording-start
+        # time. `start_cameras_recording` looks up the camera by name in
+        # the live model and resolving fails if the scene hasn't been
+        # loaded yet — but `on_episode_start` (where scene-load happens)
+        # only runs *inside* `evaluate_benchmark`. We force the
+        # auto-generation + load here so the camera is registered before
+        # the recorder starts; subsequent per-episode reloads in the eval
+        # loop reuse the cached scene_path so the camera name stays
+        # stable across them.
+        if args.policy == "groot":
+            from strands_robots.simulation.benchmark import get_benchmark
+            import random as _random
+
+            spec = get_benchmark(args.task)
+            if spec.scene_path is None and getattr(spec, "_auto_generate_scene", False):
+                generated = spec._generate_scene_from_bddl()
+                if generated:
+                    spec.scene_path = generated
+            if spec.scene_path:
+                sim.load_scene(spec.scene_path)
+                # Re-add the robot since `load_scene` replaces the world.
+                # The LIBERO scene supplies its own Panda named `robot`,
+                # so this `add_robot` is a no-op when the scene already
+                # has one — but in case of cache misses or partial scene
+                # files, the call keeps the pre-flight check happy.
+                if "robot" not in sim.list_robots():
+                    sim.add_robot("robot", data_config="panda")
+
+        sim.start_cameras_recording(
+            cameras=[recording_camera], output_dir=video_dir, name=rec_name
+        )
         try:
             t0 = time.time()
             result = sim.evaluate_benchmark(
@@ -345,7 +383,7 @@ def main() -> None:
 
         json_payload = next(c["json"] for c in result["content"] if "json" in c)
         success_rate = json_payload["success_rate"]
-        video_path = os.path.join(video_dir, f"{rec_name}__default.mp4")
+        video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
 
         # Two grep-stable lines for R15 to subprocess-and-parse. Keep the
         # exact format (`policy=`, `task=`, `success_rate=`, `wall_time=`,
