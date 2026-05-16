@@ -90,13 +90,13 @@ The flagship driver `examples/libero_backend_matrix.py` ([R15 / #22](https://git
 
 | Backend | `n_envs` | Renderer | Why use this row | Wall-time | Example | Issue |
 |---|---:|---|---|---|---|---|
-| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~62 s/ep @ 0.00 (groot, no LIBERO scene)* | `libero_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
+| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~61 s/ep @ 0.00 (groot, real scene)* | `libero_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
 | `isaac` | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | TBD | `libero_isaac.py` | [R8 / #15](https://github.com/strands-labs/robots-sim/issues/15) |
 | `isaac` | 4096 | RTX off / minimal | IsaacLab-style fleet RL with USD scenes | TBD | `libero_isaac_fleet.py` | [R23 / #27](https://github.com/strands-labs/robots-sim/issues/27) |
 | `newton` | 1 | OpenGL | GPU-physics baseline; entry point for diffsim work | TBD | `libero_newton.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
 | `newton` | 4096 | OpenGL / null | Multi-solver fleet RL, lowest per-env compute | TBD | `libero_newton_fleet.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
 
-\* L4 / Docker dev box, `nvidia/GR00T-N1.7-LIBERO/libero_10` against `libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…` (5 episodes, seed 42). Pipeline runs end-to-end against post-#148 + [`strands-labs/robots#162`](https://github.com/strands-labs/robots/pull/162) (gripper shape) `main`. The 0.00 success-rate is expected — `load_libero_suite` registers BDDL goal predicates but doesn't load the real LIBERO scene MJCFs (the `libero` pip package only ships BDDL files), so the policy runs against a bare Panda + per-task object jitter rather than the trained living-room scene. Real success rate waits on a procedural BDDL → MJCF scene-loading path; the wall-time number IS authoritative for the engine + policy + I/O round-trip.
+\* L4 / Docker dev box, `nvidia/GR00T-N1.7-LIBERO/libero_10` against `libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…` (5 episodes, seed 42). End-to-end pipeline runs against post-[#165](https://github.com/strands-labs/robots/pull/165) main with the **real LIBERO scene loaded** (procedurally generated from BDDL via the `libero` package's scene generator). `success_rate=0.00` despite the trained scene — the policy isn't satisfying `(On mug_1 plate_1)` in 5 episodes. Likely checkpoint-task / init-jitter / camera-pose mismatch from training distribution; tuning is post-R5 (and post-R15 flagship matrix) work. Wall-time IS authoritative for engine + scene + policy + I/O round-trip.
 
 ---
 

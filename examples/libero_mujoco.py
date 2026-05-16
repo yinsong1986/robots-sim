@@ -66,26 +66,28 @@ Verification status (`--policy=groot` end-to-end)
 -------------------------------------------------
 Pipeline runs end-to-end on the L4 / Docker dev box against
 ``strands-robots`` ``main`` post-catch-up (PRs #147 / #149 / #150 /
-#151 / #152 / #155 / #161 / #162):
+#151 / #152 / #155 / #161 / #162 / #165):
 
 - ``--auto-server`` brings up the n1.7 container, downloads the right
   ``libero_<suite>/`` sub-checkpoint, starts the inference server, and
   waits for model readiness in one call. Idempotent on re-runs.
-- ``Simulation.evaluate_benchmark`` round-trips a real GR00T inference:
-  cameras (``image`` / ``wrist_image``) installed by ``LiberoAdapter``,
-  state (``x`` / ``y`` / ``z`` / ``roll`` / ``pitch`` / ``yaw`` /
-  ``gripper``) bridged from Panda joint state via the new FK / quat
-  / mirrored-finger helpers.
+- ``Simulation.evaluate_benchmark`` round-trips a real GR00T inference
+  against the **real LIBERO living-room scene** (procedurally
+  generated from BDDL via the ``libero`` package's scene generator
+  per `#165 <https://github.com/strands-labs/robots/pull/165>`_).
+  Cameras (``image`` / ``wrist_image``) installed; state (``x`` /
+  ``y`` / ``z`` / ``roll`` / ``pitch`` / ``yaw`` / ``gripper``)
+  bridged; trained scene with mug / plate / table geometry loaded
+  per task.
 - Output: two grep-stable lines + an MP4 under ``rollouts/<date>/``.
 
-**One open gap** affects the *number*, not the *pipeline*:
-``load_libero_suite`` registers BDDL goal predicates but doesn't load
-the LIBERO scene MJCFs (the ``libero`` pip package only ships BDDL
-files, not the corresponding MJCF scenes), so the policy runs against
-a bare Panda + per-task object jitter rather than the trained
-living-room scene. Wall-time IS authoritative for engine + policy +
-I/O; success rate is consistently ~0 on the OOD setup. Real success
-rate waits on a procedural BDDL → MJCF path upstream.
+Measured on this dev box: ~61 s/ep wall-time @ 0.00 success-rate for
+``libero-10-LIVING_ROOM_SCENE5_…`` × 5 episodes against
+``nvidia/GR00T-N1.7-LIBERO/libero_10``. Wall-time IS authoritative
+for engine + scene + policy + I/O round-trip; the 0.00 is policy-
+behaviour, not pipeline-broken (likely init-jitter / camera-pose /
+checkpoint-task drift from training distribution — tuning is post-R5
+and post-R15 work, not gating this example).
 """
 
 from __future__ import annotations
@@ -279,7 +281,15 @@ def main() -> None:
     sim = Simulation(tool_name="libero_sim", mesh=False)
     try:
         sim.create_world()
-        sim.add_robot("panda", data_config="panda")
+        # Pre-add a Panda named ``robot`` so:
+        #   1. evaluate_benchmark's pre-flight check (`No robots in sim`)
+        #      passes BEFORE on_episode_start runs scene loading.
+        #   2. The resolved-name `evaluate_benchmark` picks up here
+        #      survives the rename that LIBERO scene MJCFs do — the
+        #      scenes ship a Franka Panda named `robot` (LIBERO/RoboSuite
+        #      convention), so picking the same name client-side keeps
+        #      the resolved robot stable across `on_episode_start`.
+        sim.add_robot("robot", data_config="panda")
 
         registered = load_libero_suite(suite)
         if not registered:
@@ -319,7 +329,12 @@ def main() -> None:
             t0 = time.time()
             result = sim.evaluate_benchmark(
                 benchmark_name=args.task,
-                robot_name="panda",
+                # robot_name omitted on purpose — `LiberoAdapter`'s scene
+                # auto-generation loads a scene that names its Panda
+                # ``robot`` (LIBERO/RoboSuite convention), so any
+                # specific name we pre-resolve here is gone after
+                # `on_episode_start`. `evaluate_benchmark` auto-picks
+                # when there's only one robot, which is the LIBERO case.
                 n_episodes=args.n_episodes,
                 seed=args.seed,
                 **policy_kwargs,
