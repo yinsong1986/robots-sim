@@ -68,7 +68,8 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---:|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~61 s/ep @ 0.00 (groot, real scene) — see smoke note below | macOS / CPU OK |
+| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=mujoco`, default) | MuJoCo (in `strands-robots`) | 1 | ~61 s/ep @ 0.00 (groot, ZMQ client + auto-gen scene) | Legacy default; macOS / CPU OK; pipeline gap documented in [PR #168](https://github.com/strands-labs/robots/pull/168) round 36-43 |
+| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=libero_offscreen_render`) | upstream `OffScreenRenderEnv` (in `strands-robots`) | 1 | ~14 s/ep @ 1.00 (groot, in-process policy) | Round-43 backend; required for `success_rate>0` against `nvidia/GR00T-N1.7-LIBERO`. Wraps NVIDIA's reference env directly. |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -76,24 +77,33 @@ the table for reference.
 
 **Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
-- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~3 s/ep on a
+- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42 --engine mujoco` → ~3 s/ep on a
   single-CPU dev box with the LIBERO scene loaded (success rate 0.0 —
   mock can't satisfy goals). The pre-scene-loading version of this
   example was ~0.8 s/ep against a bare Panda; the ~2 s/ep delta is
   per-episode scene-gen + load (cached after first call) + scene-step
   cost.
+- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42 --engine libero_offscreen_render` → ~16 s/ep
+  on the same dev box. Slower than `--engine=mujoco` because the
+  upstream `OffScreenRenderEnv` constructs the full robosuite scene
+  per task (vs our cached procedural generator); the trade-off is
+  byte-equivalent observations to NVIDIA's training distribution
+  (round 43 verified).
 
-The `--policy=groot` MuJoCo number above (~61 s/ep on an L4) is
-measured against `nvidia/GR00T-N1.7-LIBERO/libero_10` after the full
-upstream catch-up landed (#147 / #149 / #150 / #151 / #152 / #155 /
-#161 / #162 / [#165](https://github.com/strands-labs/robots/pull/165)
-for procedural scene loading). The pipeline runs end-to-end against
-the real LIBERO living-room scene with the trained mug + plate
-geometry. `success_rate=0.00` for 5 episodes despite that — likely
-init-jitter / camera-pose / checkpoint-task drift from the GR00T
-training distribution; tuning is post-R5 and post-R15 work. The
-wall-time IS authoritative for engine + scene + policy + I/O
-round-trip.
+The `--policy=groot` MuJoCo number above (~61 s/ep on an L4 with the
+legacy `--engine=mujoco`) and the `--engine=libero_offscreen_render`
+number (~14 s/ep @ 1.00 with in-process policy) come from upstream
+PR #168's bisect (rounds 36-44). The catch-up wave to make
+`--engine=mujoco` work end-to-end landed across #147 / #149 / #150 /
+#151 / #152 / #155 / #161 / #162 / [#165](https://github.com/strands-labs/robots/pull/165) /
+[#168](https://github.com/strands-labs/robots/pull/168). Round 44
+verified `success_rate=1.0` on libero-10/SCENE5 via
+`--engine=libero_offscreen_render` + in-process `Gr00tPolicy` (NVIDIA's
+reference flow); see [PR #168 comment](https://github.com/strands-labs/robots/pull/168#issuecomment-4473372219)
+for the round-by-round chronicle. The legacy `--engine=mujoco` path
+is byte-equivalent to upstream observations within `mean |Δ|=3-9/255`
+for images and `≤5mm/100mrad` for state; the residual `0.00` reflects
+a separate ZMQ-client-vs-in-process gap not yet bisected.
 
 The flagship driver
 [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)

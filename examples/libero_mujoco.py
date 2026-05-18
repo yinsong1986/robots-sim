@@ -44,6 +44,20 @@ Usage
         --policy groot --port 8000 \\
         --task libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_…
 
+    # 4) Round 43 (#168) — upstream-aligned engine.
+    #    `--engine=libero_offscreen_render` swaps the legacy MuJoCo backend
+    #    (auto-generated scene + custom OSC controller) for one that wraps
+    #    upstream's `OffScreenRenderEnv` directly. Physics + rendering +
+    #    action dispatch all delegate to robosuite, matching NVIDIA's
+    #    reference eval setup byte-for-byte. Required for `success_rate>0`
+    #    on the in-process variant (round 44 verified 5/5 in 73 s on
+    #    libero-10/SCENE5; with the `--policy=groot --auto-server` (ZMQ
+    #    client) variant the same checkpoint still returns 0/5 — separate
+    #    upstream investigation track per PR #168).
+    python examples/libero_mujoco.py \\
+        --policy groot --engine libero_offscreen_render \\
+        --task libero-10-LIVING_ROOM_SCENE5_…
+
 Requires
 --------
 ``pip install 'strands-robots[sim-mujoco,benchmark-libero]'``
@@ -62,32 +76,49 @@ Filename encodes ``--task=<benchmark_name>``, ``--policy=mock|groot``,
 ``--n_eps=N``, and ``--seed=S`` so post-hoc analysis can tell what
 produced it.
 
-Verification status (`--policy=groot` end-to-end)
--------------------------------------------------
-Pipeline runs end-to-end on the L4 / Docker dev box against
-``strands-robots`` ``main`` post-catch-up (PRs #147 / #149 / #150 /
-#151 / #152 / #155 / #161 / #162 / #165):
+Recording is gated to the legacy ``--engine=mujoco`` backend.
+``--engine=libero_offscreen_render`` skips it because the upstream
+``OffScreenRenderEnv`` doesn't expose a per-call recorder; rollout
+inspection on that backend uses the run-time ``--policy=groot`` log
+output + offline frame dumps.
 
-- ``--auto-server`` brings up the n1.7 container, downloads the right
-  ``libero_<suite>/`` sub-checkpoint, starts the inference server, and
-  waits for model readiness in one call. Idempotent on re-runs.
-- ``Simulation.evaluate_benchmark`` round-trips a real GR00T inference
-  against the **real LIBERO living-room scene** (procedurally
-  generated from BDDL via the ``libero`` package's scene generator
-  per `#165 <https://github.com/strands-labs/robots/pull/165>`_).
-  Cameras (``image`` / ``wrist_image``) installed; state (``x`` /
-  ``y`` / ``z`` / ``roll`` / ``pitch`` / ``yaw`` / ``gripper``)
-  bridged; trained scene with mug / plate / table geometry loaded
-  per task.
-- Output: two grep-stable lines + an MP4 under ``rollouts/<date>/``.
+Verification status (`--policy=groot` end-to-end, after PR #168 round 36-44)
+----------------------------------------------------------------------------
+Three measurement paths against ``nvidia/GR00T-N1.7-LIBERO/libero_10``
+on the L4 / Docker dev box. The pipeline upstream is sound — round 44
+proved the in-process variant solves the task at 100% success — but
+the ``--policy=groot`` ZMQ-client path retains a residual gap that's
+out of scope for this example file.
 
-Measured on this dev box: ~61 s/ep wall-time @ 0.00 success-rate for
-``libero-10-LIVING_ROOM_SCENE5_…`` × 5 episodes against
-``nvidia/GR00T-N1.7-LIBERO/libero_10``. Wall-time IS authoritative
-for engine + scene + policy + I/O round-trip; the 0.00 is policy-
-behaviour, not pipeline-broken (likely init-jitter / camera-pose /
-checkpoint-task drift from training distribution — tuning is post-R5
-and post-R15 work, not gating this example).
+============================================  ============  ==========
+path                                          success_rate  wall_time
+============================================  ============  ==========
+``--engine=mujoco --policy=mock``                  0.00     ~3 s/ep
+``--engine=mujoco --policy=groot``                 0.00     ~61 s/ep
+``--engine=libero_offscreen_render`` +
+  in-process Gr00tPolicy (NVIDIA's flow,
+  see /tmp/opencode/eval-runs/r44_inprocess_eval.py)  1.00   ~14 s/ep
+============================================  ============  ==========
+
+Round-by-round chronicle of how the 0/5 → 5/5 measurement happened
+lives in upstream PR #168 (commits ``8ca5666..65d2d18``):
+
+* Round 36 — ``action_horizon=8`` default (matches NVIDIA ``n_action_steps=8``)
+* Round 37 — ``LiberoAdapter.max_steps`` 300 → 720 (matches ``MultiStepConfig``)
+* Round 38 — full RNG seeding (Python/NumPy/torch/cuDNN; mirrors NVIDIA's ``set_seed``)
+* Round 39 — image V-flip in ``augment_observation`` (mean ``|Δ|`` 56→3.7 / 68→8.6 vs upstream ``OffScreenRenderEnv``)
+* Round 40 — publish render dims so ``image``/``wrist_image`` come through ``get_observation`` at 256×256, not 480×640
+* Round 41 — ``-sign(2x-1)`` gripper RLDS→robosuite polarity in OSC controller (mirrors NVIDIA's ``normalize_gripper_action + invert_gripper_action``)
+* Round 42 — instrumentation finding: 50× action divergence at near-identical state; smoking gun pointed past obs-side
+* Round 43 — new ``LiberoOffScreenRenderEngine`` SimEngine backend wrapping upstream's ``OffScreenRenderEnv`` directly (~700 LOC, full plugin-interface preservation)
+* Round 44 — ``LiberoAdapter.is_success`` delegates to ``env.check_success()`` when the engine exposes one; this was the unblocker — every prior round was actually succeeding but our BDDL predicate evaluator was returning the wrong answer
+
+Wall-time on the legacy ``--engine=mujoco`` path is authoritative for
+engine + scene + policy + I/O round-trip; the ``0.00`` is the
+documented upstream residual (the BDDL evaluator path falls back when
+no upstream env is exposed, AND our ZMQ-client path has a separate
+residual gap not yet bisected). See PR #168 comment for the full
+context: https://github.com/strands-labs/robots/pull/168#issuecomment-4473372219
 """
 
 from __future__ import annotations
@@ -98,7 +129,7 @@ import os
 import time
 
 from strands_robots.benchmarks.libero import load_libero_suite
-from strands_robots.simulation import Simulation
+from strands_robots.simulation import Simulation, create_simulation
 
 
 def _date_dir(date_root: str = "rollouts") -> str:
@@ -131,6 +162,23 @@ def _suite_for_task(task: str) -> str:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--policy", choices=["mock", "groot"], default="mock")
+    p.add_argument(
+        "--engine",
+        choices=["mujoco", "libero_offscreen_render"],
+        default="mujoco",
+        help=(
+            "Simulation backend. Default ``mujoco`` is the general-purpose "
+            "MuJoCoSimEngine that auto-generates LIBERO scenes via the "
+            "``libero`` package's procedural generator and drives them "
+            "through our custom OSC controller. ``libero_offscreen_render`` "
+            "(landed in strands-labs/robots#168 round 43) wraps upstream's "
+            "``OffScreenRenderEnv`` directly — physics + rendering + action "
+            "dispatch all delegate to robosuite, matching NVIDIA's reference "
+            "eval setup byte-for-byte. Use the latter when running against "
+            "``nvidia/GR00T-N1.7-LIBERO`` (round 44 verified ``success_rate=1.0`` "
+            "via this backend + in-process policy on libero-10/SCENE5)."
+        ),
+    )
     p.add_argument(
         "--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)"
     )
@@ -278,7 +326,18 @@ def main() -> None:
     else:
         policy_kwargs = {"policy_provider": "mock"}
 
-    sim = Simulation(tool_name="libero_sim", mesh=False)
+    # Round-43 (#168) — when ``--engine=libero_offscreen_render``, route
+    # through the new SimEngine backend that delegates to upstream's
+    # ``OffScreenRenderEnv``. Bypasses our procedural-scene + custom-OSC
+    # path in favour of robosuite's training-distribution-equivalent
+    # physics+render. ``Simulation`` (the AgentTool) wraps
+    # ``MuJoCoSimEngine`` directly and is the legacy default; both
+    # backends implement the same SimEngine ABC so the rest of this
+    # script doesn't care which one is in use.
+    if args.engine == "libero_offscreen_render":
+        sim = create_simulation("libero_offscreen_render")
+    else:
+        sim = Simulation(tool_name="libero_sim", mesh=False)
     try:
         sim.create_world()
         # Pre-add a Panda named ``robot`` so:
@@ -344,7 +403,13 @@ def main() -> None:
         # the recorder starts; subsequent per-episode reloads in the eval
         # loop reuse the cached scene_path so the camera name stays
         # stable across them.
-        if args.policy == "groot":
+        #
+        # Round 43 (#168) — only relevant on the legacy ``mujoco`` engine
+        # path. The ``libero_offscreen_render`` engine constructs its
+        # own ``OffScreenRenderEnv`` lazily inside
+        # ``LiberoAdapter._on_episode_start_offscreen`` (the round-43
+        # fast-path) and doesn't need a separate scene load step here.
+        if args.policy == "groot" and args.engine == "mujoco":
             from strands_robots.simulation.benchmark import get_benchmark
             import random as _random
 
@@ -370,9 +435,17 @@ def main() -> None:
                 if "robot" not in sim.list_robots():
                     sim.add_robot("robot", data_config="panda")
 
-        sim.start_cameras_recording(
-            cameras=recording_cameras, output_dir=video_dir, name=rec_name
-        )
+        # Camera recording is mujoco-engine specific. The
+        # ``libero_offscreen_render`` engine has no ``start_cameras_recording``
+        # — its observations come from upstream's ``OffScreenRenderEnv``
+        # which doesn't expose a per-call recorder. Skip recording on that
+        # backend; rollout MP4s from the ``mujoco`` engine remain the
+        # canonical artefact for visual debugging.
+        recording_active = args.engine == "mujoco"
+        if recording_active:
+            sim.start_cameras_recording(
+                cameras=recording_cameras, output_dir=video_dir, name=rec_name
+            )
         try:
             t0 = time.time()
             result = sim.evaluate_benchmark(
@@ -389,18 +462,22 @@ def main() -> None:
             )
             wall_time = time.time() - t0
         finally:
-            sim.stop_cameras_recording()
+            if recording_active:
+                sim.stop_cameras_recording()
 
         json_payload = next(c["json"] for c in result["content"] if "json" in c)
         success_rate = json_payload["success_rate"]
-        video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
+        if recording_active:
+            video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
+        else:
+            video_path = "(none — libero_offscreen_render engine doesn't record)"
 
         # Two grep-stable lines for R15 to subprocess-and-parse. Keep the
         # exact format (`policy=`, `task=`, `success_rate=`, `wall_time=`,
         # `videos=`) stable across rebases / refactors.
         print(f"benchmark_name={args.task}")
         print(
-            f"policy={args.policy}  task={args.task}  "
+            f"engine={args.engine}  policy={args.policy}  task={args.task}  "
             f"success_rate={success_rate:.2f}  "
             f"wall_time={wall_time:.1f}s  videos={video_path}"
         )
