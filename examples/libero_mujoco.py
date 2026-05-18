@@ -331,6 +331,9 @@ def main() -> None:
         # paths that hit the scene-gen ImportError fallback — only the
         # world's `default` camera exists.
         recording_camera = "image" if args.policy == "groot" else "default"
+        recording_cameras = (
+            ["image", "wrist_image"] if args.policy == "groot" else ["default"]
+        )
 
         # Pre-warm the scene so `image` actually exists at recording-start
         # time. `start_cameras_recording` looks up the camera by name in
@@ -352,16 +355,23 @@ def main() -> None:
                     spec.scene_path = generated
             if spec.scene_path:
                 sim.load_scene(spec.scene_path)
-                # Re-add the robot since `load_scene` replaces the world.
-                # The LIBERO scene supplies its own Panda named `robot`,
-                # so this `add_robot` is a no-op when the scene already
-                # has one — but in case of cache misses or partial scene
-                # files, the call keeps the pre-flight check happy.
+                # Prewarm BEFORE the redundant-Panda check below, so
+                # prewarm's _register_default_robot wraps the
+                # scene-supplied Panda first → list_robots() returns
+                # ['robot'] → the if-check below is False → no
+                # redundant add_robot recompile that would change
+                # model.nq away from the LIBERO width init_states[0]
+                # is sized for (#168 round 18 finding).
+                if hasattr(spec, "prewarm"):
+                    spec.prewarm(sim)
+                # Defensive fallback for non-LIBERO benchmarks that
+                # don't expose `prewarm` and don't ship a Panda in
+                # the loaded scene MJCF.
                 if "robot" not in sim.list_robots():
                     sim.add_robot("robot", data_config="panda")
 
         sim.start_cameras_recording(
-            cameras=[recording_camera], output_dir=video_dir, name=rec_name
+            cameras=recording_cameras, output_dir=video_dir, name=rec_name
         )
         try:
             t0 = time.time()
