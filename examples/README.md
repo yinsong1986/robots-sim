@@ -67,9 +67,9 @@ unless a row says otherwise; mock-policy smoke runs are listed below
 the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
-|---|---|---:|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=mujoco`, default) | MuJoCo (in `strands-robots`) | 1 | ~61 s/ep @ 0.00 (groot, ZMQ client + auto-gen scene) | Legacy default; macOS / CPU OK; pipeline gap documented in [PR #168](https://github.com/strands-labs/robots/pull/168) round 36-43 |
-| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=libero_offscreen_render`) | upstream `OffScreenRenderEnv` (in `strands-robots`) | 1 | ~14 s/ep @ 1.00 (groot, in-process policy) | Round-43 backend; required for `success_rate>0` against `nvidia/GR00T-N1.7-LIBERO`. Wraps NVIDIA's reference env directly. |
+|---|---|---|---|---|
+| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=mujoco`, default) | MuJoCo (in `strands-robots`) | 1 | ~34 s/ep @ 0.80 (groot, ZMQ client) | Best path post-PR #175; macOS / CPU OK |
+| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=libero_offscreen_render`) | upstream `OffScreenRenderEnv` (in `strands-robots`) | 1 | ~78 s/ep @ 0.40 (groot, ZMQ client) | Wraps NVIDIA's reference env directly; fewer custom tunings, lower success rate post-PR #175 |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -87,23 +87,31 @@ the table for reference.
   on the same dev box. Slower than `--engine=mujoco` because the
   upstream `OffScreenRenderEnv` constructs the full robosuite scene
   per task (vs our cached procedural generator); the trade-off is
-  byte-equivalent observations to NVIDIA's training distribution
-  (round 43 verified).
+  byte-equivalent observations to NVIDIA's training distribution.
 
-The `--policy=groot` MuJoCo number above (~61 s/ep on an L4 with the
-legacy `--engine=mujoco`) and the `--engine=libero_offscreen_render`
-number (~14 s/ep @ 1.00 with in-process policy) come from upstream
-PR #168's bisect (rounds 36-44). The catch-up wave to make
-`--engine=mujoco` work end-to-end landed across #147 / #149 / #150 /
-#151 / #152 / #155 / #161 / #162 / [#165](https://github.com/strands-labs/robots/pull/165) /
-[#168](https://github.com/strands-labs/robots/pull/168). Round 44
-verified `success_rate=1.0` on libero-10/SCENE5 via
-`--engine=libero_offscreen_render` + in-process `Gr00tPolicy` (NVIDIA's
-reference flow); see [PR #168 comment](https://github.com/strands-labs/robots/pull/168#issuecomment-4473372219)
-for the round-by-round chronicle. The legacy `--engine=mujoco` path
-is byte-equivalent to upstream observations within `mean |Δ|=3-9/255`
-for images and `≤5mm/100mrad` for state; the residual `0.00` reflects
-a separate ZMQ-client-vs-in-process gap not yet bisected.
+The `--policy=groot` numbers above (measured 2026-05-19) require the
+full upstream catch-up wave landed: [#168](https://github.com/strands-labs/robots/pull/168)
+(rounds 36-44 — squashed at upstream `34f8c37`) +
+[#172](https://github.com/strands-labs/robots/pull/172) (closes #169:
+ZMQ wire-format `image_rotation_180` + engine V-flip) +
+[#173](https://github.com/strands-labs/robots/pull/173) (closes #170:
+BDDL evaluator agreement with `env.check_success`) +
+[#175](https://github.com/strands-labs/robots/pull/175) (closes #171
++ #176: `MuJoCoSimEngine` state observation parity, OSC torque
+parity, gripper home pose, BDDL `_main` suffix fallback). With this
+stack `--engine=mujoco --policy=groot` reaches 4/5 success at
+~34 s/ep wall-time on libero-10/SCENE5 — was 0/5 at ~119 s/ep
+before PR #175. The `mujoco` engine outperforms
+`libero_offscreen_render` because PR #175's tuning was specifically
+targeted at it.
+
+The first observed run got 5/5 (100%); the same seed in a separate
+process today got 4/5 (80%). Acceptance is `success_rate > 0`, not
+a specific number — the eval has run-to-run variance from
+non-determinism in either the `LiberoOffScreenRenderEngine`
+diagnostic path's missing `_set_eval_seed` call or the GR00T docker
+server's CUDA non-determinism. Tracked as a follow-up if it matters
+for matrix consistency.
 
 The flagship driver
 [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)

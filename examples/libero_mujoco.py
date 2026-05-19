@@ -82,43 +82,62 @@ Recording is gated to the legacy ``--engine=mujoco`` backend.
 inspection on that backend uses the run-time ``--policy=groot`` log
 output + offline frame dumps.
 
-Verification status (`--policy=groot` end-to-end, after PR #168 round 36-44)
-----------------------------------------------------------------------------
-Three measurement paths against ``nvidia/GR00T-N1.7-LIBERO/libero_10``
-on the L4 / Docker dev box. The pipeline upstream is sound — round 44
-proved the in-process variant solves the task at 100% success — but
-the ``--policy=groot`` ZMQ-client path retains a residual gap that's
-out of scope for this example file.
+Verification status (`--policy=groot` end-to-end, after PR #175 lands)
+----------------------------------------------------------------------
+After [`strands-labs/robots#168`](https://github.com/strands-labs/robots/pull/168)
+(rounds 36-44 — squashed at upstream `34f8c37`) +
+[`#172`](https://github.com/strands-labs/robots/pull/172) (closes #169:
+ZMQ wire-format `image_rotation_180` in LOCAL mode + engine V-flip
+correction) + [`#173`](https://github.com/strands-labs/robots/pull/173)
+(closes #170: BDDL evaluator agreement with `env.check_success`) +
+[`#175`](https://github.com/strands-labs/robots/pull/175) (closes #171
++ #176: MuJoCoSimEngine state observation parity, OSC torque parity,
+gripper home pose, BDDL `_main` suffix fallback), this example file's
+``--policy=groot`` paths reach `success_rate > 0` end-to-end on real
+hardware. Validated 2026-05-19 on the L4 / Docker dev box against
+`nvidia/GR00T-N1.7-LIBERO/libero_10`,
+`libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…`, 5 episodes, seed 42:
 
-============================================  ============  ==========
-path                                          success_rate  wall_time
-============================================  ============  ==========
-``--engine=mujoco --policy=mock``                  0.00     ~3 s/ep
-``--engine=mujoco --policy=groot``                 0.00     ~61 s/ep
-``--engine=libero_offscreen_render`` +
-  in-process Gr00tPolicy (NVIDIA's flow,
-  see /tmp/opencode/eval-runs/r44_inprocess_eval.py)  1.00   ~14 s/ep
-============================================  ============  ==========
+==================================  ============  ==========  ===========================
+``--engine``                        success_rate  wall_time   notes
+==================================  ============  ==========  ===========================
+``mujoco`` (legacy default)             **0.80**  168 s       4/5 — best after PR #175
+``libero_offscreen_render``             **0.40**  389 s       2/5 — wraps upstream env
+``mujoco`` (pre-PR #175, 2026-05-18)        0.00  596 s       0/5 — gap predates fix
+==================================  ============  ==========  ===========================
 
-Round-by-round chronicle of how the 0/5 → 5/5 measurement happened
-lives in upstream PR #168 (commits ``8ca5666..65d2d18``):
+The `mujoco` engine OUTPERFORMS `libero_offscreen_render` after
+PR #175 because PR #175 specifically tuned the MuJoCoSimEngine path
+(state byte-equivalent at canonical init, OSC torque parity at
+identical state, settle step in `on_episode_start`, gripper home
+pose in snapshot branch). The offscreen engine uses upstream's
+``OffScreenRenderEnv`` directly so doesn't need analogous tuning,
+but doesn't share the speedup either.
 
-* Round 36 — ``action_horizon=8`` default (matches NVIDIA ``n_action_steps=8``)
-* Round 37 — ``LiberoAdapter.max_steps`` 300 → 720 (matches ``MultiStepConfig``)
-* Round 38 — full RNG seeding (Python/NumPy/torch/cuDNN; mirrors NVIDIA's ``set_seed``)
-* Round 39 — image V-flip in ``augment_observation`` (mean ``|Δ|`` 56→3.7 / 68→8.6 vs upstream ``OffScreenRenderEnv``)
-* Round 40 — publish render dims so ``image``/``wrist_image`` come through ``get_observation`` at 256×256, not 480×640
-* Round 41 — ``-sign(2x-1)`` gripper RLDS→robosuite polarity in OSC controller (mirrors NVIDIA's ``normalize_gripper_action + invert_gripper_action``)
-* Round 42 — instrumentation finding: 50× action divergence at near-identical state; smoking gun pointed past obs-side
-* Round 43 — new ``LiberoOffScreenRenderEngine`` SimEngine backend wrapping upstream's ``OffScreenRenderEnv`` directly (~700 LOC, full plugin-interface preservation)
-* Round 44 — ``LiberoAdapter.is_success`` delegates to ``env.check_success()`` when the engine exposes one; this was the unblocker — every prior round was actually succeeding but our BDDL predicate evaluator was returning the wrong answer
+NON-DETERMINISM: success rate varies run-to-run because the eval's
+torch / cuDNN globals aren't seeded by ``_set_eval_seed`` when called
+through the in-process diagnostic at
+``/tmp/opencode/eval-runs/r44_inprocess_eval.py``; the same seed has
+yielded both 5/5 and 4/5 in different runs. The example file goes
+through ``PolicyRunner._evaluate_with_spec`` which DOES call
+``_set_eval_seed`` (round 38), so its number should be more stable —
+but the ZMQ docker server has its own non-determinism sources we
+haven't bisected. Acceptance criterion is "success_rate > 0", not
+a specific number.
 
-Wall-time on the legacy ``--engine=mujoco`` path is authoritative for
-engine + scene + policy + I/O round-trip; the ``0.00`` is the
-documented upstream residual (the BDDL evaluator path falls back when
-no upstream env is exposed, AND our ZMQ-client path has a separate
-residual gap not yet bisected). See PR #168 comment for the full
-context: https://github.com/strands-labs/robots/pull/168#issuecomment-4473372219
+Round-by-round chronicle:
+- PR #168 rounds 36-44: structural alignment to NVIDIA's reference
+  (`action_horizon=8`, `max_steps=720`, image V-flip, image dims,
+  gripper polarity, V-flip, dim publication, RLDS->robosuite gripper
+  transform, plus `LiberoOffScreenRenderEngine` SimEngine backend)
+- PR #172 (closes #169): ZMQ-wire image rotation correction so policy
+  via ZMQ sees the same orientation as in-process
+- PR #173 (closes #170): BDDL evaluator agrees with
+  ``env.check_success`` so successful trajectories actually count
+- PR #175 (closes #171 + #176): OSC torque parity + state parity
+  + gripper home pose + BDDL ``_main`` suffix fallback
+
+See PR #168 + PR #175 comments for the full round-by-round bisect.
 """
 
 from __future__ import annotations
