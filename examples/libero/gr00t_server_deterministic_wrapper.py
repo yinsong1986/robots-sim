@@ -14,7 +14,7 @@ is part of the standard server protocol per server_client.py:94). For
 clients that don't call reset, the seed is also applied at server start.
 
 Run via:
-  docker run ... -v /tmp/opencode/eval-runs/server_deterministic_wrapper.py:/srv_wrap.py \\
+  docker run ... -v examples/libero/gr00t_server_deterministic_wrapper.py:/srv_wrap.py \\
     gr00t:latest python /srv_wrap.py --model-path ... --use-sim-policy-wrapper --port 8000
 
 Set STRANDS_GR00T_SERVER_SEED=<int> to override the default seed (42).

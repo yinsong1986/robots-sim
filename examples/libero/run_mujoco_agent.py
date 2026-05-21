@@ -18,16 +18,16 @@ Usage
 ::
 
     # 1) Smoke test:
-    python examples/libero_mujoco_agent.py --policy mock
+    python examples/libero/run_mujoco_agent.py --policy mock
 
     # 2) Real run; agent starts the GR00T service against the right
     #    `libero_<suite>/` sub-checkpoint of `nvidia/GR00T-N1.7-LIBERO`
     #    when asked. Pre-condition: HF auth + Docker access; the agent
     #    runs the download / start commands itself.
-    python examples/libero_mujoco_agent.py --policy groot --port 8000
+    python examples/libero/run_mujoco_agent.py --policy groot --port 8000
 
     # 3) Different LIBERO task; agent picks the matching subfolder.
-    python examples/libero_mujoco_agent.py \\
+    python examples/libero/run_mujoco_agent.py \\
         --task libero-spatial-pick_up_the_milk_and_place_it_in_the_basket
 
 Requires
@@ -46,7 +46,7 @@ Notes
 -----
 - Output is non-deterministic by design (LLM-generated summary). R15
   does not ingest this file; the deterministic numbers live in
-  ``libero_mujoco.py``.
+  ``run_mujoco.py`` (sibling file).
 - Records video to ``rollouts/YYYY_MM_DD/`` via the agent's
   ``record_video=True`` choice; filename includes the ``--agent`` marker
   and ``policy=mock|groot`` so per-file post-hoc analysis can tell which
@@ -111,7 +111,7 @@ def main() -> None:
             agent(
                 f"Start the GR00T inference service on port {args.port} using "
                 f"the `{suite}` subfolder of `nvidia/GR00T-N1.7-LIBERO` and "
-                f"data_config 'libero'. If the subfolder isn't already at "
+                f"data_config 'libero_panda'. If the subfolder isn't already at "
                 f"`checkpoints/GR00T-N1.7-LIBERO/{suite}/`, download it first "
                 f"with `hf download nvidia/GR00T-N1.7-LIBERO --include "
                 f"'{suite}/*' --local-dir checkpoints/GR00T-N1.7-LIBERO`."
@@ -120,7 +120,7 @@ def main() -> None:
                 f"using the GR00T policy on localhost:{args.port} with "
                 f"`policy_provider='groot'` and "
                 f"`policy_config={{'host': 'localhost', 'port': {args.port}, "
-                f"'data_config': 'libero'}}`"
+                f"'data_config': 'libero_panda'}}`"
             )
         else:
             policy_phrase = "using the mock policy (`policy_provider='mock'`)"

@@ -48,13 +48,13 @@ sub-checkpoints** — `libero_spatial/`, `libero_10/`, `libero_object/`,
 `libero_goal/` — each finetuned end-to-end on the matching LIBERO
 suite. The `--task <libero-<suite>-<task_stem>>` flag auto-derives
 which subfolder to use; service-start commands (Strands tool *and*
-bare-Docker fallback) live in `libero_mujoco.py`'s docstring;
-`libero_mujoco_agent.py` makes the agent itself run them based on
+bare-Docker fallback) live in `libero/run_mujoco.py`'s docstring;
+`libero/run_mujoco_agent.py` makes the agent itself run them based on
 `--task`'s suite.
 
 The mock invocation's wall-time is a smoke-test reference only; **the
 canonical mujoco baseline number for the matrix table is the
-`--policy=groot` measurement of `libero_mujoco.py`** against the
+`--policy=groot` measurement of `libero/run_mujoco.py`** against the
 `libero_spatial/` sub-checkpoint.
 
 ## Backend matrix
@@ -68,7 +68,7 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client) | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
+| [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client) | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -76,7 +76,7 @@ the table for reference.
 
 **Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
-- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~3 s/ep on a
+- `libero/run_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~3 s/ep on a
   single-CPU dev box with the LIBERO scene loaded (success rate 0.0 —
   mock can't satisfy goals). The pre-scene-loading version of this
   example was ~0.8 s/ep against a bare Panda; the ~2 s/ep delta is
@@ -118,7 +118,7 @@ across both seed=42 and seed=100 in 44.3-44.8s. Acceptance criterion
 For users who want server-side determinism (per-episode CUDA reseed
 matching client-side `policy.reset(seed=...)`), an optional drop-in
 docker wrapper is available at
-[`gr00t_server_deterministic_wrapper.py`](gr00t_server_deterministic_wrapper.py).
+[`libero/gr00t_server_deterministic_wrapper.py`](libero/gr00t_server_deterministic_wrapper.py).
 The example file works WITHOUT this wrapper (verified at 5/5 above) —
 it's only needed when bit-exact run-to-run reproducibility matters.
 
@@ -132,22 +132,22 @@ The flagship driver
 pip install 'strands-robots[sim-mujoco,benchmark-libero]'
 
 # 1) Programmatic, deterministic, no LLM. R15 ingests this output.
-python examples/libero_mujoco.py --policy mock --n-episodes 5
+python examples/libero/run_mujoco.py --policy mock --n-episodes 5
 
 # 2) Strands-Agent + natural language. Requires a configured LLM
 #    provider (Bedrock by default — see https://strandsagents.com/).
 pip install strands-agents
-python examples/libero_mujoco_agent.py --policy mock
+python examples/libero/run_mujoco_agent.py --policy mock
 
 # 3) Real eval against `libero_spatial/`. Programmatic file's docstring
 #    has the three-step sequence (download subfolder → start service →
 #    run); the agent file lets the agent run those steps itself based
 #    on --task's suite.
-python examples/libero_mujoco.py --policy groot --port 8000 --n-episodes 50
-python examples/libero_mujoco_agent.py --policy groot --port 8000
+python examples/libero/run_mujoco.py --policy groot --port 8000 --n-episodes 50
+python examples/libero/run_mujoco_agent.py --policy groot --port 8000
 
 # 4) Different LIBERO task; suite auto-derived from --task:
-python examples/libero_mujoco.py \
+python examples/libero/run_mujoco.py \
     --task libero-spatial-pick_up_the_milk_and_place_it_in_the_basket
 ```
 
@@ -174,6 +174,6 @@ layout and timestamped name pattern are preserved from the deleted
 `strands-robots-sim` 0.1.x shipped `SimEnv` / `SteppedSimEnv` plus a
 natural-language `libero_example.py`. Those code paths moved upstream
 in 0.2.0 — see [`MIGRATION.md`](MIGRATION.md) for the explicit
-`SimEnv → libero_mujoco.py`, `agent("Run the task ...") →
-libero_mujoco_agent.py`, and `SteppedSimEnv → R24 / #29 + upstream U6`
+`SimEnv → libero/run_mujoco.py`, `agent("Run the task ...") →
+libero/run_mujoco_agent.py`, and `SteppedSimEnv → R24 / #29 + upstream U6`
 mapping.

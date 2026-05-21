@@ -90,7 +90,7 @@ The flagship driver `examples/libero_backend_matrix.py` ([R15 / #22](https://git
 
 | Backend | `n_envs` | Renderer | Why use this row | Wall-time | Example | Issue |
 |---|---:|---|---|---|---|---|
-| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~9 s/ep @ 1.00 (groot)* | `libero_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
+| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~9 s/ep @ 1.00 (groot)* | `libero/run_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
 | `isaac` | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | TBD | `libero_isaac.py` | [R8 / #15](https://github.com/strands-labs/robots-sim/issues/15) |
 | `isaac` | 4096 | RTX off / minimal | IsaacLab-style fleet RL with USD scenes | TBD | `libero_isaac_fleet.py` | [R23 / #27](https://github.com/strands-labs/robots-sim/issues/27) |
 | `newton` | 1 | OpenGL | GPU-physics baseline; entry point for diffsim work | TBD | `libero_newton.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
@@ -109,7 +109,7 @@ Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
   - [x] R3 / [#10](https://github.com/strands-labs/robots-sim/issues/10) — remove duplicated GR00T policy / inference tool / tests / scripts / docs
   - [x] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
 - **Stage 2 — MuJoCo LIBERO baseline**
-  - [ ] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero_mujoco.py` + `examples/README.md`
+  - [ ] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero/run_mujoco.py` + `examples/README.md`
 - **Stage 3 — Isaac Sim** (ships with v0.3.0)
   - [ ] R6 / [#13](https://github.com/strands-labs/robots-sim/issues/13) — entry-point backend registration
   - [ ] R7 / [#14](https://github.com/strands-labs/robots-sim/issues/14) — `IsaacSimulation(SimEngine)` backend

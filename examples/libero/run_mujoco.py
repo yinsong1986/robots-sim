@@ -4,7 +4,7 @@
 One-shot programmatic flow — replaces the deleted ``SimEnv`` pattern.
 Scripted ``sim.evaluate_benchmark(...)`` call: the "if you just want to
 run LIBERO from a Python script" file. For the natural-language /
-``Agent``-driven version, see ``libero_mujoco_agent.py``.
+``Agent``-driven version, see ``run_mujoco_agent.py`` (sibling file).
 
 Used by R15's backend-matrix flagship; keeps two grep-stable lines
 (``benchmark_name=...`` and ``policy=... task=... success_rate=... wall_time=...s``)
@@ -15,7 +15,7 @@ Usage
 ::
 
     # 1) Smoke test, no GPU required:
-    python examples/libero_mujoco.py --policy mock --n-episodes 5
+    python examples/libero/run_mujoco.py --policy mock --n-episodes 5
 
     # 2) Real LIBERO eval against `nvidia/GR00T-N1.7-LIBERO`. By default
     #    the script auto-orchestrates the GR00T inference service via the
@@ -28,19 +28,19 @@ Usage
     #    Pre-condition: HF token at `~/.cache/huggingface/token` with
     #    access to `nvidia/Cosmos-Reason2-2B` (the gated VLM backbone) +
     #    Docker + an NVIDIA GPU.
-    python examples/libero_mujoco.py --policy groot --port 8000 --n-episodes 50
+    python examples/libero/run_mujoco.py --policy groot --port 8000 --n-episodes 50
 
     # 2b) If you'd rather manage the inference service yourself
     #     (multi-eval session, custom container config, etc.), pass
     #     --no-auto-server and run the lifecycle tool ahead of time.
     #     The setup commands live in `strands-labs/robots#148`'s
     #     "Reproduction" section.
-    python examples/libero_mujoco.py --policy groot --no-auto-server --port 8000
+    python examples/libero/run_mujoco.py --policy groot --no-auto-server --port 8000
 
     # 3) Different LIBERO suite + task. Suite is auto-derived from --task,
     #    so the lifecycle tool downloads the matching `libero_<suite>/`
     #    sub-checkpoint:
-    python examples/libero_mujoco.py \\
+    python examples/libero/run_mujoco.py \\
         --policy groot --port 8000 \\
         --task libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_…
 
@@ -110,8 +110,8 @@ Optional server-side determinism wrapper
 
 For users who need bit-exact run-to-run reproducibility (e.g. CI
 pinning a specific success_rate), a drop-in docker wrapper is
-available at ``examples/gr00t_server_deterministic_wrapper.py``. It
-sets ``cudnn.deterministic=True`` + ``cudnn.benchmark=False`` +
+available at ``examples/libero/gr00t_server_deterministic_wrapper.py``.
+It sets ``cudnn.deterministic=True`` + ``cudnn.benchmark=False`` +
 ``CUBLAS_WORKSPACE_CONFIG=":4096:8"`` server-side and monkey-patches
 ``Gr00tPolicy.reset`` to apply the per-episode seed PR #188's
 client-side plumbing forwards. The example file works WITHOUT this
@@ -121,7 +121,7 @@ of the same seed.
 
 Mount with::
 
-    docker run … -v examples/gr00t_server_deterministic_wrapper.py:/srv_wrap.py \\
+    docker run … -v examples/libero/gr00t_server_deterministic_wrapper.py:/srv_wrap.py \\
         gr00t:latest python /srv_wrap.py --model-path … --use-sim-policy-wrapper --port 8000
 """
 
