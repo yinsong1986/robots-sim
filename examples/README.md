@@ -68,8 +68,7 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=mujoco`, default) | MuJoCo (in `strands-robots`) | 1 | ~34 s/ep @ 0.80 (groot, ZMQ client) | Best path post-PR #175; macOS / CPU OK |
-| [`libero_mujoco.py`](libero_mujoco.py) (`--engine=libero_offscreen_render`) | upstream `OffScreenRenderEnv` (in `strands-robots`) | 1 | ~78 s/ep @ 0.40 (groot, ZMQ client) | Wraps NVIDIA's reference env directly; fewer custom tunings, lower success rate post-PR #175 |
+| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~54 s/ep @ 0.60-0.92 (groot, ZMQ client) | Post-[#186](https://github.com/strands-labs/robots/pull/186) `MuJoCoSimEngine` is byte-equivalent to upstream LIBERO; macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -77,41 +76,38 @@ the table for reference.
 
 **Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
-- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42 --engine mujoco` → ~3 s/ep on a
+- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42` → ~3 s/ep on a
   single-CPU dev box with the LIBERO scene loaded (success rate 0.0 —
   mock can't satisfy goals). The pre-scene-loading version of this
   example was ~0.8 s/ep against a bare Panda; the ~2 s/ep delta is
   per-episode scene-gen + load (cached after first call) + scene-step
   cost.
-- `libero_mujoco.py --policy mock --n-episodes 10 --seed 42 --engine libero_offscreen_render` → ~16 s/ep
-  on the same dev box. Slower than `--engine=mujoco` because the
-  upstream `OffScreenRenderEnv` constructs the full robosuite scene
-  per task (vs our cached procedural generator); the trade-off is
-  byte-equivalent observations to NVIDIA's training distribution.
 
-The `--policy=groot` numbers above (measured 2026-05-19) require the
-full upstream catch-up wave landed: [#168](https://github.com/strands-labs/robots/pull/168)
-(rounds 36-44 — squashed at upstream `34f8c37`) +
-[#172](https://github.com/strands-labs/robots/pull/172) (closes #169:
-ZMQ wire-format `image_rotation_180` + engine V-flip) +
-[#173](https://github.com/strands-labs/robots/pull/173) (closes #170:
-BDDL evaluator agreement with `env.check_success`) +
-[#175](https://github.com/strands-labs/robots/pull/175) (closes #171
-+ #176: `MuJoCoSimEngine` state observation parity, OSC torque
-parity, gripper home pose, BDDL `_main` suffix fallback). With this
-stack `--engine=mujoco --policy=groot` reaches 4/5 success at
-~34 s/ep wall-time on libero-10/SCENE5 — was 0/5 at ~119 s/ep
-before PR #175. The `mujoco` engine outperforms
-`libero_offscreen_render` because PR #175's tuning was specifically
-targeted at it.
+The `--policy=groot` number above (~54 s/ep on an L4) is measured
+against `nvidia/GR00T-N1.7-LIBERO/libero_10` after the full upstream
+catch-up wave landed:
+[#168](https://github.com/strands-labs/robots/pull/168) (rounds 36-44)
++ [#172](https://github.com/strands-labs/robots/pull/172) (closes #169:
+ZMQ wire-format `image_rotation_180` + engine V-flip)
++ [#173](https://github.com/strands-labs/robots/pull/173) (closes #170:
+BDDL evaluator agreement with `env.check_success`)
++ [#175](https://github.com/strands-labs/robots/pull/175) (closes #171
++ #176: `MuJoCoSimEngine` state observation parity, OSC torque parity,
+gripper home pose, BDDL `_main` suffix fallback)
++ [#180](https://github.com/strands-labs/robots/pull/180) (closes #179:
+public `set_eval_seed` + per-episode reseed for reproducible LIBERO
+eval)
++ [#184](https://github.com/strands-labs/robots/pull/184) (closes #181:
+preserve `<compiler inertiagrouprange>` in cached MJCF for inertia
+parity)
++ [#186](https://github.com/strands-labs/robots/pull/186) (closes #178:
+retire `LiberoOffScreenRenderEngine`; `MuJoCoSimEngine` is now
+byte-equivalent to upstream LIBERO with mean `success_rate=0.92`).
 
-The first observed run got 5/5 (100%); the same seed in a separate
-process today got 4/5 (80%). Acceptance is `success_rate > 0`, not
-a specific number — the eval has run-to-run variance from
-non-determinism in either the `LiberoOffScreenRenderEngine`
-diagnostic path's missing `_set_eval_seed` call or the GR00T docker
-server's CUDA non-determinism. Tracked as a follow-up if it matters
-for matrix consistency.
+Single-sample re-runs at the same seed have produced 0.60 / 0.80 /
+0.92 in different processes — bounded variance from CUDA
+non-determinism in the GR00T docker server. Acceptance is
+`success_rate > 0`, not a specific number.
 
 The flagship driver
 [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)
