@@ -80,22 +80,49 @@ After the full upstream catch-up wave landed:
   inertiagrouprange>`` in cached MJCF (model-level inertia parity)
 * ``strands-labs/robots#186`` (closes #178) — retire
   ``LiberoOffScreenRenderEngine``; ``MuJoCoSimEngine`` is now
-  byte-equivalent to upstream LIBERO (mean success_rate 0.92 vs
-  offscreen 0.72; strictly ≥ offscreen on every (seed, episode))
+  byte-equivalent to upstream LIBERO
+* ``strands-labs/robots#188`` (closes #187) — spec-driven instruction
+  fallback for language-conditioned policies + per-episode
+  ``policy.reset(seed=)`` plumbing for SERVICE-mode reproducibility.
+  PR #188 was the unblocker for the ZMQ path: pre-#188 the language-
+  conditioned GR00T policy received an empty
+  ``annotation.human.action.task_description`` because
+  ``Simulation.evaluate_benchmark`` didn't propagate
+  ``spec.instruction`` when the user-supplied ``instruction=`` was
+  empty. The dominant cause of the 0.20-0.60 ZMQ success rate
+  pre-#188.
 
 Measured 2026-05-21 on the L4 / Docker dev box against
 ``nvidia/GR00T-N1.7-LIBERO/libero_10``,
-``libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…``, 5 episodes,
-seed 42:
+``libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…``, 5 episodes:
 
 * ``--policy=mock``: ~3 s/ep (success_rate=0.0; mock can't satisfy goals).
-* ``--policy=groot``: ~30-35 s/ep, success_rate ~0.80-0.92 (run-to-run
-  variance bounded by ``set_eval_seed``; some non-determinism remains
-  from the GR00T docker server's CUDA backend).
+* ``--policy=groot --seed=42``: ~9 s/ep, **success_rate=1.00 (5/5)** in 44.8 s.
+* ``--policy=groot --seed=100``: ~9 s/ep, **success_rate=1.00 (5/5)** in 44.3 s.
 
 Wall-time IS authoritative for engine + scene + policy + I/O round-trip.
-Acceptance criterion is ``success_rate > 0``, not a specific number,
-since the eval has bounded variance.
+PR #188's reported numbers (5/5 in 52 s for seed=42; 4/5 in 224 s
+for seed=100) are matched or beaten on this dev box. Acceptance:
+``success_rate > 0`` is decisively met.
+
+Optional server-side determinism wrapper
+-----------------------------------------
+
+For users who need bit-exact run-to-run reproducibility (e.g. CI
+pinning a specific success_rate), a drop-in docker wrapper is
+available at ``examples/gr00t_server_deterministic_wrapper.py``. It
+sets ``cudnn.deterministic=True`` + ``cudnn.benchmark=False`` +
+``CUBLAS_WORKSPACE_CONFIG=":4096:8"`` server-side and monkey-patches
+``Gr00tPolicy.reset`` to apply the per-episode seed PR #188's
+client-side plumbing forwards. The example file works WITHOUT this
+wrapper (verified at 5/5 above) — it's only needed when you want
+the GPU's CUDA backend to produce identical actions across re-runs
+of the same seed.
+
+Mount with::
+
+    docker run … -v examples/gr00t_server_deterministic_wrapper.py:/srv_wrap.py \\
+        gr00t:latest python /srv_wrap.py --model-path … --use-sim-policy-wrapper --port 8000
 """
 
 from __future__ import annotations

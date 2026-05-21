@@ -68,7 +68,7 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
-| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~54 s/ep @ 0.60-0.92 (groot, ZMQ client) | Post-[#186](https://github.com/strands-labs/robots/pull/186) `MuJoCoSimEngine` is byte-equivalent to upstream LIBERO; macOS / CPU OK |
+| [`libero_mujoco.py`](libero_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client) | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -83,9 +83,10 @@ the table for reference.
   per-episode scene-gen + load (cached after first call) + scene-step
   cost.
 
-The `--policy=groot` number above (~54 s/ep on an L4) is measured
-against `nvidia/GR00T-N1.7-LIBERO/libero_10` after the full upstream
-catch-up wave landed:
+The `--policy=groot` number above (~9 s/ep on an L4 with
+`success_rate=1.00`) is measured against
+`nvidia/GR00T-N1.7-LIBERO/libero_10` after the full upstream catch-up
+wave landed:
 [#168](https://github.com/strands-labs/robots/pull/168) (rounds 36-44)
 + [#172](https://github.com/strands-labs/robots/pull/172) (closes #169:
 ZMQ wire-format `image_rotation_180` + engine V-flip)
@@ -95,19 +96,31 @@ BDDL evaluator agreement with `env.check_success`)
 + #176: `MuJoCoSimEngine` state observation parity, OSC torque parity,
 gripper home pose, BDDL `_main` suffix fallback)
 + [#180](https://github.com/strands-labs/robots/pull/180) (closes #179:
-public `set_eval_seed` + per-episode reseed for reproducible LIBERO
-eval)
+public `set_eval_seed` + per-episode reseed)
 + [#184](https://github.com/strands-labs/robots/pull/184) (closes #181:
-preserve `<compiler inertiagrouprange>` in cached MJCF for inertia
-parity)
+preserve `<compiler inertiagrouprange>` in cached MJCF)
 + [#186](https://github.com/strands-labs/robots/pull/186) (closes #178:
 retire `LiberoOffScreenRenderEngine`; `MuJoCoSimEngine` is now
-byte-equivalent to upstream LIBERO with mean `success_rate=0.92`).
+byte-equivalent to upstream LIBERO)
++ [#188](https://github.com/strands-labs/robots/pull/188) (closes #187:
+spec-driven instruction fallback for language-conditioned policies +
+per-episode `policy.reset(seed=)` plumbing for SERVICE-mode
+reproducibility).
 
-Single-sample re-runs at the same seed have produced 0.60 / 0.80 /
-0.92 in different processes — bounded variance from CUDA
-non-determinism in the GR00T docker server. Acceptance is
-`success_rate > 0`, not a specific number.
+PR #188 was the unblocker for the ZMQ path: pre-#188 the language-
+conditioned GR00T policy received an empty `annotation.human.action.task_description`
+because `Simulation.evaluate_benchmark` didn't propagate `spec.instruction`
+when the user-supplied `instruction=` was empty. Post-#188 the example
+file reaches `success_rate=1.00 (5/5)` reliably on libero-10/SCENE5
+across both seed=42 and seed=100 in 44.3-44.8s. Acceptance criterion
+`success_rate > 0` is now decisively met.
+
+For users who want server-side determinism (per-episode CUDA reseed
+matching client-side `policy.reset(seed=...)`), an optional drop-in
+docker wrapper is available at
+[`gr00t_server_deterministic_wrapper.py`](gr00t_server_deterministic_wrapper.py).
+The example file works WITHOUT this wrapper (verified at 5/5 above) —
+it's only needed when bit-exact run-to-run reproducibility matters.
 
 The flagship driver
 [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/issues/22)
