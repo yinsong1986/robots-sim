@@ -4,64 +4,97 @@
 The agent receives a single prompt describing the eval, picks
 ``evaluate_benchmark`` on the registered ``Simulation`` tool, sets the
 kwargs from prompt context, runs, and returns a natural-language
-summary. For ``--policy=groot`` the agent itself starts and stops the
-GR00T inference service through the ``gr00t_inference`` tool — no
-scripted ``gr00t_inference(action="start", ...)`` call from Python.
+summary. This is the canonical replacement for the natural-language
+entry point the deleted ``examples/libero_example.py`` shipped pre-
+rescope: a user describes what they want, the agent picks the right
+tool and runs it.
 
-This is the canonical replacement for the natural-language entry point
-the deleted ``examples/libero_example.py`` shipped pre-rescope. It's
-the "this is why ``strands-robots`` exists" demo: a user describes what
-they want, the agent orchestrates the pieces.
+What the script handles deterministically (NOT the agent)
+---------------------------------------------------------
+LLM agents are reliable at "pick the right tool from a small set, fill
+its kwargs from prompt context, summarise the result". They are *not*
+reliable at multi-step infrastructure orchestration where each step
+has a brittle invariant (docker container names, HF-cache locations,
+recorder API selection, scene pre-warm timing). So this script keeps
+the latter under deterministic Python control and gives the agent the
+one decision it's actually good at: invoking ``evaluate_benchmark``.
+
+Owned by the script:
+
+* GR00T inference container lifecycle (start, wait-for-load, teardown
+  on exit) via ``gr00t_inference(action='lifecycle', ...)`` — same
+  block as ``run_mujoco.py``. Idempotent: reuses an already-running
+  container with the matching name on ``--port``; no redundant
+  checkpoint re-download if the cache is already populated.
+* LIBERO scene pre-warm: ``spec._generate_scene_from_bddl()`` →
+  ``sim.load_scene(...)`` → ``spec.prewarm(sim)``. Without this the
+  GR00T server rejects the first observation with ``Video key
+  'video.image' must be in observation`` because the scene's cameras
+  haven't been registered yet.
+* MP4 recording via ``start_cameras_recording`` / ``stop_cameras_recording``
+  (same camera selection as ``run_mujoco.py``). The agent does *not*
+  pick a recorder API — earlier shapes of this script let the agent
+  decide and it consistently picked LeRobot's ``Dataset`` recorder
+  which then crashed on ``[Errno 17] File exists: 'rollouts'``.
+
+Owned by the agent: the single ``evaluate_benchmark(...)`` call with
+benchmark_name + n_episodes + seed + policy_provider + policy_config
+filled from natural language, plus the natural-language summary at
+the end.
 
 Usage
 -----
 ::
 
-    # 1) Smoke test:
-    python examples/libero/run_mujoco_agent.py --policy mock
+    # 1) Smoke test (mock policy; no GPU / Docker needed):
+    python examples/libero/run_mujoco_agent.py --policy mock --n-episodes 5
 
-    # 2) Real run; agent starts the GR00T service against the right
-    #    `libero_<suite>/` sub-checkpoint of `nvidia/GR00T-N1.7-LIBERO`
-    #    when asked. Pre-condition: HF auth + Docker access; the agent
-    #    runs the download / start commands itself.
-    python examples/libero/run_mujoco_agent.py --policy groot --port 8000
+    # 2) Real run against `nvidia/GR00T-N1.7-LIBERO`. Script auto-
+    #    orchestrates the GR00T inference container (idempotent). Pre-
+    #    condition: HF token at `~/.cache/huggingface/token` (gated
+    #    Cosmos-Reason2-2B backbone) + Docker + an NVIDIA GPU.
+    python examples/libero/run_mujoco_agent.py --policy groot --port 8000 --n-episodes 5
 
-    # 3) Different LIBERO task; agent picks the matching subfolder.
+    # 2b) Reuse an already-running container instead of letting the
+    #     script manage one (e.g. for multi-eval sessions):
+    python examples/libero/run_mujoco_agent.py --policy groot --no-auto-server --port 8000
+
+    # 3) Different LIBERO suite + task; suite auto-derived from --task,
+    #    so the lifecycle tool downloads the matching `libero_<suite>/`
+    #    sub-checkpoint:
     python examples/libero/run_mujoco_agent.py \\
-        --task libero-spatial-pick_up_the_milk_and_place_it_in_the_basket
+        --policy groot --port 8000 \\
+        --task libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…
 
 Requires
 --------
 - ``pip install 'strands-robots[sim-mujoco,benchmark-libero]' strands-agents``
-- A configured LLM provider for Strands. Default is Anthropic Claude via
-  AWS Bedrock — see https://strandsagents.com/ for setup. Without one the
-  ``Agent(...)`` call below raises an authentication / configuration
-  error pointing at the SDK setup docs.
+- A configured LLM provider for Strands. Default is Anthropic Claude
+  via AWS Bedrock — see https://strandsagents.com/ for setup. Without
+  one the ``Agent(...)`` call below raises an authentication /
+  configuration error pointing at the SDK setup docs.
 - For ``--policy=groot``: Docker + an NVIDIA GPU + ~30 GB free disk for
-  the GR00T checkpoint. The agent itself runs the download and
-  service-start commands via the ``gr00t_inference`` tool, so the host
-  needs ``hf`` (HuggingFace CLI) and ``docker`` on ``PATH``.
+  the GR00T checkpoint (cached across re-runs).
 
 Notes
 -----
 - Output is non-deterministic by design (LLM-generated summary). R15
   does not ingest this file; the deterministic numbers live in
   ``run_mujoco.py`` (sibling file).
-- Records video to ``rollouts/YYYY_MM_DD/`` via the agent's
-  ``record_video=True`` choice; filename includes the ``--agent`` marker
-  and ``policy=mock|groot`` so per-file post-hoc analysis can tell which
+- Records video to ``rollouts/YYYY_MM_DD/`` with a filename that ends
+  ``--policy=mock|groot--agent`` so post-hoc analysis can tell which
   driver produced it.
 - An iterative-supervision (``SteppedSimEnv`` replacement) variant
-  deliberately doesn't live here — see
-  `R24 / #29 <https://github.com/strands-labs/robots-sim/issues/29>`_
-  for the OOD-anchored runnable demo and upstream
-  `U6 / #136 <https://github.com/strands-labs/robots/issues/136>`_ for
-  the canonical pattern doc.
+  deliberately doesn't live here — see R24 / #29 for the OOD-anchored
+  runnable demo.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import os
+import time
 
 from strands import Agent
 
@@ -70,19 +103,103 @@ from strands_robots.simulation import Simulation
 from strands_robots.tools import gr00t_inference
 
 
+def _date_dir(date_root: str = "rollouts") -> str:
+    out = os.path.join(date_root, _dt.date.today().strftime("%Y_%m_%d"))
+    os.makedirs(out, exist_ok=True)
+    return out
+
+
 def _suite_for_task(task: str) -> str:
+    """Auto-derive a LIBERO suite name from a benchmark task ID.
+
+    Same shape as ``run_mujoco.py``'s helper; see that file for the
+    canonical doctest examples.
+    """
     parts = task.split("-", 2)
     if len(parts) < 3 or parts[0] != "libero":
         raise ValueError(
-            f"--task must look like 'libero-<suite>-<task_stem>', got {task!r}."
+            f"--task must look like 'libero-<suite>-<task_stem>', got {task!r}. "
+            "See `load_libero_suite` for registered names."
         )
     return f"libero_{parts[1]}"
+
+
+def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
+    """Start the GR00T inference container and block until model is loaded.
+
+    Mirrors the lifecycle block in ``run_mujoco.py`` so the agent file
+    has identical "real-eval" plumbing. Returns the lifecycle handle
+    (or ``None`` if ``--policy=mock`` / ``--no-auto-server``).
+    """
+    if args.policy != "groot" or not args.auto_server:
+        return None
+
+    from pathlib import Path
+    import subprocess
+    from time import monotonic, sleep
+
+    hf_token_path = Path("~/.cache/huggingface/token").expanduser()
+    if not hf_token_path.is_file():
+        raise RuntimeError(
+            "--policy groot needs an HF token (Cosmos-Reason2-2B is gated). "
+            "Run `huggingface-cli login` first, then retry."
+        )
+    result = gr00t_inference(
+        action="lifecycle",
+        lifecycle="full",
+        image_name=args.image,
+        hf_repo="nvidia/GR00T-N1.7-LIBERO",
+        hf_subfolder=suite,
+        hf_local_dir=args.checkpoint_dir,
+        container_name=args.container,
+        hf_token=hf_token_path.read_text().strip(),
+        checkpoint_path=f"/data/checkpoints/{suite}",
+        embodiment_tag="libero_sim",
+        protocol="n1.7",
+        use_sim_policy_wrapper=True,
+        port=args.port,
+    )
+    if result.get("status") != "success":
+        raise RuntimeError(f"gr00t_inference lifecycle=full failed: {result}")
+    print(f"[setup] {result.get('message')}")
+
+    # Same readiness wait as run_mujoco.py — the lifecycle tool returns
+    # success when the port is bound, but the model loads asynchronously
+    # after that. Block until GPU memory crosses a heuristic threshold.
+    deadline = monotonic() + 180
+    loaded_threshold_mib = 10_000  # N1.7 is ~6 GB on the L4
+    while monotonic() < deadline:
+        try:
+            used = int(
+                subprocess.check_output(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=memory.used",
+                        "--format=csv,noheader,nounits",
+                    ]
+                )
+                .decode()
+                .strip()
+                .splitlines()[0]
+            )
+        except Exception:
+            used = 0
+        if used > loaded_threshold_mib:
+            print(f"[setup] GR00T model loaded (gpu_mem={used} MiB)")
+            return result
+        sleep(5)
+    raise RuntimeError(
+        "GR00T model didn't reach load threshold within 180 s. "
+        "Check `docker logs <container>` for stderr."
+    )
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--policy", choices=["mock", "groot"], default="mock")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument(
+        "--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)"
+    )
     p.add_argument(
         "--task",
         default="libero-spatial-pick_up_the_red_cube",
@@ -90,64 +207,173 @@ def main() -> None:
     )
     p.add_argument("--n-episodes", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--auto-server",
+        dest="auto_server",
+        action="store_true",
+        default=True,
+        help="(--policy=groot only) Bring up the GR00T inference service via "
+        "`gr00t_inference(action='lifecycle', lifecycle='full', ...)` before "
+        "the eval and tear it down on exit. Default: enabled.",
+    )
+    p.add_argument(
+        "--no-auto-server",
+        dest="auto_server",
+        action="store_false",
+        help="(--policy=groot only) Don't manage the inference service; "
+        "expect one to already be listening on `--port`.",
+    )
+    p.add_argument(
+        "--image",
+        default="gr00t:latest",
+        help="(--auto-server only) Docker image tag of the GR00T container.",
+    )
+    p.add_argument(
+        "--container",
+        default="gr00t-libero-mujoco",
+        help="(--auto-server only) Docker container name to (re)use.",
+    )
+    p.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="(--auto-server only) Where to cache the HF checkpoint. "
+        "Default: `~/.cache/strands_robots/checkpoints/`.",
+    )
     args = p.parse_args()
 
     suite = _suite_for_task(args.task)
 
-    sim = Simulation(tool_name="libero_sim", mesh=False)
-    # Pre-register the LIBERO suite so the agent only has to choose by
-    # benchmark name; we don't make it run BDDL discovery.
-    load_libero_suite(suite)
-
-    agent = Agent(tools=[sim, gr00t_inference])
-
-    try:
-        # For --policy=groot, the agent starts the inference service
-        # itself. The HF repo `nvidia/GR00T-N1.7-LIBERO` is a tree of
-        # four sub-checkpoints (`libero_spatial/`, `libero_10/`,
-        # `libero_object/`, `libero_goal/`); we tell the agent which
-        # subfolder to download and serve based on --task's suite.
-        if args.policy == "groot":
-            agent(
-                f"Start the GR00T inference service on port {args.port} using "
-                f"the `{suite}` subfolder of `nvidia/GR00T-N1.7-LIBERO` and "
-                f"data_config 'libero_panda'. If the subfolder isn't already at "
-                f"`checkpoints/GR00T-N1.7-LIBERO/{suite}/`, download it first "
-                f"with `hf download nvidia/GR00T-N1.7-LIBERO --include "
-                f"'{suite}/*' --local-dir checkpoints/GR00T-N1.7-LIBERO`."
-            )
-            policy_phrase = (
-                f"using the GR00T policy on localhost:{args.port} with "
-                f"`policy_provider='groot'` and "
-                f"`policy_config={{'host': 'localhost', 'port': {args.port}, "
-                f"'data_config': 'libero_panda'}}`"
-            )
-        else:
-            policy_phrase = "using the mock policy (`policy_provider='mock'`)"
-
-        # The actual one-shot eval — agent picks `evaluate_benchmark`
-        # from the registered Simulation tool, sets kwargs from prompt
-        # context, then summarises in natural language.
-        result = agent(
-            f"Set up a MuJoCo simulation: create a world, add a Franka Panda "
-            f"robot named 'panda' with data_config='panda'. Then run the "
-            f"LIBERO benchmark '{args.task}' for {args.n_episodes} episodes "
-            f"with seed {args.seed}, {policy_phrase}, on the 'panda' robot. "
-            f"Record video into the `rollouts/` directory with a filename "
-            f"that ends `--agent--policy={args.policy}`. "
-            f"When the eval finishes, tell me the success rate and the total "
-            f"wall-time. Then destroy the simulation world."
+    # Build the policy_config dict that the agent will pass through to
+    # `evaluate_benchmark`. We construct it deterministically here so
+    # the agent doesn't have to invent dict literals from the prompt.
+    if args.policy == "groot":
+        policy_phrase = (
+            f"using the GR00T policy with `policy_provider='groot'` and "
+            f"`policy_config={{'host': 'localhost', 'port': {args.port}, "
+            f"'data_config': 'libero_panda', 'groot_version': 'n1.7'}}`"
         )
-        print(result)
+    else:
+        policy_phrase = "using the mock policy (`policy_provider='mock'`)"
 
+    server_handle = _bring_up_gr00t_server(args, suite)
+
+    sim = Simulation(tool_name="libero_sim", mesh=False)
+    try:
+        sim.create_world()
+        # Pre-add a Panda named ``robot`` so:
+        #   1. evaluate_benchmark's pre-flight check (`No robots in
+        #      sim`) passes BEFORE on_episode_start runs scene loading.
+        #   2. The resolved-name `evaluate_benchmark` picks up here
+        #      survives the rename that LIBERO scene MJCFs do — the
+        #      scenes ship a Franka Panda named `robot` (LIBERO/
+        #      RoboSuite convention), so picking the same name here
+        #      keeps the resolved robot stable across `on_episode_start`.
+        sim.add_robot("robot", data_config="panda")
+
+        registered = load_libero_suite(suite)
+        if not registered:
+            raise RuntimeError(
+                f"load_libero_suite({suite!r}) registered 0 tasks. "
+                "Apply upstream fix from strands-labs/robots#147 if it isn't merged."
+            )
+        if args.task not in registered:
+            # Spec's default `libero-spatial-pick_up_the_red_cube` is
+            # aspirational; fall back to the first registered task.
+            if args.task == "libero-spatial-pick_up_the_red_cube":
+                fallback = next(iter(registered))
+                print(
+                    f"NOTE: default --task {args.task!r} isn't in real LIBERO "
+                    f"(it's the spec's aspirational placeholder); falling back "
+                    f"to first registered task {fallback!r}."
+                )
+                args.task = fallback
+            else:
+                raise RuntimeError(
+                    f"--task {args.task!r} is not in the {suite} suite. "
+                    f"Available: {sorted(registered)[:3]}…"
+                )
+
+        ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        rec_name = (
+            f"{ts}--task={args.task}--n_eps={args.n_episodes}"
+            f"--seed={args.seed}--policy={args.policy}--agent"
+        )
+        video_dir = _date_dir()
+        recording_cameras = (
+            ["image", "wrist_image"] if args.policy == "groot" else ["default"]
+        )
+
+        # Pre-warm the LIBERO scene so the cameras the GR00T server
+        # expects (`image`, `wrist_image`) are registered before
+        # recording / inference starts. Same block as run_mujoco.py;
+        # see that file for the longer rationale on ordering.
         if args.policy == "groot":
-            agent(f"Stop the GR00T inference service on port {args.port}.")
+            from strands_robots.simulation.benchmark import get_benchmark
+
+            spec = get_benchmark(args.task)
+            if spec.scene_path is None and getattr(spec, "_auto_generate_scene", False):
+                generated = spec._generate_scene_from_bddl()
+                if generated:
+                    spec.scene_path = generated
+            if spec.scene_path:
+                sim.load_scene(spec.scene_path)
+                if hasattr(spec, "prewarm"):
+                    spec.prewarm(sim)
+                if "robot" not in sim.list_robots():
+                    sim.add_robot("robot", data_config="panda")
+
+        sim.start_cameras_recording(
+            cameras=recording_cameras, output_dir=video_dir, name=rec_name
+        )
+        try:
+            # The actual one-shot eval — the agent picks
+            # `evaluate_benchmark` from the registered Simulation tool,
+            # sets kwargs from prompt context, then summarises in
+            # natural language. The script has already done the
+            # plumbing (container lifecycle, scene pre-warm, MP4
+            # recording start), so the agent only has the eval
+            # decision left.
+            agent = Agent(tools=[sim])
+            t0 = time.time()
+            # Explicit instruction to use the `evaluate_benchmark`
+            # action — the Simulation tool exposes 64 sub-actions and
+            # the agent will otherwise verb-match "run" → `run_policy`
+            # or "eval" → `eval_policy`, both of which skip the LIBERO
+            # observation adapter and trigger server-side rejections
+            # like "State key 'state.x' must be in observation".
+            # `evaluate_benchmark` is the LIBERO-aware path that wraps
+            # PolicyRunner with the spec's observation glue.
+            result = agent(
+                f"Make exactly one tool call: invoke the `libero_sim` "
+                f"tool with `action='evaluate_benchmark'`, "
+                f"`benchmark_name='{args.task}'`, "
+                f"`n_episodes={args.n_episodes}`, `seed={args.seed}`, "
+                f"`robot_name='robot'`, {policy_phrase}. Do not call "
+                f"any other action — the world, robot, scene, and "
+                f"video recording have already been set up. When the "
+                f"call returns, parse the `success_rate` field from "
+                f"the JSON payload and report it as a percentage of "
+                f"the {args.n_episodes} episodes."
+            )
+            wall_time = time.time() - t0
+            print(result)
+            video_path = os.path.join(video_dir, f"{rec_name}__{recording_cameras[0]}.mp4")
+            print(
+                f"[agent-eval] policy={args.policy} task={args.task} "
+                f"wall_time={wall_time:.1f}s videos={video_path}"
+            )
+        finally:
+            sim.stop_cameras_recording()
     finally:
-        # Belt-and-braces cleanup in case the agent didn't call destroy.
         try:
             sim.destroy()
         except Exception:
             pass
+        # Tear down the GR00T inference container if we brought it up.
+        if server_handle is not None:
+            gr00t_inference(
+                action="lifecycle", lifecycle="teardown", container_name=args.container
+            )
 
 
 # Optional follow-up showing System-2 multi-turn reasoning across runs.
