@@ -65,33 +65,6 @@ and ``--seed=S`` so post-hoc analysis can tell what produced it.
 
 Verification status (`--policy=groot` end-to-end)
 -------------------------------------------------
-After the full upstream catch-up wave landed:
-
-* ``strands-labs/robots#168`` (rounds 36-44, squashed at upstream
-  ``34f8c37``) — structural alignment to NVIDIA's reference
-* ``strands-labs/robots#172`` (closes #169) — ZMQ-wire image rotation
-* ``strands-labs/robots#173`` (closes #170) — BDDL evaluator agreement
-* ``strands-labs/robots#175`` (closes #171 + #176) — MuJoCoSimEngine
-  state observation parity, OSC torque parity, gripper home pose,
-  BDDL ``_main`` suffix fallback
-* ``strands-labs/robots#180`` (closes #179) — public ``set_eval_seed``
-  + per-episode reseed for reproducible LIBERO eval
-* ``strands-labs/robots#184`` (closes #181) — preserve ``<compiler
-  inertiagrouprange>`` in cached MJCF (model-level inertia parity)
-* ``strands-labs/robots#186`` (closes #178) — retire
-  ``LiberoOffScreenRenderEngine``; ``MuJoCoSimEngine`` is now
-  byte-equivalent to upstream LIBERO
-* ``strands-labs/robots#188`` (closes #187) — spec-driven instruction
-  fallback for language-conditioned policies + per-episode
-  ``policy.reset(seed=)`` plumbing for SERVICE-mode reproducibility.
-  PR #188 was the unblocker for the ZMQ path: pre-#188 the language-
-  conditioned GR00T policy received an empty
-  ``annotation.human.action.task_description`` because
-  ``Simulation.evaluate_benchmark`` didn't propagate
-  ``spec.instruction`` when the user-supplied ``instruction=`` was
-  empty. The dominant cause of the 0.20-0.60 ZMQ success rate
-  pre-#188.
-
 Measured 2026-05-21 on the L4 / Docker dev box against
 ``nvidia/GR00T-N1.7-LIBERO/libero_10``,
 ``libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…``, 5 episodes:
@@ -100,10 +73,8 @@ Measured 2026-05-21 on the L4 / Docker dev box against
 * ``--policy=groot --seed=42``: ~9 s/ep, **success_rate=1.00 (5/5)** in 44.8 s.
 * ``--policy=groot --seed=100``: ~9 s/ep, **success_rate=1.00 (5/5)** in 44.3 s.
 
-Wall-time IS authoritative for engine + scene + policy + I/O round-trip.
-PR #188's reported numbers (5/5 in 52 s for seed=42; 4/5 in 224 s
-for seed=100) are matched or beaten on this dev box. Acceptance:
-``success_rate > 0`` is decisively met.
+Wall-time covers engine + scene + policy + I/O round-trip end-to-end.
+Acceptance criterion ``success_rate > 0`` is decisively met.
 
 Optional server-side determinism wrapper
 -----------------------------------------
@@ -113,11 +84,10 @@ pinning a specific success_rate), a drop-in docker wrapper is
 available at ``examples/libero/gr00t_server_deterministic_wrapper.py``.
 It sets ``cudnn.deterministic=True`` + ``cudnn.benchmark=False`` +
 ``CUBLAS_WORKSPACE_CONFIG=":4096:8"`` server-side and monkey-patches
-``Gr00tPolicy.reset`` to apply the per-episode seed PR #188's
-client-side plumbing forwards. The example file works WITHOUT this
-wrapper (verified at 5/5 above) — it's only needed when you want
-the GPU's CUDA backend to produce identical actions across re-runs
-of the same seed.
+``Gr00tPolicy.reset`` to apply the client-supplied per-episode seed.
+The example file works WITHOUT this wrapper (verified at 5/5 above) —
+it's only needed when you want the GPU's CUDA backend to produce
+identical actions across re-runs of the same seed.
 
 Mount with::
 
