@@ -31,31 +31,40 @@ Owned by the script:
   GR00T server rejects the first observation with ``Video key
   'video.image' must be in observation`` because the scene's cameras
   haven't been registered yet.
-* MP4 recording via ``start_cameras_recording_synchronous`` —
-  introduced upstream in ``strands-labs/robots#192`` (closes #191).
-  Returns an ``on_frame`` closure that the script wires into
-  ``evaluate_benchmark(on_frame=...)`` so frames are rendered on the
-  eval thread at known sync points (post-step). The legacy daemon-
-  thread recorder (``start_cameras_recording``) races with the eval
-  thread on shared ``mjData`` when the eval runs under Strands
-  ``Agent`` tool dispatch, producing 2-3% frame capture rate plus
-  greenish GL clear-colour artifacts; the synchronous mode eliminates
-  the race entirely. The agent does *not* pick a recorder API — earlier
-  shapes of this script let the agent decide and it consistently picked
-  LeRobot's ``Dataset`` recorder which then crashed on
-  ``[Errno 17] File exists: 'rollouts'``.
-
-The ``on_frame`` closure can't cross Strands' tool-dispatch JSON
-boundary (closures aren't JSON-serializable), so the eval call is
-exposed to the agent through a thin ``@tool`` wrapper defined in
-``main()`` that captures ``sim`` / ``video_dir`` / ``rec_name`` from
-the outer scope. The agent picks the wrapper and fills its kwargs
-from natural language; the closure stays in Python.
+* MP4 recording via ``start_cameras_recording`` (daemon-thread
+  recorder, same path as ``run_mujoco.py``). Under Strands ``Agent``
+  tool dispatch the eval runs on a worker thread distinct from the
+  recorder thread, and the two race on shared ``mjData``; in practice
+  this means lower frame coverage (~20% of sim steps captured vs
+  ~16% for the programmatic file's main-thread eval) and the
+  occasional greenish GL clear-colour artifact. The synchronous-mode
+  alternative — upstream ``strands-labs/robots#192``'s
+  ``start_cameras_recording_synchronous`` + ``evaluate_benchmark(
+  on_frame=...)`` — eliminates the race by capturing one frame per
+  sim step from the eval thread, but its on_frame closure can't cross
+  the agent's tool-dispatch JSON boundary, so wiring it requires a
+  ``@tool`` wrapper that captures the closure in Python scope.
+  Earlier sessions of this file used that wrapper shape and produced
+  bit-exact 1-frame-per-step videos at the cost of (a) a 5-6x
+  wall-time multiplier from per-step render, (b) ~70 lines of
+  closure-plumbing, (c) reducing the agent's tool surface from the
+  full 64-action ``Simulation`` enum to a single wrapper. We chose
+  the simpler daemon-thread shape here for matrix-quality wall-time
+  and so the agent demo exercises the natural-language → action-pick
+  → kwarg-fill flow over the real ``Simulation`` surface; users who
+  need guaranteed-clean video should use ``run_mujoco.py``
+  programmatically. The agent does *not* pick a recorder API —
+  earlier shapes of this script let the agent decide and it
+  consistently picked LeRobot's ``Dataset`` recorder which then
+  crashed on ``[Errno 17] File exists: 'rollouts'``.
 
 Owned by the agent: the single ``evaluate_benchmark(...)`` call with
 benchmark_name + n_episodes + seed + policy_provider + policy_config
-filled from natural language, plus the natural-language summary at
-the end.
+filled from natural language, picked from the registered
+``Simulation`` tool's 64-action enum (the prompt names the action
+explicitly to prevent verb-matching to ``run_policy`` /
+``eval_policy`` which skip the LIBERO observation adapter), plus the
+natural-language summary at the end.
 
 Usage
 -----
@@ -111,7 +120,7 @@ import datetime as _dt
 import os
 import time
 
-from strands import Agent, tool
+from strands import Agent
 
 from strands_robots.benchmarks.libero import load_libero_suite
 from strands_robots.simulation import Simulation
@@ -337,115 +346,49 @@ def main() -> None:
                 if "robot" not in sim.list_robots():
                     sim.add_robot("robot", data_config="panda")
 
-        # Start the synchronous recorder on the script's main thread
-        # (subprocess.Popen / signal-handling-sensitive setup is safer
-        # here than on the Strands worker thread that the agent's tool
-        # dispatch will run on). We capture `on_frame_cb` / `finalize_cb`
-        # in the outer closure: `on_frame_cb` is wired into the eval
-        # via the @tool wrapper below; `finalize_cb` is invoked from
-        # main after the agent returns. Calling finalize from the
-        # worker thread (which is what an in-wrapper finalize did)
-        # crashes imageio's FFmpeg pipe with `BrokenPipeError` plus
-        # glibc `malloc_consolidate()` errors — the FFmpeg subprocess
-        # is sensitive to which thread spawned it.
-        start_result = sim.start_cameras_recording_synchronous(
-            cameras=recording_cameras,
-            output_dir=video_dir,
-            name=rec_name,
-            # Explicit dims matching `run_mujoco.py`'s daemon-thread
-            # output. Without these the eval-thread renderer cache may
-            # produce variable-shape arrays in the buffer that crash
-            # imageio's FFmpeg encoder mid-stream.
-            width=640,
-            height=480,
+        # Experiment: drop the @tool wrapper, let the agent pick
+        # `evaluate_benchmark` from the full `Simulation` 64-action
+        # surface via natural language. Trade-off: must use the
+        # daemon-thread recorder (`start_cameras_recording`, NOT the
+        # synchronous variant) because the synchronous mode returns
+        # Python closures that can't cross Strands' tool-dispatch JSON
+        # boundary. Daemon-thread recording under the Strands worker
+        # thread races with the eval thread on shared `mjData` and
+        # produces 2-3% frame capture rate plus greenish artifacts —
+        # documented in `strands-labs/robots#191`.
+        sim.start_cameras_recording(
+            cameras=recording_cameras, output_dir=video_dir, name=rec_name
         )
-        if start_result.get("status") != "success":
-            raise RuntimeError(
-                f"start_cameras_recording_synchronous failed: {start_result}"
-            )
-        sync = next(c["json"] for c in start_result["content"] if "json" in c)
-        on_frame_cb = sync["on_frame"]
-        finalize_cb = sync["finalize"]
-
-        # Define a thin `@tool` wrapper that calls
-        # `evaluate_benchmark(on_frame=...)` with the synchronous
-        # recorder's on_frame closure. Necessary because the closure
-        # can't cross Strands' tool-dispatch JSON boundary; the
-        # wrapper keeps it in Python scope. The agent picks the
-        # wrapper and fills its kwargs from natural language.
-        # See `strands-labs/robots#191` (issue) / PR #192 (fix) for
-        # the synchronous-mode API design and the daemon-thread
-        # artifact it replaces.
-        @tool
-        def run_libero_eval(
-            benchmark_name: str,
-            n_episodes: int,
-            seed: int,
-            policy_provider: str,
-            policy_config: dict,
-        ) -> dict:
-            """Run a LIBERO benchmark with per-step synchronous camera recording.
-
-            Wires the outer-scope ``on_frame_cb`` into
-            ``evaluate_benchmark(on_frame=...)`` so the eval thread
-            renders cameras at known sync points (post-step),
-            eliminating the daemon-recorder / ``mjData`` race that
-            otherwise produces greenish gradient frames under
-            multi-threaded eval (Strands ``Agent`` tool dispatch
-            from inside an asyncio event loop).
-
-            The ``finalize_cb`` for flushing buffers to MP4 is
-            invoked from the script main thread after this tool
-            returns — keeping FFmpeg's subprocess.Popen off the
-            Strands worker thread.
-
-            Args:
-                benchmark_name: Registered LIBERO benchmark task ID
-                    (e.g. ``libero-10-LIVING_ROOM_SCENE5_…``).
-                n_episodes: Number of episodes to run.
-                seed: Master RNG seed.
-                policy_provider: ``"mock"`` or ``"groot"``.
-                policy_config: Provider-specific kwargs.
-
-            Returns:
-                The standard ``evaluate_benchmark`` result dict
-                (``success_rate``, per-episode steps, etc.).
-            """
-            return sim.evaluate_benchmark(
-                benchmark_name=benchmark_name,
-                n_episodes=n_episodes,
-                seed=seed,
-                policy_provider=policy_provider,
-                policy_config=policy_config,
-                robot_name="robot",
-                on_frame=on_frame_cb,
-            )
-
-        agent = Agent(tools=[run_libero_eval])
-        t0 = time.time()
         try:
+            agent = Agent(tools=[sim])
+            t0 = time.time()
+            # Explicit instruction to use the `evaluate_benchmark`
+            # action — the Simulation tool exposes 64 sub-actions and
+            # the agent will otherwise verb-match "run" → `run_policy`
+            # or "eval" → `eval_policy`, both of which skip the LIBERO
+            # observation adapter and trigger server-side rejections
+            # like "State key 'state.x' must be in observation".
             result = agent(
-                f"Use the `run_libero_eval` tool to run the LIBERO benchmark "
-                f"'{args.task}' for {args.n_episodes} episodes with seed "
-                f"{args.seed}, {policy_phrase}. The world, robot, scene, and "
-                f"output paths have already been set up — just call the tool "
-                f"with these kwargs. Once it returns, parse the `success_rate` "
-                f"field from the JSON payload and report it as a percentage of "
+                f"Make exactly one tool call: invoke the `libero_sim` "
+                f"tool with `action='evaluate_benchmark'`, "
+                f"`benchmark_name='{args.task}'`, "
+                f"`n_episodes={args.n_episodes}`, `seed={args.seed}`, "
+                f"`robot_name='robot'`, {policy_phrase}. Do not call "
+                f"any other action — the world, robot, scene, and "
+                f"video recording have already been set up. When the "
+                f"call returns, parse the `success_rate` field from "
+                f"the JSON payload and report it as a percentage of "
                 f"the {args.n_episodes} episodes."
             )
+            wall_time = time.time() - t0
+            print(result)
+            video_path = os.path.join(video_dir, f"{rec_name}__{recording_cameras[0]}.mp4")
+            print(
+                f"[agent-eval] policy={args.policy} task={args.task} "
+                f"wall_time={wall_time:.1f}s videos={video_path}"
+            )
         finally:
-            # Always finalize, even if the agent / eval raised. Runs
-            # on the main thread (not the Strands worker), so FFmpeg
-            # subprocess.Popen / Python signal handling are happy.
-            finalize_result = finalize_cb()
-            print(f"[finalize] {finalize_result.get('content', [{}])[0].get('text', '?')}")
-        wall_time = time.time() - t0
-        print(result)
-        video_path = os.path.join(video_dir, f"{rec_name}__{recording_cameras[0]}.mp4")
-        print(
-            f"[agent-eval] policy={args.policy} task={args.task} "
-            f"wall_time={wall_time:.1f}s videos={video_path}"
-        )
+            sim.stop_cameras_recording()
     finally:
         try:
             sim.destroy()
