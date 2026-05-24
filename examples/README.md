@@ -68,7 +68,7 @@ the table for reference.
 
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
-| [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client) | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
+| [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client)[^1] | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
 | `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
 | `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
@@ -98,6 +98,13 @@ bit-exact run-to-run reproducibility matters.
 
 The flagship driver `libero_backend_matrix.py` (R15) walks all five
 rows and prints a unified table.
+
+[^1]: Single-sample on the L4 reference dev box (`libero-10/SCENE5`,
+    seed=42, n=5). Pre-#188 success rate was 0.20–0.60 across re-runs;
+    post-#188 it stabilises at 1.00. See PR #26's history threads on
+    [#187](https://github.com/strands-labs/robots/issues/187) /
+    [#188](https://github.com/strands-labs/robots/pull/188) for the
+    variance bisection.
 
 ## Running the MuJoCo baseline
 

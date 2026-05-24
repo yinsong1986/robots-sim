@@ -38,8 +38,8 @@ pip install 'strands-robots[sim-mujoco]'
 |---|---|---|
 | `from strands_robots_sim import SimEnv` (programmatic) | `from strands_robots.simulation import Simulation` — runnable example: [`examples/libero/run_mujoco.py`](libero/run_mujoco.py) | The agent-facing async lifecycle is now the 58-action `Simulation` AgentTool; episode rollout is one of those actions. Programmatic Python script calls `sim.evaluate_benchmark(...)` directly. |
 | `SimEnv(env_type="libero", task_suite="libero_spatial")` | `from strands_robots.benchmarks.libero import load_libero_suite` then `load_libero_suite("libero_spatial")` | Benchmarks register globally through `BenchmarkProtocol`; the simulation engine is selected separately (default MuJoCo). |
-| `agent.tool.my_sim(action="execute", instruction="pick up the red block", policy_port=8000, max_episodes=50, ...)` (programmatic invocation of the legacy AgentTool) | `sim.evaluate_benchmark(benchmark_name="libero-spatial-pick_up_the_red_block", robot_name="panda", policy_provider="groot", policy_config={"host": "localhost", "port": 8000, "data_config": "libero"}, n_episodes=50, seed=42)` — runnable: [`examples/libero/run_mujoco.py --policy groot`](libero/run_mujoco.py) | Tasks are addressed by canonical `libero-<suite>-<task>` IDs rather than suite + free-form instruction. The GR00T policy is configured via `policy_config={...}` and points at a per-suite sub-checkpoint of `nvidia/GR00T-N1.7-LIBERO`. Success rate / wall-time are returned directly. |
-| `agent("Run the LIBERO benchmark …")` (the natural-language entry point in the deleted `examples/libero_example.py`) | `Agent(tools=[sim, gr00t_inference])` plus a single `agent("…")` prompt — runnable example: [`examples/libero/run_mujoco_agent.py`](libero/run_mujoco_agent.py) | The agent now drives the full setup-eval-cleanup sequence including starting the GR00T inference service against the right sub-checkpoint; nothing scripted on the Python side beyond tool registration. |
+| `agent.tool.my_sim(action="execute", instruction="pick up the red block", policy_port=8000, max_episodes=50, ...)` (programmatic invocation of the legacy AgentTool) | `sim.evaluate_benchmark(benchmark_name="libero-spatial-pick_up_the_red_block", policy_provider="groot", policy_config={"host": "localhost", "port": 8000, "data_config": "libero_panda"}, n_episodes=50, seed=42)` — runnable: [`examples/libero/run_mujoco.py --policy groot`](libero/run_mujoco.py) | Tasks are addressed by canonical `libero-<suite>-<task>` IDs rather than suite + free-form instruction. The GR00T policy is configured via `policy_config={...}`; `"libero_panda"` is the registered key in `DATA_CONFIG_MAP` (a bare `"libero"` raises `KeyError` at policy construction). Success rate / wall-time are returned directly. |
+| `agent("Run the LIBERO benchmark …")` (the natural-language entry point in the deleted `examples/libero_example.py`) | `Agent(tools=[sim])` plus a single `agent("…")` prompt — runnable example: [`examples/libero/run_mujoco_agent.py`](libero/run_mujoco_agent.py) | The script owns the deterministic plumbing (GR00T container lifecycle via `gr00t_inference(action='lifecycle', ...)`, LIBERO scene pre-warm, MP4 recording start/stop); the agent's job is the natural-language → `evaluate_benchmark` action-pick + kwarg-fill + summary. The lifecycle-vs-agent split is intentional — see the file's docstring for why infrastructure orchestration stays under deterministic Python control. |
 | `from strands_robots_sim import SteppedSimEnv` (iterative System-2 supervision) | No in-distribution iterative example — see [`R24 / #29`](https://github.com/strands-labs/robots-sim/issues/29) for the OOD-anchored runnable demo (cross-suite checkpoint mismatch / LIBERO-PRO perturbations / distractor injection) and upstream [`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136) (U6) for the canonical pattern doc | With `nvidia/GR00T-N1.7-LIBERO/libero_<suite>/` finetuned end-to-end on each suite, an in-distribution iterative-supervision demo would be theater — the System-2 hook has nothing to actually decide. The pattern earns its complexity in OOD scenarios; that's R24's scope. |
 | `agent.tool.my_sim(record_video=True)` → `rollouts/YYYY_MM_DD/...mp4` | `sim.start_cameras_recording(cameras=[...], output_dir="rollouts/YYYY_MM_DD", name=...)` + `sim.stop_cameras_recording()` (the example files do this around `evaluate_benchmark`) | The `rollouts/YYYY_MM_DD/<timestamp>--<metadata>__<camera>.mp4` filename convention is preserved by the example files; per-episode segmentation needs upstream `record_video=` plumbing on `evaluate_benchmark` and is filed as a follow-up. |
 | `pip install 'strands-robots-sim[sim]'` (libero / robosuite / scipy / mujoco / gymnasium) | `pip install 'strands-robots[sim-mujoco,benchmark-libero]'` | The lightweight backend stack moved upstream. Heavy GPU backends (Isaac, Newton) will live behind `[isaac]` / `[newton]` extras in this repo. |
@@ -83,19 +83,22 @@ from strands_robots.benchmarks.libero import load_libero_suite
 
 sim = Simulation(tool_name="sim", mesh=False)
 sim.create_world()
-sim.add_robot("panda", data_config="panda")
+# Pre-add a Panda named "robot" — LIBERO scene MJCFs use that name
+# (RoboSuite convention), so picking it here keeps the resolved robot
+# stable across `evaluate_benchmark`'s `on_episode_start` scene reload.
+sim.add_robot("robot", data_config="panda")
 load_libero_suite("libero_spatial")
 
 sim.evaluate_benchmark(
     benchmark_name="libero-spatial-pick_up_the_red_block",
-    robot_name="panda",
     policy_provider="groot",
     policy_config={
         "host": "localhost",
         "port": 8000,
-        "data_config": "libero",   # client-side identifier; matches the
-                                    # `--data-config libero` flag the GR00T
-                                    # service is started with
+        "data_config": "libero_panda",   # registered key in
+                                          # DATA_CONFIG_MAP — a bare
+                                          # "libero" raises KeyError
+                                          # at policy construction
     },
     n_episodes=50,
     seed=42,
@@ -160,12 +163,12 @@ from strands_robots.simulation import Simulation
 
 sim = Simulation(tool_name="sim", mesh=False)
 sim.create_world()
-sim.add_robot("panda", data_config="panda")
+sim.add_robot("robot", data_config="panda")
 
 sim.start_policy(
-    robot_name="panda",
+    robot_name="robot",
     policy_provider="groot",
-    policy_config={"host": "localhost", "port": 8000, "data_config": "libero"},
+    policy_config={"host": "localhost", "port": 8000, "data_config": "libero_panda"},
     instruction="pick up the red block",
     duration=30.0,
 )
@@ -178,7 +181,7 @@ for _ in range(50):
     #   sim.stop_policy() then sim.start_policy(...) again with a new
     #   instruction; or `break` to end the session.
 
-sim.stop_policy(robot_name="panda")
+sim.stop_policy(robot_name="robot")
 ```
 
 `get_state()` and `render()` both return the standard

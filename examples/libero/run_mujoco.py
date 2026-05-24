@@ -136,9 +136,7 @@ def _suite_for_task(task: str) -> str:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--policy", choices=["mock", "groot"], default="mock")
-    p.add_argument(
-        "--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)"
-    )
+    p.add_argument("--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)")
     p.add_argument(
         "--task",
         default="libero-spatial-pick_up_the_red_cube",
@@ -233,16 +231,14 @@ def main() -> None:
         # Filed upstream as part of #148's lifecycle-readiness follow-up;
         # remove this loop once `gr00t_inference` blocks until ready.
         import subprocess
-        from time import sleep, monotonic
+        from time import monotonic, sleep
 
         deadline = monotonic() + 180
         loaded_threshold_mib = 10_000  # N1.7 model is ~6 GB on the L4
         while monotonic() < deadline:
             try:
                 used = int(
-                    subprocess.check_output(
-                        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]
-                    )
+                    subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
                     .decode()
                     .strip()
                     .splitlines()[0]
@@ -255,8 +251,7 @@ def main() -> None:
             sleep(5)
         else:
             raise RuntimeError(
-                "GR00T model didn't reach load threshold within 180 s. "
-                "Check `docker logs <container>` for stderr."
+                "GR00T model didn't reach load threshold within 180 s. " "Check `docker logs <container>` for stderr."
             )
 
     if args.policy == "groot":
@@ -319,15 +314,11 @@ def main() -> None:
                 args.task = fallback
             else:
                 raise RuntimeError(
-                    f"--task {args.task!r} is not in the {suite} suite. "
-                    f"Available: {sorted(registered)[:3]}…"
+                    f"--task {args.task!r} is not in the {suite} suite. " f"Available: {sorted(registered)[:3]}…"
                 )
 
         ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        rec_name = (
-            f"{ts}--task={args.task}--n_eps={args.n_episodes}"
-            f"--seed={args.seed}--policy={args.policy}"
-        )
+        rec_name = f"{ts}--task={args.task}--n_eps={args.n_episodes}" f"--seed={args.seed}--policy={args.policy}"
         video_dir = _date_dir()
         # Pick the camera to record from. The LIBERO scene auto-loaded by
         # `LiberoAdapter` (per `strands-labs/robots#165`) supplies cameras
@@ -336,9 +327,7 @@ def main() -> None:
         # paths that hit the scene-gen ImportError fallback — only the
         # world's `default` camera exists.
         recording_camera = "image" if args.policy == "groot" else "default"
-        recording_cameras = (
-            ["image", "wrist_image"] if args.policy == "groot" else ["default"]
-        )
+        recording_cameras = ["image", "wrist_image"] if args.policy == "groot" else ["default"]
 
         # Pre-warm the scene so `image` actually exists at recording-start
         # time. `start_cameras_recording` looks up the camera by name in
@@ -351,7 +340,6 @@ def main() -> None:
         # stable across them.
         if args.policy == "groot":
             from strands_robots.simulation.benchmark import get_benchmark
-            import random as _random
 
             spec = get_benchmark(args.task)
             if spec.scene_path is None and getattr(spec, "_auto_generate_scene", False):
@@ -375,9 +363,7 @@ def main() -> None:
                 if "robot" not in sim.list_robots():
                     sim.add_robot("robot", data_config="panda")
 
-        sim.start_cameras_recording(
-            cameras=recording_cameras, output_dir=video_dir, name=rec_name
-        )
+        sim.start_cameras_recording(cameras=recording_cameras, output_dir=video_dir, name=rec_name)
         try:
             t0 = time.time()
             result = sim.evaluate_benchmark(
@@ -415,9 +401,7 @@ def main() -> None:
         if server_handle is not None:
             from strands_robots.tools import gr00t_inference
 
-            gr00t_inference(
-                action="lifecycle", lifecycle="teardown", container_name=args.container
-            )
+            gr00t_inference(action="lifecycle", lifecycle="teardown", container_name=args.container)
 
 
 if __name__ == "__main__":

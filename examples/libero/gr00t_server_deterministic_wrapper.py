@@ -27,7 +27,7 @@ import os
 # Set BEFORE importing torch — required for cuBLAS determinism.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
-import torch
+import torch  # noqa: E402  # must load AFTER `CUBLAS_WORKSPACE_CONFIG` is set
 
 # Strict CUDA / cuDNN determinism.
 # Note: torch.use_deterministic_algorithms(True) can force slower kernels
@@ -74,7 +74,7 @@ print(f"[srv_wrap] initial seed applied: {_DEFAULT_SEED}", flush=True)
 # Monkey-patch Gr00tPolicy.reset so the client can trigger a re-seed
 # per episode. The client passes options={"seed": <int>} to override
 # the default seed (e.g. seed=42+ep_index for per-episode reproducibility).
-from gr00t.policy.gr00t_policy import Gr00tPolicy
+from gr00t.policy.gr00t_policy import Gr00tPolicy  # noqa: E402  # imports `torch`; must follow seeding setup
 
 _original_reset = Gr00tPolicy.reset
 
@@ -85,7 +85,10 @@ def _seeded_reset(self, options=None):
         try:
             seed = int(options["seed"])
         except (TypeError, ValueError):
-            print(f"[srv_wrap] warning: bad seed in reset options: {options['seed']!r}; using {_DEFAULT_SEED}", flush=True)
+            print(
+                f"[srv_wrap] warning: bad seed in reset options: " f"{options['seed']!r}; using {_DEFAULT_SEED}",
+                flush=True,
+            )
             seed = _DEFAULT_SEED
     _seed_all(seed)
     print(f"[srv_wrap] reset: re-seeded to {seed}", flush=True)
@@ -93,14 +96,16 @@ def _seeded_reset(self, options=None):
 
 
 Gr00tPolicy.reset = _seeded_reset
-print("[srv_wrap] patched Gr00tPolicy.reset: applies torch/numpy/random seed via options['seed']", flush=True)
+print(
+    "[srv_wrap] patched Gr00tPolicy.reset: applies torch/numpy/random " "seed via options['seed']",
+    flush=True,
+)
 
 
 # Now hand off to the unmodified server entrypoint with whatever args
 # the user passed.
-import tyro
-
-from gr00t.eval.run_gr00t_server import main, ServerConfig
+import tyro  # noqa: E402  # late import: must follow Gr00tPolicy patch above
+from gr00t.eval.run_gr00t_server import ServerConfig, main  # noqa: E402
 
 config = tyro.cli(ServerConfig)
 main(config)

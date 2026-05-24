@@ -121,7 +121,6 @@ import os
 import time
 
 from strands import Agent
-
 from strands_robots.benchmarks.libero import load_libero_suite
 from strands_robots.simulation import Simulation
 from strands_robots.tools import gr00t_inference
@@ -158,8 +157,8 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
     if args.policy != "groot" or not args.auto_server:
         return None
 
-    from pathlib import Path
     import subprocess
+    from pathlib import Path
     from time import monotonic, sleep
 
     hf_token_path = Path("~/.cache/huggingface/token").expanduser()
@@ -213,17 +212,14 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
             return result
         sleep(5)
     raise RuntimeError(
-        "GR00T model didn't reach load threshold within 180 s. "
-        "Check `docker logs <container>` for stderr."
+        "GR00T model didn't reach load threshold within 180 s. " "Check `docker logs <container>` for stderr."
     )
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--policy", choices=["mock", "groot"], default="mock")
-    p.add_argument(
-        "--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)"
-    )
+    p.add_argument("--port", type=int, default=8000, help="GR00T inference port (only used with --policy=groot)")
     p.add_argument(
         "--task",
         default="libero-spatial-pick_up_the_red_cube",
@@ -313,19 +309,13 @@ def main() -> None:
                 args.task = fallback
             else:
                 raise RuntimeError(
-                    f"--task {args.task!r} is not in the {suite} suite. "
-                    f"Available: {sorted(registered)[:3]}…"
+                    f"--task {args.task!r} is not in the {suite} suite. " f"Available: {sorted(registered)[:3]}…"
                 )
 
         ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        rec_name = (
-            f"{ts}--task={args.task}--n_eps={args.n_episodes}"
-            f"--seed={args.seed}--policy={args.policy}--agent"
-        )
+        rec_name = f"{ts}--task={args.task}--n_eps={args.n_episodes}" f"--seed={args.seed}--policy={args.policy}--agent"
         video_dir = _date_dir()
-        recording_cameras = (
-            ["image", "wrist_image"] if args.policy == "groot" else ["default"]
-        )
+        recording_cameras = ["image", "wrist_image"] if args.policy == "groot" else ["default"]
 
         # Pre-warm the LIBERO scene so the cameras the GR00T server
         # expects (`image`, `wrist_image`) are registered before
@@ -356,9 +346,7 @@ def main() -> None:
         # thread races with the eval thread on shared `mjData` and
         # produces 2-3% frame capture rate plus greenish artifacts —
         # documented in `strands-labs/robots#191`.
-        sim.start_cameras_recording(
-            cameras=recording_cameras, output_dir=video_dir, name=rec_name
-        )
+        sim.start_cameras_recording(cameras=recording_cameras, output_dir=video_dir, name=rec_name)
         try:
             agent = Agent(tools=[sim])
             t0 = time.time()
@@ -384,8 +372,7 @@ def main() -> None:
             print(result)
             video_path = os.path.join(video_dir, f"{rec_name}__{recording_cameras[0]}.mp4")
             print(
-                f"[agent-eval] policy={args.policy} task={args.task} "
-                f"wall_time={wall_time:.1f}s videos={video_path}"
+                f"[agent-eval] policy={args.policy} task={args.task} " f"wall_time={wall_time:.1f}s videos={video_path}"
             )
         finally:
             sim.stop_cameras_recording()
@@ -396,26 +383,8 @@ def main() -> None:
             pass
         # Tear down the GR00T inference container if we brought it up.
         if server_handle is not None:
-            gr00t_inference(
-                action="lifecycle", lifecycle="teardown", container_name=args.container
-            )
+            gr00t_inference(action="lifecycle", lifecycle="teardown", container_name=args.container)
 
-
-# Optional follow-up showing System-2 multi-turn reasoning across runs.
-# Drop this in `main()` after the first `print(result)` to see how the
-# same agent compounds context across calls:
-#
-#     agent(
-#         "If the success rate from the last run was below 0.5, run the "
-#         "same task again with seed 43 and tell me whether the gap is "
-#         "policy variance or a systematic failure mode. If it's variance, "
-#         "give me the mean and stddev across the two runs. If it's "
-#         "systematic, suggest a single follow-up benchmark to confirm."
-#     )
-#
-# For an iterative-supervision pattern (System-2 observes camera + state
-# *during* a rollout), see R24 / #29 — that example is anchored on OOD
-# scenarios where supervision actually earns its complexity.
 
 if __name__ == "__main__":
     main()

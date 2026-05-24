@@ -74,14 +74,17 @@ dependencies = [
 # No tests until backend code lands in R7 (Isaac) / R11 (Newton). For now
 # `hatch run test` is an import smoke that exercises the no-op stub.
 test = "python -c \"import strands_robots_sim; print('strands-robots-sim', strands_robots_sim.__version__, 'OK')\""
+# Lint extends to `examples/` so the runnable example files (which copy-
+# paste into PR docstrings + the README matrix) catch the same drift the
+# package source does. Keeps each new R8/R12/R23 backend example honest.
 lint = [
-    "black --check strands_robots_sim",
-    "isort --check-only strands_robots_sim",
-    "flake8 strands_robots_sim",
+    "black --check strands_robots_sim examples",
+    "isort --check-only strands_robots_sim examples",
+    "flake8 strands_robots_sim examples",
 ]
 format = [
-    "black strands_robots_sim",
-    "isort strands_robots_sim",
+    "black strands_robots_sim examples",
+    "isort strands_robots_sim examples",
 ]
 
 [tool.black]
