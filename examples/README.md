@@ -11,8 +11,8 @@ patterns the deleted `SimEnv` API used to cover.
 
 | File suffix | Driver | Replaces | Best for |
 |---|---|---|---|
-| `<backend>.py` | **Programmatic** — Python script calls `sim.evaluate_benchmark(...)` directly | `SimEnv` | CI / benchmark numbers / R15 matrix table |
-| `<backend>_agent.py` | **Strands `Agent` + natural language** — single `agent("Run the LIBERO benchmark …")` call drives setup + eval + cleanup | the natural-language entry point in the deleted `libero_example.py` | Demoing why a Strands integration buys you anything beyond direct calls |
+| `<benchmark>/run_<backend>.py` | **Programmatic** — Python script calls `sim.evaluate_benchmark(...)` directly | `SimEnv` | CI / benchmark numbers / R15 matrix table |
+| `<benchmark>/run_<backend>_agent.py` | **Strands `Agent` + natural language** — script owns the deterministic plumbing (GR00T container lifecycle, scene pre-warm, MP4 recording); a single `agent("…")` call invokes `evaluate_benchmark` from natural-language kwargs and produces a prose summary | the natural-language entry point in the deleted `libero_example.py` | Demoing why a Strands integration buys you anything beyond direct calls |
 
 The programmatic files print two grep-stable lines (`benchmark_name=...`
 and `policy=... task=... success_rate=... wall_time=...s`) that R15
@@ -47,10 +47,13 @@ Both files in every pair accept `--policy {mock,groot}` and
 sub-checkpoints** — `libero_spatial/`, `libero_10/`, `libero_object/`,
 `libero_goal/` — each finetuned end-to-end on the matching LIBERO
 suite. The `--task <libero-<suite>-<task_stem>>` flag auto-derives
-which subfolder to use; service-start commands (Strands tool *and*
-bare-Docker fallback) live in `libero/run_mujoco.py`'s docstring;
-`libero/run_mujoco_agent.py` makes the agent itself run them based on
-`--task`'s suite.
+which subfolder to use; both example files orchestrate the GR00T
+container lifecycle (build → checkpoint download → start → wait-for-
+ready → teardown) deterministically from the script via
+`gr00t_inference(action='lifecycle', ...)`. The agent file's agent
+isn't asked to manage Docker / HF cache — those are brittle for an
+LLM and stay under Python control. Pass `--no-auto-server` to either
+file to reuse an already-running container instead.
 
 The mock invocation's wall-time is a smoke-test reference only; **the
 canonical mujoco baseline number for the matrix table is the
@@ -69,10 +72,10 @@ the table for reference.
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
 | [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client)[^1] | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
-| `libero_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
-| `libero_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
-| `libero_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
-| `libero_newton_fleet.py` | Newton / Warp | 4096 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | fleet |
+| `libero/run_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
+| `libero/run_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
+| `libero/run_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
+| `libero/run_newton_fleet.py` | Newton / Warp | 4096 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | fleet |
 
 **Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
@@ -119,10 +122,10 @@ python examples/libero/run_mujoco.py --policy mock --n-episodes 5
 pip install strands-agents
 python examples/libero/run_mujoco_agent.py --policy mock
 
-# 3) Real eval against `libero_spatial/`. Programmatic file's docstring
-#    has the three-step sequence (download subfolder → start service →
-#    run); the agent file lets the agent run those steps itself based
-#    on --task's suite.
+# 3) Real eval against the matching `libero_<suite>/` sub-checkpoint.
+#    Both files auto-orchestrate the GR00T container lifecycle from
+#    the script (build → checkpoint download → start → teardown);
+#    pass `--no-auto-server` to reuse an existing one.
 python examples/libero/run_mujoco.py --policy groot --port 8000 --n-episodes 50
 python examples/libero/run_mujoco_agent.py --policy groot --port 8000
 
@@ -139,15 +142,9 @@ layout and timestamped name pattern are preserved from the deleted
 `SimEnv` so existing scrapers keep working.
 
 > **Note:** the `[sim-mujoco]` and `[benchmark-libero]` extras are
-> currently on `strands-robots` `main` only and will land in the next
-> PyPI release (`>= 0.4.0`). Until then, install from git:
+> currently on `strands-robots` `main` only and will land in a future
+> PyPI release. Until then, install from git:
 > `pip install 'strands-robots[sim-mujoco,benchmark-libero] @ git+https://github.com/strands-labs/robots.git@main'`.
-
-> **Note:** `load_libero_suite(...)` requires upstream
-> [`strands-labs/robots#147`](https://github.com/strands-labs/robots/pull/147)
-> (case-insensitive BDDL parsing) to register tasks from real LIBERO
-> BDDL files. Without it every task is skipped and both example files
-> raise on suite registration.
 
 ## Migration from the legacy 0.1.x API
 
