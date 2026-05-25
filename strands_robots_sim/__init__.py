@@ -16,9 +16,15 @@ https://github.com/strands-labs/robots-sim/issues/8.
 See ``examples/MIGRATION.md`` for the old-API → new-API mapping.
 """
 
-import warnings
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
-__version__ = "0.2.0"
+try:
+    __version__ = _pkg_version("strands-robots-sim")
+except PackageNotFoundError:
+    # Editable install before metadata is generated, or running from a
+    # working tree without ``pip install -e .`` having been run yet.
+    __version__ = "0.0.0+unknown"
 
 __all__ = ["__version__"]
 
@@ -62,9 +68,12 @@ _LEGACY_REMOVED = {
 
 
 def __getattr__(name):  # PEP 562 module-level __getattr__
-    """Surface a clear, actionable error for legacy import names."""
+    """Surface a clear, actionable error for legacy import names.
+
+    Raises ``ImportError`` (not ``AttributeError`` + ``DeprecationWarning``)
+    so the message survives ``-W error::DeprecationWarning`` test envs that
+    would otherwise mask the actionable hint with the warning's traceback.
+    """
     if name in _LEGACY_REMOVED:
-        message = _LEGACY_REMOVED[name]
-        warnings.warn(message, DeprecationWarning, stacklevel=2)
-        raise ImportError(message)
+        raise ImportError(_LEGACY_REMOVED[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
