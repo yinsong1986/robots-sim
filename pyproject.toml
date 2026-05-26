@@ -41,6 +41,18 @@ dev = [
     "black",
     "isort",
     "flake8",
+    "pytest>=7.0",
+]
+# Isaac Sim is NOT installable from PyPI -- it's an Omniverse Kit app.
+# The user must install it separately:
+#   - via NVIDIA Omniverse Launcher (Isaac Sim 2024.x), OR
+#   - via Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i, OR
+#   - via Docker: nvcr.io/nvidia/isaac-sim:4.5.0
+# We declare lightweight deps that Isaac ships and that ARE pip-installable:
+isaac = [
+    "usd-core>=24.5,<26.0",
+    "warp-lang>=1.13.0",
+    "pytest>=7.0",
 ]
 # NOTE: the lightweight `sim` extra (libero / robosuite / mujoco / gymnasium)
 # was removed in 0.2.0 — that backend now lives in `strands-robots` and is
@@ -48,6 +60,13 @@ dev = [
 # backends (Isaac Sim, Newton) will land here behind `[isaac]` / `[newton]`
 # extras in upcoming releases. See examples/MIGRATION.md and
 # https://github.com/strands-labs/robots-sim/issues/8.
+all = [
+    "strands-robots-sim[isaac]",
+]
+
+[project.entry-points."strands_robots.backends"]
+isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
+isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 
 [project.urls]
 Homepage = "https://github.com/strands-labs/robots-sim"
@@ -68,12 +87,16 @@ dependencies = [
     "black",
     "isort",
     "flake8",
+    "pytest>=7.0",
 ]
 
 [tool.hatch.envs.default.scripts]
-# No tests until backend code lands in R7 (Isaac) / R11 (Newton). For now
-# `hatch run test` is an import smoke that exercises the no-op stub.
-test = "python -c \"import strands_robots_sim; print('strands-robots-sim', strands_robots_sim.__version__, 'OK')\""
+# `hatch run test` runs the Isaac PR-1 entry-point + lazy-import test
+# slice (10 tests; pyproject parsing + importlib.metadata discovery +
+# PEP 562 lazy `__getattr__` contract). PR-4 of the #31 split adds the
+# simulation-module tests under the same directory; the glob picks
+# them up automatically.
+test = "pytest strands_robots_sim/isaac/tests/ -v"
 # Lint extends to `examples/` so the runnable example files (which copy-
 # paste into PR docstrings + the README matrix) catch the same drift the
 # package source does. Keeps each new R8/R12/R23 backend example honest.
@@ -96,3 +119,8 @@ include = '\.pyi?$'
 profile = "black"
 line_length = 120
 multi_line_output = 3
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: tests requiring NVIDIA GPU + Isaac Sim (gated on STRANDS_GPU_TEST=1)",
+]
