@@ -11,6 +11,7 @@ Supported procedural robots:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 
@@ -62,6 +63,34 @@ class ProceduralRobot:
         return [j.name for j in self.joints if j.joint_type != "fixed"]
 
 
+def _validate_kinematic_tree(robot: ProceduralRobot) -> None:
+    """Phase-1 fail-fast guard: reject duplicate (parent, child) body edges.
+
+    Phase-1 callers don't instantiate the articulation, so this is a no-op at
+    builder time UNLESS ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` is set
+    (Phase-2 dev path). When the guard fires, it surfaces the defect with
+    body indices + joint names rather than letting USD/MuJoCo emit a cryptic
+    articulation error two layers down.
+
+    See the NOTE in ``_build_unitree_g1`` for the specific defect this is
+    designed to catch (G1 legs/arms currently share a single ``(parent,
+    child)`` edge across two joint axes; USD requires intermediate massless
+    link bodies).
+    """
+    if os.environ.get("STRANDS_ISAAC_VALIDATE_KINEMATICS", "").lower() not in ("1", "true", "yes"):
+        return
+    from collections import Counter
+
+    edges = [(j.parent_body, j.child_body) for j in robot.joints]
+    dups = {edge: count for edge, count in Counter(edges).items() if count > 1}
+    if dups:
+        offenders = {edge: [j.name for j in robot.joints if (j.parent_body, j.child_body) == edge] for edge in dups}
+        raise ValueError(
+            f"{robot.name}: duplicate parent->child body edges (Phase-2 defect): {offenders}. "
+            f"Insert intermediate massless link bodies before instantiating articulation."
+        )
+
+
 def _build_so100() -> ProceduralRobot:
     """Build SO-100 6-DOF tabletop arm procedurally."""
     bodies = [
@@ -93,7 +122,9 @@ def _build_so100() -> ProceduralRobot:
         ),
     ]
 
-    return ProceduralRobot(name="so100", bodies=bodies, joints=joints)
+    robot = ProceduralRobot(name="so100", bodies=bodies, joints=joints)
+    _validate_kinematic_tree(robot)
+    return robot
 
 
 def _build_panda() -> ProceduralRobot:
@@ -133,7 +164,9 @@ def _build_panda() -> ProceduralRobot:
         ),
     ]
 
-    return ProceduralRobot(name="panda", bodies=bodies, joints=joints)
+    robot = ProceduralRobot(name="panda", bodies=bodies, joints=joints)
+    _validate_kinematic_tree(robot)
+    return robot
 
 
 def _build_unitree_g1() -> ProceduralRobot:
@@ -169,6 +202,11 @@ def _build_unitree_g1() -> ProceduralRobot:
     # topology will need intermediate massless link bodies before Phase 2 wires up the actual
     # USD prim chain. Tracked as Phase-2 work; the Phase-1 skeleton does not instantiate the
     # articulation, so the duplicate-edge defect is dormant on this branch.
+    #
+    # ``_validate_kinematic_tree`` (called below) is a no-op by default but raises when
+    # ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` is set, which is the Phase-2 dev path: it
+    # surfaces this defect at builder time with body indices + joint names rather than
+    # letting USD/MuJoCo emit a cryptic articulation error two layers down.
     joints = [
         # Torso
         JointDef(name="torso_yaw", parent_body=0, child_body=1, axis=(0, 0, 1), limit_lower=-1.0, limit_upper=1.0),
@@ -210,7 +248,9 @@ def _build_unitree_g1() -> ProceduralRobot:
         JointDef(name="r_elbow", parent_body=15, child_body=16, axis=(0, 1, 0), limit_lower=-2.5, limit_upper=0.0),
     ]
 
-    return ProceduralRobot(name="unitree_g1", bodies=bodies, joints=joints, base_position=(0.0, 0.0, 0.85))
+    robot = ProceduralRobot(name="unitree_g1", bodies=bodies, joints=joints, base_position=(0.0, 0.0, 0.85))
+    _validate_kinematic_tree(robot)
+    return robot
 
 
 # Registry of procedural robots
