@@ -36,10 +36,45 @@ try:
 except (ImportError, ModuleNotFoundError):
     # Fallback: strands-robots < 0.4.0 doesn't have simulation.base yet.
     # Provide a minimal ABC stub so the class can still be defined.
-    from abc import ABC
+    from abc import ABC, abstractmethod
 
     class SimEngine(ABC):  # type: ignore[no-redef]
-        """Minimal fallback ABC when strands-robots.simulation.base is unavailable."""
+        """Minimal fallback ABC when strands-robots.simulation.base is unavailable.
+
+        Mirrors the abstract surface of the real
+        ``strands_robots.simulation.base.SimEngine`` so subclasses fail fast at
+        instantiation if a method is missing -- same contract whether
+        ``strands_robots`` is installed or not.
+        """
+
+        @abstractmethod
+        def create_world(self, **kwargs): ...
+        @abstractmethod
+        def destroy(self): ...
+        @abstractmethod
+        def reset(self): ...
+        @abstractmethod
+        def step(self, n_steps: int = 1): ...
+        @abstractmethod
+        def get_state(self): ...
+        @abstractmethod
+        def add_robot(self, name: str, **kwargs): ...
+        @abstractmethod
+        def remove_robot(self, name: str): ...
+        @abstractmethod
+        def list_robots(self) -> list: ...
+        @abstractmethod
+        def robot_joint_names(self, robot_name: str) -> list: ...
+        @abstractmethod
+        def add_object(self, name: str, **kwargs): ...
+        @abstractmethod
+        def remove_object(self, name: str): ...
+        @abstractmethod
+        def get_observation(self, robot_name=None, *, skip_images=False): ...
+        @abstractmethod
+        def send_action(self, action, robot_name=None, n_substeps: int = 1): ...
+        @abstractmethod
+        def render(self, camera_name: str = "default", width=None, height=None): ...
 
         def cleanup(self) -> None:
             pass
