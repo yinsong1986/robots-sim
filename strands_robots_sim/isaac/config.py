@@ -114,3 +114,20 @@ class IsaacConfig:
         rtx_env = os.environ.get("STRANDS_ISAAC_RTX_PATHTRACING")
         if rtx_env is not None and rtx_env.lower() in ("true", "1", "yes"):
             self.render_mode = "rtx_pathtracing"
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> "IsaacConfig":
+        """Construct IsaacConfig from kwargs, rejecting unknown keys eagerly.
+
+        Equivalent to ``IsaacConfig(**kwargs)`` for the unknown-key behavior
+        (dataclass ``__init__`` already raises ``TypeError`` on unexpected
+        kwargs), but exposed as a named entry point so PR-4's
+        ``IsaacSimulation.__init__`` can document its kwarg-validation
+        contract by name rather than by inline ``dataclasses.fields()``
+        reflection.
+
+        Closes the R1 silent-drop bug (commit 32ef307) symmetrically across
+        the ``config=None`` and ``config=<existing>`` construction paths in
+        ``IsaacSimulation.__init__``.
+        """
+        return cls(**kwargs)
