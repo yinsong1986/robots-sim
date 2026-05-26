@@ -41,6 +41,17 @@ dev = [
     "black",
     "isort",
     "flake8",
+    "pytest>=7.0",
+]
+# Isaac Sim is NOT installable from PyPI -- it's an Omniverse Kit app.
+# The user must install it separately:
+#   - via NVIDIA Omniverse Launcher (Isaac Sim 2024.x), OR
+#   - via Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i, OR
+#   - via Docker: nvcr.io/nvidia/isaac-sim:4.5.0
+# We declare lightweight deps that Isaac ships and that ARE pip-installable:
+isaac = [
+    "usd-core>=24.5,<26.0",
+    "warp-lang>=1.13.0",
 ]
 # NOTE: the lightweight `sim` extra (libero / robosuite / mujoco / gymnasium)
 # was removed in 0.2.0 — that backend now lives in `strands-robots` and is
@@ -48,6 +59,13 @@ dev = [
 # backends (Isaac Sim, Newton) will land here behind `[isaac]` / `[newton]`
 # extras in upcoming releases. See examples/MIGRATION.md and
 # https://github.com/strands-labs/robots-sim/issues/8.
+all = [
+    "strands-robots-sim[isaac]",
+]
+
+[project.entry-points."strands_robots.backends"]
+isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
+isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 
 [project.urls]
 Homepage = "https://github.com/strands-labs/robots-sim"
@@ -65,6 +83,7 @@ packages = ["strands_robots_sim"]
 
 [tool.hatch.envs.default]
 dependencies = [
+    "pytest>=7.0",
     "black",
     "isort",
     "flake8",
@@ -96,3 +115,8 @@ include = '\.pyi?$'
 profile = "black"
 line_length = 120
 multi_line_output = 3
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: tests requiring NVIDIA GPU + Isaac Sim (gated on STRANDS_GPU_TEST=1)",
+]
