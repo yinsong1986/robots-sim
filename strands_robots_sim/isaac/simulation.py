@@ -769,6 +769,106 @@ class IsaacSimulation(SimEngine):
                 "content": [{"text": f"Object '{name}' added (shape={shape}, pos={pos})."}],
             }
 
+    # --- SimEngine: Introspection / Removal ---------------------------------
+
+    def list_robots(self) -> list[str]:
+        """Return ordered list of robot names currently in the world.
+
+        Returns
+        -------
+        list[str]
+            Robot names in insertion order. Empty if no robots have been
+            added (or after :meth:`destroy`).
+        """
+        with self._lock:
+            return list(self._robots.keys())
+
+    def robot_joint_names(self, robot_name: str) -> list[str]:
+        """Return ordered joint names for ``robot_name``.
+
+        Parameters
+        ----------
+        robot_name : str
+            Robot identifier previously passed to :meth:`add_robot`.
+
+        Returns
+        -------
+        list[str]
+            Joint names in articulation order, or an empty list if
+            ``robot_name`` is not present (matches the silent-empty
+            convention used by :meth:`get_observation` for unknown robots).
+        """
+        with self._lock:
+            if robot_name not in self._robots:
+                return []
+            return list(self._robots[robot_name].joint_names)
+
+    def remove_robot(self, name: str) -> dict[str, Any]:
+        """Remove a robot from the simulation.
+
+        Drops the robot's bookkeeping entry and prunes any prims rooted at
+        the robot's prim path from ``self._prim_registry``. The actual USD
+        prim deletion is delegated to :meth:`destroy` / world teardown in
+        Phase 1; only the in-Python registry is updated here.
+
+        Parameters
+        ----------
+        name : str
+            Robot identifier previously passed to :meth:`add_robot`.
+
+        Returns
+        -------
+        dict
+            Status dict in the standard ``{"status", "content": [{"text"}]}``
+            shape used by mutating methods on this class.
+        """
+        with self._lock:
+            if name not in self._robots:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Robot '{name}' not found."}],
+                }
+            prim_path = self._robots[name].prim_path
+            self._prim_registry = [p for p in self._prim_registry if not p.startswith(prim_path)]
+            del self._robots[name]
+            logger.info("Removed robot '%s' (prim=%s)", name, prim_path)
+            return {
+                "status": "success",
+                "content": [{"text": f"Robot '{name}' removed."}],
+            }
+
+    def remove_object(self, name: str) -> dict[str, Any]:
+        """Remove an object from the scene.
+
+        Mirror of :meth:`add_object`'s prim-path convention
+        (``{stage_path}/Objects/{name}``). Only updates the in-Python
+        registry; USD prim deletion is handled at world teardown.
+
+        Parameters
+        ----------
+        name : str
+            Object identifier previously passed to :meth:`add_object`.
+
+        Returns
+        -------
+        dict
+            Status dict in the standard ``{"status", "content": [{"text"}]}``
+            shape used by mutating methods on this class.
+        """
+        with self._lock:
+            prim_path = f"{self._config.stage_path}/Objects/{name}"
+            if prim_path not in self._prim_registry:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Object '{name}' not found."}],
+                }
+            self._prim_registry.remove(prim_path)
+            logger.info("Removed object '%s' (prim=%s)", name, prim_path)
+            return {
+                "status": "success",
+                "content": [{"text": f"Object '{name}' removed."}],
+            }
+
     # --- SimEngine: Observation / Action ------------------------------------
 
     def get_observation(self, robot_name: str | None = None, *, skip_images: bool = False) -> dict[str, Any]:
