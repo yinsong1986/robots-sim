@@ -496,6 +496,16 @@ class IsaacSimulation(SimEngine):
                     "content": [{"text": "No world to destroy."}],
                 }
 
+            # Capture pre-teardown counts so the structured json payload
+            # surfaces what was actually released (the agent's get_state()
+            # window is gone after destroy() returns).
+            num_robots_released = len(self._robots)
+            num_cameras_released = len(self._cameras)
+            num_prims_released = len(self._prim_registry)
+            num_envs_released = self._num_envs_active
+            sim_time_at_destroy = self._sim_time
+            step_count_at_destroy = self._step_count
+
             try:
                 if self._world is not None:
                     self._world.stop()
@@ -522,6 +532,22 @@ class IsaacSimulation(SimEngine):
 
             logger.info("World destroyed. SimulationApp remains (process-wide singleton).")
 
+            # Surface a structured snapshot of what teardown released
+            # alongside the human-readable text. Mirrors the json content
+            # block convention used by get_state() (L624) and create_world()
+            # (L455) so an agent inspecting destroy() can confirm what was
+            # actually torn down without re-querying.
+            destroy_info = {
+                "num_robots_released": num_robots_released,
+                "num_cameras_released": num_cameras_released,
+                "num_prims_released": num_prims_released,
+                "num_envs_released": num_envs_released,
+                "sim_time_at_destroy": sim_time_at_destroy,
+                "step_count_at_destroy": step_count_at_destroy,
+                "stage_path": self._config.stage_path,
+                "simulation_app_alive": True,  # singleton survives destroy()
+            }
+
             return {
                 "status": "success",
                 "content": [
@@ -529,7 +555,8 @@ class IsaacSimulation(SimEngine):
                         "text": (
                             "Isaac Sim world destroyed. All resources released. "
                             "SimulationApp singleton remains active."
-                        )
+                        ),
+                        "json": destroy_info,
                     }
                 ],
             }
