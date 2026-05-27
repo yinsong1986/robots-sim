@@ -524,3 +524,162 @@ class TestLoadersAreImportable:
         # ``loaders`` itself in this test file).
         robot = loaders.load_urdf(str(urdf_path))
         assert robot.num_joints == 7
+
+
+# ---------------------------------------------------------------------------
+# Real-asset parity: robosuite robots that strands-robots' LIBERO adapter
+# consumes via MJCF must round-trip through ``load_mjcf`` cleanly.
+#
+# Closes cagataycali's review on PR #51 asking for "tests for verifying the
+# robots we have in strands-robots to smoothly maps into isaac".
+#
+# The strands-robots LIBERO adapter uses robosuite's bundled MJCF assets
+# (``robosuite/models/assets/robots/<name>/robot.xml``) for the seven
+# robot embodiments LIBERO ships against: baxter / iiwa / jaco / kinova3
+# / panda / sawyer / ur5e. Loading each via ``load_mjcf`` proves the
+# loader handles the wire format the rest of the strands ecosystem
+# already produces -- not just the synthetic fixtures above.
+#
+# The ``robosuite`` package is an optional / heavy dep (pulls mujoco +
+# numpy etc.); these tests skip when it's not on PYTHONPATH, mirroring
+# the ``pxr`` import-guard pattern on ``TestLoadUsd``.
+# ---------------------------------------------------------------------------
+
+
+_ROBOSUITE_ROBOT_EMBODIMENTS = {
+    "panda": {"min_joints": 7, "max_joints": 7},  # Franka Panda 7-DOF arm
+    "iiwa": {"min_joints": 7, "max_joints": 7},  # KUKA LBR iiwa 7-DOF
+    "kinova3": {"min_joints": 7, "max_joints": 7},  # Kinova Gen3 7-DOF
+    "jaco": {"min_joints": 7, "max_joints": 7},  # Kinova Jaco 7-DOF
+    "sawyer": {"min_joints": 7, "max_joints": 7},  # Rethink Sawyer 7-DOF
+    "ur5e": {"min_joints": 6, "max_joints": 6},  # Universal Robots UR5e 6-DOF
+    "baxter": {"min_joints": 14, "max_joints": 14},  # Rethink Baxter dual 7-DOF arms
+}
+
+
+def _robosuite_robot_xml_path(robot_name: str) -> Path | None:
+    """Return the path to the robosuite-bundled MJCF for ``robot_name``.
+
+    Returns ``None`` if ``robosuite`` isn't installed, so each test can
+    skip individually without a session-level fixture.
+    """
+    try:
+        import robosuite
+    except ImportError:
+        return None
+    rs_root = Path(robosuite.__file__).parent
+    candidate = rs_root / "models" / "assets" / "robots" / robot_name / "robot.xml"
+    return candidate if candidate.is_file() else None
+
+
+_HAS_ROBOSUITE = _robosuite_robot_xml_path("panda") is not None
+
+
+@pytest.mark.skipif(
+    not _HAS_ROBOSUITE,
+    reason="robosuite not installed; real-asset parity tests are gated on the optional dep",
+)
+class TestRobosuiteMjcfParity:
+    """Pin: every robot embodiment LIBERO consumes via robosuite's bundled
+    MJCFs must round-trip through ``load_mjcf`` and produce a sensible
+    ProceduralRobot with the documented joint count.
+
+    Locking the joint counts catches two failure modes at once:
+
+    1. **Loader regression** (e.g. revolute / prismatic / fixed joint
+       handling drifts under future refactors) — would surface as a
+       ``num_joints`` mismatch on a known robot.
+    2. **strands-robots upstream change** (e.g. robosuite ships a
+       different MJCF schema or renames the asset) — would surface as
+       a missing-file skip in CI rather than a silent zero-joints
+       phantom robot (the #33-class failure).
+    """
+
+    @pytest.mark.parametrize("robot_name", sorted(_ROBOSUITE_ROBOT_EMBODIMENTS))
+    def test_robosuite_robot_loads_cleanly(self, robot_name: str) -> None:
+        """Each robosuite-bundled MJCF must load without raising."""
+        xml_path = _robosuite_robot_xml_path(robot_name)
+        if xml_path is None:
+            pytest.skip(f"robosuite asset for {robot_name!r} not present (custom robosuite install?)")
+
+        robot = loaders.load_mjcf(str(xml_path))
+
+        assert robot.name, f"loaded {robot_name!r} robot has empty name (MJCF model attribute missing?)"
+        assert len(robot.bodies) > 0, f"loaded {robot_name!r} robot has zero bodies"
+        # Every body referenced by a joint must be a real body in the dataclass.
+        body_count = len(robot.bodies)
+        for j in robot.joints:
+            assert 0 <= j.parent_body < body_count, (
+                f"{robot_name}: joint {j.name!r} parent_body={j.parent_body} out of range "
+                f"(robot has {body_count} bodies)"
+            )
+            assert 0 <= j.child_body < body_count, (
+                f"{robot_name}: joint {j.name!r} child_body={j.child_body} out of range "
+                f"(robot has {body_count} bodies)"
+            )
+
+    @pytest.mark.parametrize("robot_name", sorted(_ROBOSUITE_ROBOT_EMBODIMENTS))
+    def test_robosuite_robot_joint_count_matches_spec(self, robot_name: str) -> None:
+        """Loaded joint count must match the documented DOF for the embodiment.
+
+        Locking these prevents silent regressions where a loader change
+        drops a joint type or duplicates one. Spec values are based on
+        each robot's published kinematic spec (from robosuite's docs).
+        """
+        xml_path = _robosuite_robot_xml_path(robot_name)
+        if xml_path is None:
+            pytest.skip(f"robosuite asset for {robot_name!r} not present")
+
+        spec = _ROBOSUITE_ROBOT_EMBODIMENTS[robot_name]
+        robot = loaders.load_mjcf(str(xml_path))
+
+        assert spec["min_joints"] <= robot.num_joints <= spec["max_joints"], (
+            f"{robot_name}: loaded {robot.num_joints} joints, expected "
+            f"{spec['min_joints']}-{spec['max_joints']}. Either the loader regressed "
+            f"or robosuite's MJCF for this robot changed; verify the spec table above "
+            f"against the upstream asset."
+        )
+
+    @pytest.mark.parametrize("robot_name", sorted(_ROBOSUITE_ROBOT_EMBODIMENTS))
+    def test_robosuite_robot_joints_are_revolute(self, robot_name: str) -> None:
+        """Every robosuite arm uses revolute joints; the loader must reflect that.
+
+        All seven robots are revolute-only manipulators (no prismatic
+        actuation in the standard arm bodies). If the loader misclassifies
+        a hinge as prismatic or fixed, this test catches it.
+        """
+        xml_path = _robosuite_robot_xml_path(robot_name)
+        if xml_path is None:
+            pytest.skip(f"robosuite asset for {robot_name!r} not present")
+
+        robot = loaders.load_mjcf(str(xml_path))
+        joint_types = {j.joint_type for j in robot.joints if j.joint_type != "fixed"}
+        assert joint_types == {"revolute"}, (
+            f"{robot_name}: expected all actuated joints to be revolute; got {sorted(joint_types)}. "
+            f"The loader's hinge -> revolute mapping may be misclassifying joints."
+        )
+
+    def test_all_embodiments_at_least_load(self) -> None:
+        """Sanity check: every robosuite robot in the spec table loads.
+
+        If this fails on a particular robot, the parametrized tests above
+        will give a more specific diagnostic. This test exists to make
+        the failure visible at a glance even when the parametrized cases
+        scroll off-screen.
+        """
+        failures = []
+        for robot_name in _ROBOSUITE_ROBOT_EMBODIMENTS:
+            xml_path = _robosuite_robot_xml_path(robot_name)
+            if xml_path is None:
+                continue
+            try:
+                loaders.load_mjcf(str(xml_path))
+            except Exception as exc:  # noqa: BLE001 - aggregate failures
+                failures.append(f"  {robot_name}: {type(exc).__name__}: {exc}")
+
+        assert not failures, (
+            "robosuite-bundled MJCFs failed to load:\n"
+            + "\n".join(failures)
+            + "\nstrands-robots' LIBERO adapter consumes these directly; a regression here "
+            "would silently break the matrix's mujoco baseline for any of the affected robots."
+        )
