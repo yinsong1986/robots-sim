@@ -343,7 +343,10 @@ class IsaacSimulation(SimEngine):
                 )
 
                 # Set gravity
-                self._world.get_physics_context().set_gravity(grav)
+                # Isaac Sim 5.1: set_gravity takes a scalar magnitude, not a vector.
+                # Extract the Z-component (convention: gravity points along -Z).
+                gravity_magnitude = grav[2] if isinstance(grav, (list, tuple)) else grav
+                self._world.get_physics_context().set_gravity(gravity_magnitude)
 
                 # Add ground plane
                 if ground_plane and self._config.ground_plane:
