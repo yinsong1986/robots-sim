@@ -27,9 +27,54 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
+
+
+class SimulationAppLaunchConfig(TypedDict, total=False):
+    """Typed shape for ``omni.isaac.kit.SimulationApp`` launch config.
+
+    All keys optional; SimulationApp accepts an open-ended dict and any
+    additional keys are forwarded to Kit unchanged. The keys below are the
+    well-known ones documented by NVIDIA across Isaac Sim 4.x / 5.x and are
+    the ones a Strands tool would realistically expose to an agent.
+
+    See: https://docs.omniverse.nvidia.com/py/isaacsim/source/extensions/omni.isaac.kit/docs/index.html
+
+    Keys
+    ----
+    headless : bool
+        Run without GUI. Required True on cloud / CI runners.
+    renderer : str
+        ``"RayTracedLighting"`` or ``"PathTracing"``.
+    width, height : int
+        Viewport resolution in pixels.
+    physics_gpu : int
+        CUDA device index for PhysX.
+    active_gpu : int
+        CUDA device index for rendering.
+    multi_gpu : bool
+        Enable multi-GPU rendering.
+    sync_loads : bool
+        Block until USD assets finish loading.
+    hide_ui : bool
+        Hide Kit's editor UI in non-headless mode.
+    anti_aliasing : int
+        Anti-aliasing level (0-3).
+    """
+
+    headless: bool
+    renderer: str
+    width: int
+    height: int
+    physics_gpu: int
+    active_gpu: int
+    multi_gpu: bool
+    sync_loads: bool
+    hide_ui: bool
+    anti_aliasing: int
+
 
 try:
     from strands_robots.simulation.base import SimEngine
@@ -95,7 +140,11 @@ _SIMULATION_APP: Any = None
 _SIMULATION_APP_LOCK = threading.Lock()
 
 
-def _get_or_create_simulation_app(headless: bool = True, **kwargs: Any) -> Any:
+def _get_or_create_simulation_app(
+    headless: bool = True,
+    launch_config: SimulationAppLaunchConfig | None = None,
+    **kwargs: Any,
+) -> Any:
     """Get or create the process-wide SimulationApp singleton.
 
     Isaac Sim's SimulationApp can only be created ONCE per process.
@@ -105,8 +154,17 @@ def _get_or_create_simulation_app(headless: bool = True, **kwargs: Any) -> Any:
     ----------
     headless : bool
         Run without GUI.
+    launch_config : SimulationAppLaunchConfig, optional
+        Typed launch config dict forwarded to ``omni.isaac.kit.SimulationApp``.
+        See :class:`SimulationAppLaunchConfig` for documented keys
+        (``renderer``, ``width``, ``height``, ``physics_gpu``,
+        ``active_gpu``, ``multi_gpu``, ``sync_loads``, ``hide_ui``,
+        ``anti_aliasing``). The explicit ``headless`` argument always
+        wins over any ``"headless"`` key in ``launch_config``.
     **kwargs
-        Additional SimulationApp launch config.
+        Additional SimulationApp launch keys (escape hatch for Kit
+        options not in :class:`SimulationAppLaunchConfig`). Merged on
+        top of ``launch_config``; ``headless`` argument still wins.
 
     Returns
     -------
@@ -133,8 +191,13 @@ def _get_or_create_simulation_app(headless: bool = True, **kwargs: Any) -> Any:
                 "(nvcr.io/nvidia/isaac-sim:4.5.0)."
             ) from e
 
-        launch_config = {"headless": headless, **kwargs}
-        _SIMULATION_APP = SimulationApp(launch_config)
+        # Layer order: typed launch_config base, then **kwargs escape hatch,
+        # then explicit headless argument (always wins so the caller's
+        # intent is unambiguous).
+        merged: dict[str, Any] = dict(launch_config or {})
+        merged.update(kwargs)
+        merged["headless"] = headless
+        _SIMULATION_APP = SimulationApp(merged)
         logger.info(
             "SimulationApp created (headless=%s). " "Note: this is a process-wide singleton.",
             headless,
