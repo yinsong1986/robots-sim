@@ -421,6 +421,27 @@ class IsaacSimulation(SimEngine):
                     self._config.headless,
                 )
 
+                # Surface a structured snapshot of the freshly-created
+                # environment alongside the human-readable text. Agents
+                # spinning up a sim can introspect device / dt / scene
+                # config without re-querying via get_state().
+                world_info = {
+                    "physics_dt": dt,
+                    "rendering_dt": self._config.rendering_dt,
+                    "gravity": list(grav) if isinstance(grav, (list, tuple)) else [0.0, 0.0, float(grav)],
+                    "ground_plane": bool(ground_plane and self._config.ground_plane),
+                    "stage_path": self._config.stage_path,
+                    "stage_units_in_meters": 1.0,
+                    "device": self._config.device,
+                    "headless": self._config.headless,
+                    "render_mode": self._config.render_mode,
+                    "num_envs": self._config.num_envs,
+                    "num_envs_active": self._num_envs_active,
+                    "replicated": self._replicated,
+                    "sim_time": self._sim_time,
+                    "step_count": self._step_count,
+                }
+
                 return {
                     "status": "success",
                     "content": [
@@ -430,7 +451,8 @@ class IsaacSimulation(SimEngine):
                                 f"dt={dt:.5f}, gravity={grav}, "
                                 f"device={self._config.device}, "
                                 f"headless={self._config.headless}"
-                            )
+                            ),
+                            "json": world_info,
                         }
                     ],
                 }
