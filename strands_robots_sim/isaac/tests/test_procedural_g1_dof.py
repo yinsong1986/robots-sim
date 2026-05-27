@@ -11,10 +11,9 @@ Companion pin for the ``docs/backends/isaac.md`` Phase 1 banner lives in
 ``test_phase1_doc_banner.py`` (lands in PR-5 alongside the docs file
 itself).
 
-Note: this pin does NOT cover the kinematic-tree topology defect on the
-G1 joint graph (duplicate ``(parent_body, child_body)`` edges); that is
-a Phase 2 fix that needs intermediate massless link bodies, and is
-documented in ``procedural.py`` line 165 as deferred.
+Note: this pin does NOT cover the kinematic-tree topology validity (each
+non-root link has exactly one inbound joint); that invariant is pinned
+separately in ``test_procedural_kinematic_guard.py``.
 """
 
 from __future__ import annotations

@@ -1,100 +1,114 @@
-"""Phase-1 fail-fast guard pin: ``_validate_kinematic_tree``.
+"""Fail-first kinematic-tree pin: ``_validate_kinematic_tree``.
 
-cagataycali's review on PR #46 (procedural USD builders) flagged that
-the documented duplicate-edge defect on G1 is silently returned by
-``_build_unitree_g1`` and would only surface as a cryptic articulation
-error when Phase 2 wires up USD instantiation. The guard is opt-in via
-``STRANDS_ISAAC_VALIDATE_KINEMATICS`` so it does not break Phase-1
-callers (which never instantiate the articulation), but it MUST fire on
-the known defect when Phase-2 development flips the env var on.
+cagataycali's review on PR #46 first asked for a guard against the documented
+duplicate-edge defect on G1 (which would have surfaced as a cryptic USD /
+MuJoCo articulation error two layers down). The first round of that fix added
+the guard but kept it opt-in via ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` to
+preserve the Phase-1-callers-don't-instantiate fiction. cagataycali's
+follow-up review on PR #51 pushed back: shipping a robot we know cannot
+instantiate has no good use case in this package, and the default should
+fail first rather than silently producing a broken robot.
 
-This test pins three properties:
+This pin enforces the fail-first contract:
 
-1. Default behaviour: ``get_procedural_robot("unitree_g1")`` returns a
-   robot regardless of the topology defect (the env var defaults off).
-2. When ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` is set, building G1
-   raises ``ValueError`` mentioning duplicate edges + the offending
-   joint names (so Phase 2 sees the defect at builder time with full
-   diagnostic context).
-3. SO-100 and Panda still build cleanly under the same env var --
-   their topologies are already valid trees, so the guard must be a
-   no-op on them.
+1. ``_validate_kinematic_tree`` runs unconditionally on every procedural
+   builder. There is no env-var escape hatch.
+2. All three shipped procedural robots (``so100``, ``panda``, ``unitree_g1``)
+   build cleanly under that contract -- so the G1 builder must keep its
+   topology a valid tree (intermediate massless link bodies between the
+   2-DOF compound joints), not just punt the check off behind a flag.
+3. A topology defect injected at builder time still surfaces with the body
+   indices + joint names so the offender is obvious from the traceback alone.
 
-The guard intentionally lives in ``procedural.py``; pinning the
-behaviour here means a future refactor that drops the guard or relaxes
-its trigger logic will fail this test rather than silently regressing.
+A future refactor that re-introduces a duplicate ``(parent, child)`` edge
+or relaxes the guard will fail this pin rather than silently regressing.
 """
 
 from __future__ import annotations
 
-import importlib
-import os
-
 import pytest
 
+from strands_robots_sim.isaac import procedural
+from strands_robots_sim.isaac.procedural import (
+    BodyDef,
+    JointDef,
+    ProceduralRobot,
+    _build_panda,
+    _build_so100,
+    _build_unitree_g1,
+    _validate_kinematic_tree,
+    get_procedural_robot,
+)
 
-def _reload_procedural():
-    """Re-import ``procedural`` with whatever env state is currently set.
 
-    The module's lazy registry caches built robots on first call, so
-    we reload it between tests to make the env-var check authoritative
-    on each build.
-    """
-    import strands_robots_sim.isaac.procedural as procedural
+class TestKinematicGuardFailFirst:
+    """Pin: ``_validate_kinematic_tree`` validates by default; no env-var gating."""
 
-    return importlib.reload(procedural)
-
-
-class TestKinematicGuard:
-    """Pin: ``_validate_kinematic_tree`` opt-in semantics + G1 trigger."""
-
-    def test_g1_builds_by_default_when_guard_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Without the env var, G1 builds fine despite the documented defect."""
-        monkeypatch.delenv("STRANDS_ISAAC_VALIDATE_KINEMATICS", raising=False)
-        procedural = _reload_procedural()
-        robot = procedural.get_procedural_robot("unitree_g1")
+    def test_g1_builds_cleanly_by_default(self) -> None:
+        """G1 must build without raising under the default fail-first contract."""
+        robot = get_procedural_robot("unitree_g1")
         assert robot is not None
         assert robot.name == "unitree_g1"
+        # Six 2-DOF compound joints (hips, ankles, shoulder-yaw/elbow on each arm)
+        # are split through massless intermediate ``*_link`` bodies, so the
+        # actuated joint count stays 21.
         assert robot.num_joints == 21
 
-    @pytest.mark.parametrize("env_value", ["1", "true", "yes", "TRUE", "Yes"])
-    def test_g1_raises_when_guard_enabled(self, monkeypatch: pytest.MonkeyPatch, env_value: str) -> None:
-        """With the env var on, building G1 raises with the duplicate edges named."""
-        monkeypatch.setenv("STRANDS_ISAAC_VALIDATE_KINEMATICS", env_value)
-        procedural = _reload_procedural()
-        with pytest.raises(ValueError) as excinfo:
-            procedural._build_unitree_g1()
-        msg = str(excinfo.value)
-        assert "unitree_g1" in msg
-        assert "duplicate parent->child body edges" in msg
-        # At least one of the documented duplicate-edge joint pairs must
-        # be named in the diagnostic so Phase-2 callers know which joints
-        # to split.
-        assert "l_hip_roll" in msg or "l_hip_pitch" in msg
+    def test_g1_topology_has_no_duplicate_edges(self) -> None:
+        """The shipped G1 kinematic graph must already be a valid tree."""
+        robot = _build_unitree_g1()
+        edges = [(j.parent_body, j.child_body) for j in robot.joints]
+        assert len(edges) == len(set(edges)), (
+            f"G1 kinematic graph has duplicate (parent, child) edges: "
+            f"{[e for e in edges if edges.count(e) > 1]}. The builder must "
+            f"insert intermediate massless link bodies for compound joints."
+        )
 
-    @pytest.mark.parametrize("env_value", ["", "0", "false", "no", "off"])
-    def test_g1_guard_off_for_non_truthy_env_values(self, monkeypatch: pytest.MonkeyPatch, env_value: str) -> None:
-        """Only ``1``/``true``/``yes`` enable the guard; everything else is a no-op."""
-        monkeypatch.setenv("STRANDS_ISAAC_VALIDATE_KINEMATICS", env_value)
-        procedural = _reload_procedural()
-        # Should not raise.
-        robot = procedural._build_unitree_g1()
-        assert robot.name == "unitree_g1"
-
-    def test_so100_and_panda_pass_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """SO-100 and Panda are valid trees; guard must accept them when enabled."""
-        monkeypatch.setenv("STRANDS_ISAAC_VALIDATE_KINEMATICS", "1")
-        procedural = _reload_procedural()
-        # Both must build without raising; the guard is wired into the end of
-        # each ``_build_*`` so a regression that tightens the check too far
-        # would surface here.
-        so100 = procedural._build_so100()
-        panda = procedural._build_panda()
+    def test_so100_and_panda_build_cleanly(self) -> None:
+        """SO-100 and Panda are valid trees under the default guard."""
+        so100 = _build_so100()
+        panda = _build_panda()
         assert so100.name == "so100"
         assert panda.name == "panda"
 
+    def test_guard_raises_on_injected_duplicate_edge(self) -> None:
+        """A robot with a duplicate edge must raise with diagnostic context."""
+        bad = ProceduralRobot(
+            name="broken_robot",
+            bodies=[
+                BodyDef(name="root"),
+                BodyDef(name="child"),
+            ],
+            joints=[
+                JointDef(name="joint_a", parent_body=0, child_body=1, axis=(1, 0, 0)),
+                JointDef(name="joint_b", parent_body=0, child_body=1, axis=(0, 1, 0)),
+            ],
+        )
+        with pytest.raises(ValueError) as excinfo:
+            _validate_kinematic_tree(bad)
+        msg = str(excinfo.value)
+        assert "broken_robot" in msg
+        assert "duplicate parent->child body edges" in msg
+        # Both offending joint names must be named so the caller knows which
+        # joints to split through an intermediate massless link body.
+        assert "joint_a" in msg
+        assert "joint_b" in msg
 
-def teardown_module(module: object) -> None:
-    """Restore the module to its default state for downstream tests."""
-    os.environ.pop("STRANDS_ISAAC_VALIDATE_KINEMATICS", None)
-    _reload_procedural()
+    def test_guard_has_no_env_var_escape_hatch(self) -> None:
+        """The fail-first guard must not be gateable by an env var.
+
+        Pin ensures ``procedural.py`` never re-introduces an opt-in switch:
+        a knowingly-broken robot has no good use case in this package, so
+        the validation is unconditional. A future refactor that adds an env
+        var here will fail this test.
+        """
+        import inspect
+
+        source = inspect.getsource(procedural)
+        assert "STRANDS_ISAAC_VALIDATE_KINEMATICS" not in source, (
+            "procedural.py re-introduced the STRANDS_ISAAC_VALIDATE_KINEMATICS "
+            "env-var gate; the fail-first guard must run unconditionally."
+        )
+        assert "os.environ" not in source, (
+            "procedural.py reads from os.environ; the kinematic-tree guard " "must not be conditioned on env state."
+        )
