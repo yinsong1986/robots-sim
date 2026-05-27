@@ -506,3 +506,86 @@ class TestExceptionClauseHygiene:
             f"simulation.py must not use bare 'except Exception' or 'except:'; "
             f"narrow to specific exception classes. Offending sites: {offending}"
         )
+
+
+class TestInstallConstants:
+    """Pin the install-instruction abstraction.
+
+    The install hints (docker tag, Omniverse Launcher line, Isaac Lab
+    bootstrap) live in :mod:`strands_robots_sim.isaac._install` so a
+    single edit propagates everywhere they surface (review feedback
+    on PR #47). These tests pin (a) the contract that the module
+    exposes the expected constants, and (b) that the messages
+    consumed by ``IsaacSimulation`` are built from those constants
+    -- if someone hardcodes a tag back into ``simulation.py`` the
+    ``test_simulation_module_has_no_hardcoded_image`` regression
+    pin will fail.
+    """
+
+    def test_constants_present(self):
+        from strands_robots_sim.isaac import _install
+
+        assert _install.ISAAC_SIM_DOCKER_IMAGE.startswith("nvcr.io/nvidia/isaac-sim:")
+        assert _install.ISAAC_SIM_MIN_VERSION  # non-empty
+        assert "isaaclab" in _install.ISAAC_LAB_BOOTSTRAP.lower()
+        assert "strands-robots-sim[isaac]" in _install.PIP_EXTRA
+
+    def test_not_importable_reason_composes_from_constants(self):
+        from strands_robots_sim.isaac import _install
+
+        msg = _install.not_importable_reason()
+        assert _install.ISAAC_SIM_DOCKER_IMAGE in msg
+        assert _install.ISAAC_SIM_MIN_VERSION in msg
+        assert _install.ISAAC_LAB_BOOTSTRAP.split(" && ")[-1] in msg
+        assert _install.PIP_EXTRA in msg
+
+    def test_not_available_import_error_composes_from_constants(self):
+        from strands_robots_sim.isaac import _install
+
+        msg = _install.not_available_import_error()
+        assert _install.ISAAC_SIM_DOCKER_IMAGE in msg
+        assert "Omniverse Launcher" in msg
+
+    def test_simulation_module_has_no_hardcoded_image(self):
+        """Regression pin: docker tag must not be re-hardcoded into simulation.py.
+
+        If this fails, fold the new occurrence into
+        ``strands_robots_sim.isaac._install`` so the install-hint
+        single-source-of-truth survives.
+        """
+        from pathlib import Path
+
+        from strands_robots_sim.isaac import simulation
+
+        src = Path(simulation.__file__).read_text()
+        # The literal docker image tag must appear nowhere in simulation.py;
+        # callers should use _install.ISAAC_SIM_DOCKER_IMAGE.
+        assert "nvcr.io/nvidia/isaac-sim:" not in src, (
+            "simulation.py contains a hardcoded Isaac Sim docker tag. "
+            "Use strands_robots_sim.isaac._install.ISAAC_SIM_DOCKER_IMAGE instead."
+        )
+
+    def test_is_available_reason_uses_install_module(self):
+        """The reason string returned by ``is_available()`` when omni
+        is missing must come from ``_install.not_importable_reason``.
+        """
+        import importlib.util as iu
+
+        from strands_robots_sim.isaac import _install
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        # Force the "not importable" branch by stubbing find_spec.
+        original_find_spec = iu.find_spec
+
+        def fake_find_spec(name, *a, **kw):
+            if name == "omni.isaac.kit":
+                return None
+            return original_find_spec(name, *a, **kw)
+
+        with patch.object(iu, "find_spec", side_effect=fake_find_spec):
+            available, reason = IsaacSimulation.is_available()
+
+        if available is False and reason is not None and "omni" in reason.lower():
+            # Only assert composition when we actually hit the omni branch
+            # (CUDA / torch branches return earlier on some hosts).
+            assert reason == _install.not_importable_reason()

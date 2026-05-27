@@ -184,12 +184,9 @@ def _get_or_create_simulation_app(
         try:
             from omni.isaac.kit import SimulationApp  # type: ignore[import-not-found]
         except ImportError as e:
-            raise ImportError(
-                "omni.isaac.kit.SimulationApp not available. "
-                "Isaac Sim must be installed via Omniverse Launcher, "
-                "Isaac Lab (./isaaclab.sh -i), or Docker "
-                "(nvcr.io/nvidia/isaac-sim:4.5.0)."
-            ) from e
+            from strands_robots_sim.isaac._install import not_available_import_error
+
+            raise ImportError(not_available_import_error()) from e
 
         # Layer order: typed launch_config base, then **kwargs escape hatch,
         # then explicit headless argument (always wins so the caller's
@@ -328,15 +325,9 @@ class IsaacSimulation(SimEngine):
         except ModuleNotFoundError:
             kit_spec = None
         if kit_spec is None:
-            return False, (
-                "omni.isaac.kit.SimulationApp not importable. "
-                "Isaac Sim must be installed separately (not via pip). Options:\n"
-                "  - NVIDIA Omniverse Launcher (Isaac Sim 2024.x+)\n"
-                "  - Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i\n"
-                "  - Docker: nvcr.io/nvidia/isaac-sim:4.5.0\n"
-                "Then install the Python helpers: "
-                "pip install 'strands-robots-sim[isaac]'"
-            )
+            from strands_robots_sim.isaac._install import not_importable_reason
+
+            return False, not_importable_reason()
 
         # Isaac requires CUDA
         try:
