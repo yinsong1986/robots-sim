@@ -25,9 +25,9 @@ for the full re-scope and roadmap.
 # Lightweight LIBERO + MuJoCo (default; replaces this package's old `[sim]` extra)
 pip install 'strands-robots[sim-mujoco]'
 
-# Heavy GPU-only backends ship in later 0.x releases:
-# pip install 'strands-robots-sim[isaac]'    # Isaac Sim     — Stage 3
-# pip install 'strands-robots-sim[newton]'   # Newton / Warp — Stage 4
+# Heavy GPU-only backends:
+pip install 'strands-robots-sim[isaac]'    # Isaac Sim — Stage 3 (Phase 1 shipped; data-plane in Phase 2)
+# pip install 'strands-robots-sim[newton]' # Newton / Warp — Stage 4 (pending)
 ```
 
 ---
@@ -105,14 +105,18 @@ sim.evaluate_benchmark(
 )
 ```
 
-### After — same task on Isaac Sim (Stage 3, future)
+### After — same task on Isaac Sim (Stage 3, Phase 1 shipped)
 
 ```python
 import strands_robots_sim  # registers "isaac" via entry points
 from strands_robots.simulation import create_simulation
 from strands_robots.benchmarks.libero import load_libero_suite
 
-sim = create_simulation("isaac", rtx_mode="path_traced", headless=True)
+# Phase 1: lifecycle + procedural builders + loaders work today.
+# Phase 2: add_object / add_camera / replicate are still no-op stubs;
+# evaluate_benchmark on a real LIBERO scene needs Phase 2 data-plane
+# wiring before it produces meaningful trajectories.
+sim = create_simulation("isaac", render_mode="rtx_pathtracing", headless=True)
 sim.create_world()
 load_libero_suite("libero_spatial")
 
