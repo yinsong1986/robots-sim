@@ -11,7 +11,6 @@ Supported procedural robots:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
 
@@ -64,21 +63,26 @@ class ProceduralRobot:
 
 
 def _validate_kinematic_tree(robot: ProceduralRobot) -> None:
-    """Phase-1 fail-fast guard: reject duplicate (parent, child) body edges.
+    """Fail-fast guard: reject duplicate (parent, child) body edges.
 
-    Phase-1 callers don't instantiate the articulation, so this is a no-op at
-    builder time UNLESS ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` is set
-    (Phase-2 dev path). When the guard fires, it surfaces the defect with
-    body indices + joint names rather than letting USD/MuJoCo emit a cryptic
-    articulation error two layers down.
+    A USD/MuJoCo articulation requires a tree where each non-root link has
+    exactly one inbound joint. Two joints sharing the same ``(parent_body,
+    child_body)`` edge violate that invariant and would surface two layers
+    down as a cryptic articulation error at instantiation time.
 
-    See the NOTE in ``_build_unitree_g1`` for the specific defect this is
-    designed to catch (G1 legs/arms currently share a single ``(parent,
-    child)`` edge across two joint axes; USD requires intermediate massless
-    link bodies).
+    Validation runs unconditionally on every procedural builder + every
+    URDF / MJCF / USD loader: shipping a robot we know cannot instantiate
+    has no good use case in this package, and silently producing one is
+    worse than failing fast at builder time. The check raises ``ValueError``
+    with body indices + joint names so the offender is obvious from the
+    traceback alone.
+
+    For 2-DOF compound joints (e.g. a hip with both roll and pitch axes),
+    insert an intermediate massless link body between the two joints so each
+    joint has its own ``(parent, child)`` edge. ``_build_unitree_g1`` is the
+    canonical example -- six ``*_link`` intermediate bodies split the
+    hip / ankle / arm 2-DOF axes.
     """
-    if os.environ.get("STRANDS_ISAAC_VALIDATE_KINEMATICS", "").lower() not in ("1", "true", "yes"):
-        return
     from collections import Counter
 
     edges = [(j.parent_body, j.child_body) for j in robot.joints]
@@ -86,7 +90,7 @@ def _validate_kinematic_tree(robot: ProceduralRobot) -> None:
     if dups:
         offenders = {edge: [j.name for j in robot.joints if (j.parent_body, j.child_body) == edge] for edge in dups}
         raise ValueError(
-            f"{robot.name}: duplicate parent->child body edges (Phase-2 defect): {offenders}. "
+            f"{robot.name}: duplicate parent->child body edges: {offenders}. "
             f"Insert intermediate massless link bodies before instantiating articulation."
         )
 
@@ -170,7 +174,15 @@ def _build_panda() -> ProceduralRobot:
 
 
 def _build_unitree_g1() -> ProceduralRobot:
-    """Build Unitree G1 humanoid (simplified 21-DOF) procedurally."""
+    """Build Unitree G1 humanoid (simplified 21-DOF) procedurally.
+
+    The G1 has six 2-DOF compound joints (hips, ankles, shoulder/elbow on each
+    arm). To keep the kinematic graph a valid tree -- one inbound joint per
+    non-root link, as USD / MuJoCo articulations require -- each compound
+    joint is split through a massless intermediate ``*_link`` body. The two
+    axes still resolve to two actuated joints (so ``num_joints == 21``); only
+    the topology gains the six extra fixed link bodies.
+    """
     bodies = [
         BodyDef(name="pelvis", position=(0.0, 0.0, 0.85), mass=10.0, shape="box", shape_size=(0.15, 0.1, 0.15)),
         BodyDef(name="torso", position=(0.0, 0.0, 1.1), mass=8.0, shape="box", shape_size=(0.12, 0.08, 0.3)),
@@ -193,38 +205,39 @@ def _build_unitree_g1() -> ProceduralRobot:
         BodyDef(name="r_shoulder", position=(0.2, 0.0, 1.2), mass=1.5, shape="sphere", shape_size=(0.04,)),
         BodyDef(name="r_upper_arm", position=(0.35, 0.0, 1.2), mass=1.5, shape="capsule", shape_size=(0.03, 0.12)),
         BodyDef(name="r_forearm", position=(0.55, 0.0, 1.2), mass=1.0, shape="capsule", shape_size=(0.025, 0.1)),
+        # Massless intermediate link bodies so 2-DOF compound joints (hips,
+        # ankles, shoulder-yaw/elbow) each have a unique (parent, child) edge.
+        # Indices 17..22.
+        BodyDef(name="l_hip_link", position=(-0.08, 0.0, 0.7), mass=0.0, shape="sphere", shape_size=(0.001,)),
+        BodyDef(name="r_hip_link", position=(0.08, 0.0, 0.7), mass=0.0, shape="sphere", shape_size=(0.001,)),
+        BodyDef(name="l_ankle_link", position=(-0.08, 0.0, 0.1), mass=0.0, shape="sphere", shape_size=(0.001,)),
+        BodyDef(name="r_ankle_link", position=(0.08, 0.0, 0.1), mass=0.0, shape="sphere", shape_size=(0.001,)),
+        BodyDef(name="l_elbow_link", position=(-0.45, 0.0, 1.2), mass=0.0, shape="sphere", shape_size=(0.001,)),
+        BodyDef(name="r_elbow_link", position=(0.45, 0.0, 1.2), mass=0.0, shape="sphere", shape_size=(0.001,)),
     ]
 
-    # Simplified joint set (21 DOF total: 1 torso + 6 left leg + 6 right leg + 4 left arm + 4 right arm).
-    # NOTE: this kinematic graph contains duplicate (parent, child) edges on each leg/arm
-    # (e.g. l_hip_roll and l_hip_pitch both map bodies 3 -> 4). A real USD/MuJoCo articulation
-    # builder requires a tree where each non-root link has exactly one inbound joint, so this
-    # topology will need intermediate massless link bodies before Phase 2 wires up the actual
-    # USD prim chain. Tracked as Phase-2 work; the Phase-1 skeleton does not instantiate the
-    # articulation, so the duplicate-edge defect is dormant on this branch.
-    #
-    # ``_validate_kinematic_tree`` (called below) is a no-op by default but raises when
-    # ``STRANDS_ISAAC_VALIDATE_KINEMATICS=1`` is set, which is the Phase-2 dev path: it
-    # surfaces this defect at builder time with body indices + joint names rather than
-    # letting USD/MuJoCo emit a cryptic articulation error two layers down.
+    # 21 DOF total: 1 torso + 6 left leg + 6 right leg + 4 left arm + 4 right arm.
+    # Each 2-DOF compound joint is split through a massless intermediate body
+    # (indices 17..22) so every (parent, child) edge in the kinematic tree is
+    # unique -- the invariant ``_validate_kinematic_tree`` enforces below.
     joints = [
         # Torso
         JointDef(name="torso_yaw", parent_body=0, child_body=1, axis=(0, 0, 1), limit_lower=-1.0, limit_upper=1.0),
-        # Left leg (6 DOF)
+        # Left leg (6 DOF). Hip 2-DOF split via l_hip_link (17); ankle 2-DOF split via l_ankle_link (19).
         JointDef(name="l_hip_yaw", parent_body=0, child_body=3, axis=(0, 0, 1), limit_lower=-0.5, limit_upper=0.5),
-        JointDef(name="l_hip_roll", parent_body=3, child_body=4, axis=(1, 0, 0), limit_lower=-0.5, limit_upper=0.5),
-        JointDef(name="l_hip_pitch", parent_body=3, child_body=4, axis=(0, 1, 0), limit_lower=-1.5, limit_upper=0.5),
+        JointDef(name="l_hip_roll", parent_body=3, child_body=17, axis=(1, 0, 0), limit_lower=-0.5, limit_upper=0.5),
+        JointDef(name="l_hip_pitch", parent_body=17, child_body=4, axis=(0, 1, 0), limit_lower=-1.5, limit_upper=0.5),
         JointDef(name="l_knee", parent_body=4, child_body=5, axis=(0, 1, 0), limit_lower=-0.1, limit_upper=2.5),
-        JointDef(name="l_ankle_pitch", parent_body=5, child_body=6, axis=(0, 1, 0), limit_lower=-0.8, limit_upper=0.5),
-        JointDef(name="l_ankle_roll", parent_body=5, child_body=6, axis=(1, 0, 0), limit_lower=-0.3, limit_upper=0.3),
-        # Right leg (6 DOF)
+        JointDef(name="l_ankle_pitch", parent_body=5, child_body=19, axis=(0, 1, 0), limit_lower=-0.8, limit_upper=0.5),
+        JointDef(name="l_ankle_roll", parent_body=19, child_body=6, axis=(1, 0, 0), limit_lower=-0.3, limit_upper=0.3),
+        # Right leg (6 DOF). Hip 2-DOF split via r_hip_link (18); ankle 2-DOF split via r_ankle_link (20).
         JointDef(name="r_hip_yaw", parent_body=0, child_body=7, axis=(0, 0, 1), limit_lower=-0.5, limit_upper=0.5),
-        JointDef(name="r_hip_roll", parent_body=7, child_body=8, axis=(1, 0, 0), limit_lower=-0.5, limit_upper=0.5),
-        JointDef(name="r_hip_pitch", parent_body=7, child_body=8, axis=(0, 1, 0), limit_lower=-1.5, limit_upper=0.5),
+        JointDef(name="r_hip_roll", parent_body=7, child_body=18, axis=(1, 0, 0), limit_lower=-0.5, limit_upper=0.5),
+        JointDef(name="r_hip_pitch", parent_body=18, child_body=8, axis=(0, 1, 0), limit_lower=-1.5, limit_upper=0.5),
         JointDef(name="r_knee", parent_body=8, child_body=9, axis=(0, 1, 0), limit_lower=-0.1, limit_upper=2.5),
-        JointDef(name="r_ankle_pitch", parent_body=9, child_body=10, axis=(0, 1, 0), limit_lower=-0.8, limit_upper=0.5),
-        JointDef(name="r_ankle_roll", parent_body=9, child_body=10, axis=(1, 0, 0), limit_lower=-0.3, limit_upper=0.3),
-        # Left arm (4 DOF simplified)
+        JointDef(name="r_ankle_pitch", parent_body=9, child_body=20, axis=(0, 1, 0), limit_lower=-0.8, limit_upper=0.5),
+        JointDef(name="r_ankle_roll", parent_body=20, child_body=10, axis=(1, 0, 0), limit_lower=-0.3, limit_upper=0.3),
+        # Left arm (4 DOF simplified). Shoulder-yaw / elbow 2-DOF split via l_elbow_link (21).
         JointDef(
             name="l_shoulder_pitch", parent_body=1, child_body=11, axis=(0, 1, 0), limit_lower=-3.14, limit_upper=1.0
         ),
@@ -232,10 +245,10 @@ def _build_unitree_g1() -> ProceduralRobot:
             name="l_shoulder_roll", parent_body=11, child_body=12, axis=(1, 0, 0), limit_lower=-0.3, limit_upper=3.14
         ),
         JointDef(
-            name="l_shoulder_yaw", parent_body=12, child_body=13, axis=(0, 0, 1), limit_lower=-1.5, limit_upper=1.5
+            name="l_shoulder_yaw", parent_body=12, child_body=21, axis=(0, 0, 1), limit_lower=-1.5, limit_upper=1.5
         ),
-        JointDef(name="l_elbow", parent_body=12, child_body=13, axis=(0, 1, 0), limit_lower=-2.5, limit_upper=0.0),
-        # Right arm (4 DOF simplified)
+        JointDef(name="l_elbow", parent_body=21, child_body=13, axis=(0, 1, 0), limit_lower=-2.5, limit_upper=0.0),
+        # Right arm (4 DOF simplified). Shoulder-yaw / elbow 2-DOF split via r_elbow_link (22).
         JointDef(
             name="r_shoulder_pitch", parent_body=1, child_body=14, axis=(0, 1, 0), limit_lower=-3.14, limit_upper=1.0
         ),
@@ -243,9 +256,9 @@ def _build_unitree_g1() -> ProceduralRobot:
             name="r_shoulder_roll", parent_body=14, child_body=15, axis=(1, 0, 0), limit_lower=-3.14, limit_upper=0.3
         ),
         JointDef(
-            name="r_shoulder_yaw", parent_body=15, child_body=16, axis=(0, 0, 1), limit_lower=-1.5, limit_upper=1.5
+            name="r_shoulder_yaw", parent_body=15, child_body=22, axis=(0, 0, 1), limit_lower=-1.5, limit_upper=1.5
         ),
-        JointDef(name="r_elbow", parent_body=15, child_body=16, axis=(0, 1, 0), limit_lower=-2.5, limit_upper=0.0),
+        JointDef(name="r_elbow", parent_body=22, child_body=16, axis=(0, 1, 0), limit_lower=-2.5, limit_upper=0.0),
     ]
 
     robot = ProceduralRobot(name="unitree_g1", bodies=bodies, joints=joints, base_position=(0.0, 0.0, 0.85))
