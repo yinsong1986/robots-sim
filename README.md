@@ -4,7 +4,7 @@
 
 For the default lightweight **MuJoCo** backend, use [`strands-robots`](https://github.com/strands-labs/robots) directly — both backends in this repo plug into the same `Simulation` AgentTool / `SimEngine` ABC and load via entry points, so the user-facing API is identical across all three.
 
-> **Status:** v0.2.0 is a re-scoped foundation release. The legacy `SimEnv` / `SteppedSimEnv` / GR00T policy code path moved upstream — see [`examples/MIGRATION.md`](examples/MIGRATION.md). Backend code lands in v0.3.0+ (Isaac) and v0.4.0+ (Newton). Track the rollout in [#8](https://github.com/strands-labs/robots-sim/issues/8).
+> **Status:** v0.2.0 was the re-scoped foundation release. The legacy `SimEnv` / `SteppedSimEnv` / GR00T policy code path moved upstream — see [`examples/MIGRATION.md`](examples/MIGRATION.md). **Isaac Sim Phase 1** (R7) has now landed in `main` — entry-point registration, `IsaacConfig`, `IsaacSimulation` lifecycle scaffolding, the procedural-robot builders (SO-100 / Panda / G1), and URDF / MJCF / USD loaders are all working today; the still-no-op data-plane methods (`add_object`, `add_camera`, `replicate`, the per-`IsaacSimulation` `_load_*_robot` stubs) are Phase 2 work. **Newton** lands in v0.4.0+. Track the rollout in [#8](https://github.com/strands-labs/robots-sim/issues/8).
 
 ---
 
@@ -52,7 +52,7 @@ pip install 'strands-robots-sim[all]'
 
 ## Quick start
 
-> Snippets are written against the post-R6 entry-point API. They become copy-paste-runnable when [R6 / #13](https://github.com/strands-labs/robots-sim/issues/13) and [R7 / #14](https://github.com/strands-labs/robots-sim/issues/14) (Isaac) or [R11 / #18](https://github.com/strands-labs/robots-sim/issues/18) (Newton) ship.
+> Isaac Sim Phase 1 has shipped — the snippet below is copy-paste-runnable today on a host with Isaac Sim 2024.x+ installed. Newton snippets become copy-paste-runnable when [R11 / #18](https://github.com/strands-labs/robots-sim/issues/18) ships.
 
 ### Isaac Sim — photorealistic single-env
 
@@ -60,11 +60,20 @@ pip install 'strands-robots-sim[all]'
 import strands_robots_sim                       # registers "isaac" / "newton" via entry points
 from strands_robots.simulation import create_simulation
 
-sim = create_simulation("isaac", rtx_mode="path_traced", headless=True)
+sim = create_simulation("isaac", render_mode="rtx_pathtracing", headless=True)
 sim.create_world()
-sim.add_robot("so100")
+sim.add_robot("so100")          # procedural; no asset files needed
 sim.step(100)
 frame = sim.render(camera_name="default")
+```
+
+For URDF / MJCF / USD ingestion, use the loader module directly:
+
+```python
+from strands_robots_sim.isaac.loaders import load_urdf, load_mjcf, load_usd
+
+panda = load_urdf("/path/to/panda.urdf")        # stdlib XML, no extra deps
+print(panda.num_joints, panda.joint_names)
 ```
 
 ### Newton — 4096-env fleet
@@ -109,11 +118,12 @@ Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
   - [x] R3 / [#10](https://github.com/strands-labs/robots-sim/issues/10) — remove duplicated GR00T policy / inference tool / tests / scripts / docs
   - [x] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
 - **Stage 2 — MuJoCo LIBERO baseline**
-  - [ ] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero/run_mujoco.py` + `examples/README.md`
-- **Stage 3 — Isaac Sim** (ships with v0.3.0)
-  - [ ] R6 / [#13](https://github.com/strands-labs/robots-sim/issues/13) — entry-point backend registration
-  - [ ] R7 / [#14](https://github.com/strands-labs/robots-sim/issues/14) — `IsaacSimulation(SimEngine)` backend
-  - [ ] R8 / [#15](https://github.com/strands-labs/robots-sim/issues/15) — `examples/libero_isaac.py`
+  - [x] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero/run_mujoco.py` + `examples/README.md`
+- **Stage 3 — Isaac Sim** (Phase 1 in `main`; full backend ships with v0.3.0)
+  - [x] R6 / [#13](https://github.com/strands-labs/robots-sim/issues/13) — entry-point backend registration ([#44](https://github.com/strands-labs/robots-sim/pull/44))
+  - [x] R7 (Phase 1) / [#14](https://github.com/strands-labs/robots-sim/issues/14) — `IsaacSimulation(SimEngine)` skeleton + lifecycle + procedural builders + loaders ([#45](https://github.com/strands-labs/robots-sim/pull/45) / [#46](https://github.com/strands-labs/robots-sim/pull/46) / [#47](https://github.com/strands-labs/robots-sim/pull/47) / [#51](https://github.com/strands-labs/robots-sim/pull/51))
+  - [ ] R7 (Phase 2) / [#14](https://github.com/strands-labs/robots-sim/issues/14) — data-plane wiring (`add_object` / `add_camera` / `replicate` / articulation construction)
+  - [ ] R8 / [#15](https://github.com/strands-labs/robots-sim/issues/15) — `examples/libero/run_isaac.py`
   - [ ] R9 / [#16](https://github.com/strands-labs/robots-sim/issues/16) — `examples/isaac_replicator_synthdata.py`
   - [ ] R10 / [#17](https://github.com/strands-labs/robots-sim/issues/17) — nightly GPU CI
 - **Stage 4 — Newton** (ships with v0.4.0)
