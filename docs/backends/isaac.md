@@ -14,7 +14,7 @@ GPU-native photorealistic simulation backend for `strands-robots-sim` using NVID
 - **Isaac Lab integration**: GPU-accelerated RL environments
 
 
-> **Phase 1 status (skeleton).** This release ships the SimEngine-shaped surface and lazy-import scaffolding only. Several methods on `IsaacSimulation` (`add_robot` on the procedural branch, `_load_usd_robot`, `_load_urdf_robot`, `add_object`, `add_camera`, `replicate`) currently return `status: "success"` without instantiating the underlying USD prim or articulation handle. Following the documented Quick Start on a real Isaac Sim install will therefore observe `get_observation()` returning `{}` and `render()` returning blank frames -- no exception is raised. The data-plane wiring (USD stage management, articulation construction, sensor / replicator integration) lands in Phase 2 and later. Treat the Phase-1 surface as an integration contract, not as a working physics path.
+> **Phase 1 status (skeleton).** This release ships the SimEngine-shaped surface, lazy-import scaffolding, the procedural-robot dataclass + builders (SO-100 / Panda / G1), and the URDF / MJCF / USD loader module. **Working today**: `IsaacConfig`, `IsaacSimulation.is_available()`, world / lifecycle (`create_world` / `destroy` / `cleanup`), procedural builders via `add_robot("so100" | "panda" | "unitree_g1")`, and the `isaac.loaders.load_urdf` / `load_mjcf` / `load_usd` functions for ingesting external robot description files into a `ProceduralRobot` dataclass. **Still no-op in this phase**: the data-plane wiring on `IsaacSimulation` itself — `add_object`, `add_camera`, `replicate`, the per-`IsaacSimulation` `_load_usd_robot` / `_load_urdf_robot` private methods, and articulation-touching paths under `get_observation` / `send_action` / `render` — currently return `status: "success"` without instantiating the underlying USD prim or articulation handle. Following the documented Quick Start on a real Isaac Sim install will therefore observe `get_observation()` returning `{}` for those paths and `render()` returning blank frames — no exception is raised. The data-plane wiring (USD stage management, articulation construction, sensor / replicator integration) lands in Phase 2 and later. Treat the Phase-1 surface as an integration contract for the still-no-op methods; the loaders module is the working path for URDF / MJCF / USD ingestion today.
 
 ## Installation
 
@@ -150,13 +150,41 @@ The following robots can be added without any asset files:
 
 - `so100` (aliases: `so-100`, `so_100`, `so101`) -- 6-DOF tabletop arm
 - `panda` (aliases: `franka`, `franka_panda`) -- 7-DOF manipulator
-- `unitree_g1` (aliases: `g1`) -- 21-DOF humanoid (simplified)
+- `unitree_g1` (aliases: `g1`) -- 21-DOF humanoid (simplified). The six 2-DOF compound joints (hips / ankles / shoulder-yaw + elbow on each arm) are split through massless intermediate `*_link` bodies so the kinematic graph is a valid tree by construction.
 
 ```python
 sim.add_robot("so100")  # procedural, no asset files needed
 sim.add_robot("panda")
 sim.add_robot("g1", data_config="unitree_g1")
 ```
+
+Every procedural builder validates the kinematic graph at construction time via `_validate_kinematic_tree`: a robot whose joint set has a duplicate `(parent_body, child_body)` edge fails fast with `ValueError` listing the offending bodies + joint names. Validation is **fail-first by default** with no env-var escape hatch — shipping a knowingly-broken robot has no good use case in this package.
+
+## Loading External Description Files (URDF / MJCF / USD)
+
+The `strands_robots_sim.isaac.loaders` module produces `ProceduralRobot` dataclass instances from existing robot description files, so callers don't have to add a new `_build_*` function for every robot they need. Three formats are supported:
+
+```python
+from strands_robots_sim.isaac.loaders import load_urdf, load_mjcf, load_usd
+
+# URDF -- stdlib XML; no third-party deps required.
+panda_urdf = load_urdf("/path/to/panda.urdf")
+
+# MJCF (MuJoCo XML) -- stdlib XML; LIBERO scenes, robosuite assets.
+panda_mjcf = load_mjcf("/opt/conda/.../robosuite/models/assets/robots/panda/robot.xml")
+
+# USD -- requires `pxr` (ships in the [isaac] extra).
+panda_usd = load_usd("/path/to/panda.usda")
+
+# All three return the same dataclass shape.
+print(panda_urdf.num_joints, panda_urdf.joint_names)
+```
+
+The loaders share failure semantics: missing path raises `FileNotFoundError`, malformed document raises `ValueError` with the offending element + path, and an empty document (zero links / joints / bodies) also raises `ValueError`. Loaders never silently return a phantom robot.
+
+The hardcoded `_build_*` functions in `procedural.py` remain as a zero-dep, testable fallback used when no description file is configured. Loaders layer on top.
+
+The loader module is verified against the seven robosuite-bundled MJCFs that the `strands-robots` LIBERO adapter consumes (`panda` / `iiwa` / `kinova3` / `jaco` / `sawyer` / `ur5e` / `baxter`); the parity tests live in `strands_robots_sim/isaac/tests/test_loaders.py::TestRobosuiteMjcfParity`.
 
 ## Comparison with Newton Backend
 
@@ -177,16 +205,26 @@ sim.add_robot("g1", data_config="unitree_g1")
 ```
 strands_robots_sim/isaac/
     __init__.py         PEP 562 lazy exports (zero omni overhead on import)
-    config.py           IsaacConfig dataclass
+    _install.py         Single source of truth for Isaac Sim install metadata
+                        (docker image tag, Omniverse Launcher hint, Isaac Lab
+                        bootstrap) — composes ImportError messages and the
+                        is_available() reason string from these constants
+    config.py           IsaacConfig dataclass + validation
     simulation.py       IsaacSimulation(SimEngine) -- main backend class
-    procedural.py       SO-100 / Panda / G1 USD prim builders
+    procedural.py       SO-100 / Panda / G1 builders + kinematic-tree guard
+    loaders.py          URDF / MJCF / USD -> ProceduralRobot loaders
     stages.py           USD stage management (Phase 2)
     sensors.py          RTX camera, LiDAR wrappers (Phase 3)
     replicator.py       Domain randomization (Phase 3)
     tests/
-        test_unit.py         Mocked tests (no GPU)
-        test_entrypoint.py   Entry-point verification
-        test_gpu_integ.py    GPU tests (STRANDS_GPU_TEST=1)
+        test_unit.py                          Mocked tests (no GPU)
+        test_entrypoint.py                    Entry-point + lazy-import surface
+        test_get_observation_diagnostic_logs.py   WARNING/DEBUG level pins
+        test_procedural_g1_dof.py             G1 DOF-count drift pin
+        test_procedural_kinematic_guard.py    Fail-first kinematic-tree pin
+        test_loaders.py                       URDF / MJCF / USD round-trip +
+                                              robosuite real-asset parity tests
+        test_gpu_integ.py                     GPU tests (STRANDS_GPU_TEST=1)
 ```
 
 ## Thread Safety
@@ -202,6 +240,12 @@ strands_robots_sim/isaac/
 # Unit tests (no GPU required)
 pytest strands_robots_sim/isaac/tests/test_unit.py -v
 pytest strands_robots_sim/isaac/tests/test_entrypoint.py -v
+pytest strands_robots_sim/isaac/tests/test_loaders.py -v
+pytest strands_robots_sim/isaac/tests/test_procedural_g1_dof.py -v
+pytest strands_robots_sim/isaac/tests/test_procedural_kinematic_guard.py -v
+
+# Or all of the above in one go (skips the GPU file by default):
+pytest strands_robots_sim/isaac/tests/ --ignore=strands_robots_sim/isaac/tests/test_gpu_integ.py
 
 # GPU integration tests (requires Isaac Sim)
 STRANDS_GPU_TEST=1 pytest strands_robots_sim/isaac/tests/test_gpu_integ.py -v
