@@ -11,8 +11,10 @@ Usage::
     sim = IsaacSimulation(config)
     ok, msg = IsaacSimulation.is_available()
 
-Requires NVIDIA Isaac Sim 2024.x+ (not pip-installable).
-Install via Omniverse Launcher or ``nvcr.io/nvidia/isaac-sim:4.5.0``.
+Requires NVIDIA Isaac Sim 2024.x+ (not pip-installable). Install via
+Omniverse Launcher, Isaac Lab, or the NGC docker image. The exact
+supported image tag and install commands live in
+:mod:`strands_robots_sim.isaac._install` -- update there, not here.
 """
 
 from __future__ import annotations
