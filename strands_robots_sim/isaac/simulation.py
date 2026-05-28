@@ -131,7 +131,7 @@ except (ImportError, ModuleNotFoundError):
             self.cleanup()
 
 
-from strands_robots_sim.isaac.config import IsaacConfig
+from strands_robots_sim.isaac.config import IsaacConfig  # noqa: E402  # late import: must follow SimEngine fallback def
 
 logger = logging.getLogger(__name__)
 
