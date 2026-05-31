@@ -285,6 +285,15 @@ class GsplatBackground:
         auto_backdrop: bool = False,
         backdrop_center: Optional[tuple] = (0.05, 0.05, 0.25),
         backdrop_radius: float = 3.0,
+        skybox: bool = False,
+        up_sign: Optional[float] = None,
+        yaw_deg: float = 0.0,
+        radius: float = 2.5,
+        center: tuple = (0.05, 0.05),
+        floor_z: float = -0.3,
+        clip_below: Optional[float] = 0.0,
+        min_opacity: float = 0.25,
+        floor_pct: float = 2.0,
     ) -> None:
         self._ply_path = Path(ply_path)
         self._device = device
@@ -298,7 +307,24 @@ class GsplatBackground:
         self._auto_backdrop = auto_backdrop and transform is None
         self._backdrop_center = np.asarray(backdrop_center, dtype=np.float64)
         self._backdrop_radius = float(backdrop_radius)
+        # ``skybox`` mode: the validated "live backdrop" recipe. Stand the scene
+        # upright (PCA up × ``up_sign``), scale, push the GS floor to ``floor_z``
+        # (below the MuJoCo ground so the MuJoCo floor owns everything below the
+        # horizon — no floor-fight, no nadir void), then drop sub-floor gaussians
+        # (``clip_below``, world-z) and low-opacity floaters (``min_opacity``).
+        # ``up_sign`` is per-scene (see ``GSPLAT_SKYBOX_ALIGN``); ``None`` =
+        # best-effort auto-detect (good for curated presets, rough for uploads).
+        self._skybox = skybox and transform is None
+        self._up_sign = up_sign
+        self._yaw_deg = float(yaw_deg)
+        self._radius = float(radius)
+        self._center = tuple(center)
+        self._floor_z = float(floor_z)
+        self._clip_below = clip_below
+        self._min_opacity = float(min_opacity)
+        self._floor_pct = float(floor_pct)
         self._splats: Optional[dict] = None  # lazily loaded
+
 
     # ----- lazy load ----- #
 
@@ -313,12 +339,53 @@ class GsplatBackground:
                 "PanoramaBackground."
             ) from e
         if not self._ply_path.exists():
-            raise FileNotFoundError(f"Gaussian Splat .ply not found: {self._ply_path}")
-        self._splats = _load_ply_splats(self._ply_path, device=self._device)
-        if self._auto_backdrop:
+            raise FileNotFoundError(f"Gaussian Splat not found: {self._ply_path}")
+        if self._ply_path.suffix.lower() == ".spz":
+            self._splats = _load_spz_splats(self._ply_path, device=self._device)
+        else:
+            self._splats = _load_ply_splats(self._ply_path, device=self._device)
+        if self._skybox:
+            means = self._splats["means"].detach().cpu().numpy()
+            up_sign = self._up_sign if self._up_sign is not None else _auto_up_sign(means)
+            self._transform = _fit_skybox_transform(
+                means,
+                up_sign=up_sign,
+                yaw_deg=self._yaw_deg,
+                radius=self._radius,
+                center=self._center,
+                floor_z=self._floor_z,
+                floor_pct=self._floor_pct,
+            )
+            if self._clip_below is not None:
+                kept, total = self._clip_splats(self._clip_below, self._min_opacity)
+                logger.info(
+                    "GsplatBackground: skybox align (up_sign=%+.0f) + clip → kept %d/%d gaussians for %s",
+                    up_sign,
+                    kept,
+                    total,
+                    self._ply_path.name,
+                )
+        elif self._auto_backdrop:
             means = self._splats["means"].detach().cpu().numpy()
             self._transform = _fit_backdrop_transform(means, self._backdrop_center, self._backdrop_radius)
             logger.info("GsplatBackground: fitted backdrop transform for %s", self._ply_path.name)
+
+    def _clip_splats(self, clip_below: float, min_opacity: float) -> tuple:
+        """Drop gaussians below ``clip_below`` (world-z, after ``self._transform``)
+        and low-opacity floaters. Returns ``(kept, total)``."""
+        import torch
+
+        s = self._splats
+        assert s is not None
+        means = s["means"]
+        M = torch.from_numpy(self._transform[:3, :3]).float().to(means.device)
+        b = torch.from_numpy(self._transform[:3, 3]).float().to(means.device)
+        keep = (means @ M.T + b)[:, 2] >= float(clip_below)
+        if min_opacity > 0:
+            keep = keep & (s["opacities"].reshape(-1) >= float(min_opacity))
+        total = int(keep.numel())
+        self._splats = {k: v[keep] for k, v in s.items()}
+        return int(keep.sum()), total
 
     # ----- BackgroundRenderer interface ----- #
 
@@ -378,6 +445,10 @@ class GsplatBackground:
 # others are outdoor. Users can also upload their own .ply (e.g. a World Labs
 # Marble export re-saved as .ply).
 GSPLAT_SCENES = {
+    "tabletop (indoor room)": (
+        "https://raw.githubusercontent.com/Vector-Wangel/MuJoCo-GS-Web/"
+        "main/assets/environments/tabletop/scene.spz"
+    ),
     "bonsai (indoor tabletop)": (
         "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/"
         "bonsai/point_cloud/iteration_7000/point_cloud.ply"
@@ -398,15 +469,47 @@ def gsplat_scene_names() -> list:
     return list(GSPLAT_SCENES.keys())
 
 
+# Per-scene alignment for the LIVE "skybox" backdrop (GsplatBackground(skybox=True)).
+# Captured 3DGS scenes carry no canonical up-axis, so the PCA up-sign is authored
+# per scene — the reference (MuJoCo-GS-Web) likewise hand-authors each scene's
+# alignment. Keyed by the scene *slug* (first token of the name):
+#   tabletop → MuJoCo-GS-Web's purpose-built room .spz (open floor, clean from
+#     every angle — the recommended scene); bonsai → object-centric indoor plant
+#     (good from hero/oblique angles only); stump → outdoor clearing.
+#   ``bicycle`` is intentionally excluded: it's an overcast outdoor capture that
+#   renders as white haze + floaters from every angle (poor as a backdrop).
+GSPLAT_SKYBOX_ALIGN = {
+    "tabletop": {"up_sign": 1.0, "yaw_deg": 0.0},
+    "bonsai": {"up_sign": -1.0, "yaw_deg": 0.0},
+    "stump": {"up_sign": 1.0, "yaw_deg": 0.0},
+}
+
+
+def gsplat_skybox_scene_names() -> list:
+    """Names of scenes curated to look good as a LIVE 3DGS skybox backdrop."""
+    return [n for n in GSPLAT_SCENES if n.split(" ")[0] in GSPLAT_SKYBOX_ALIGN]
+
+
+def gsplat_skybox_align_for(name_or_slug: str) -> dict:
+    """Authored skybox alignment for a scene name/slug. Empty dict (=> best-effort
+    auto up-sign) when the scene isn't curated (e.g. an uploaded .ply)."""
+    slug = Path(str(name_or_slug)).stem.split(" ")[0]
+    return dict(GSPLAT_SKYBOX_ALIGN.get(slug, {}))
+
+
+
 def download_gsplat_scene(name: str, cache_dir: Optional[str | Path] = None) -> Path:
-    """Download (and cache) a preset 3DGS scene ``.ply``; return its path.
+    """Download (and cache) a preset 3DGS scene; return its local path.
+
+    The cached file keeps the source URL's extension (``.spz`` or ``.ply``) so
+    the loader can dispatch correctly.
 
     Args:
         name: a key of :data:`GSPLAT_SCENES`.
         cache_dir: where to cache (default ``~/.cache/mujoco_gs_scenes``).
 
     Returns:
-        Local path to the cached ``.ply``.
+        Local path to the cached scene file.
     """
     import urllib.request
 
@@ -416,15 +519,130 @@ def download_gsplat_scene(name: str, cache_dir: Optional[str | Path] = None) -> 
     cache = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "mujoco_gs_scenes"
     cache.mkdir(parents=True, exist_ok=True)
     slug = name.split(" ")[0]
-    dest = cache / f"{slug}.ply"
+    ext = ".spz" if url.lower().split("?")[0].endswith(".spz") else ".ply"
+    dest = cache / f"{slug}{ext}"
     if dest.exists() and dest.stat().st_size > 0:
         return dest
     logger.info("Downloading 3DGS scene %r → %s", name, dest)
-    tmp = dest.with_suffix(".ply.part")
+    tmp = dest.with_suffix(ext + ".part")
     urllib.request.urlretrieve(url, tmp)
     tmp.rename(dest)
     logger.info("Downloaded %s (%.0f MB)", dest.name, dest.stat().st_size / 1e6)
     return dest
+
+
+def _upright_view_transform(means: np.ndarray) -> tuple:
+    """Return (R, viewpoint) — a rotation standing the scene upright (PCA up →
+    +Z) and a viewpoint at the scene centroid — for baking a panorama."""
+    c = means.mean(axis=0)
+    X = means - c
+    cov = (X.T @ X) / max(1, len(X))
+    _, evecs = np.linalg.eigh(cov)  # ascending; col0 = smallest variance ≈ up
+    up = evecs[:, 0]
+    major = evecs[:, 2]
+    z = up / (np.linalg.norm(up) + 1e-9)
+    x = major - (major @ z) * z
+    x /= np.linalg.norm(x) + 1e-9
+    y = np.cross(z, x)
+    R = np.stack([x, y, z], axis=0)  # rows map gs-axis → upright-world axis
+    return R, c
+
+
+def bake_gsplat_panorama(
+    ply_path: "str | Path",
+    out_path: "Optional[str | Path]" = None,
+    face_size: int = 640,
+    equi_w: int = 2048,
+    equi_h: int = 1024,
+    device: str = "cuda",
+) -> Path:
+    """Render a 3DGS ``.ply`` into an equirectangular panorama image.
+
+    Renders 6 cube faces (90° FOV) outward from the scene centroid in the
+    scene's upright frame, then reprojects them into an equirectangular image
+    using the *same* spherical convention :class:`PanoramaBackground` samples
+    with. The result is a clean, camera-consistent skybox-style backdrop that
+    "just works" without per-camera viewpoint alignment (the trade-off is no
+    parallax — the backdrop sits at infinity).
+
+    Returns the path to the written panorama ``.jpg`` (cached next to the ply).
+    """
+    from .camera_utils import CameraParams
+
+    ply_path = Path(ply_path)
+    out = Path(out_path) if out_path else ply_path.with_name(ply_path.stem + "_pano.jpg")
+    if out.exists() and out.stat().st_size > 0:
+        return out
+
+    # Load splats once; place the scene upright with the viewpoint at origin.
+    base = GsplatBackground(ply_path=ply_path, device=device)
+    base._load()
+    means = base._splats["means"].detach().cpu().numpy()
+    R, viewpoint = _upright_view_transform(means)
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = -R @ viewpoint  # world_from_gs: centroid → origin, upright
+    base._transform = T
+
+    # Six cube faces (world dirs in the upright frame) + their up vectors.
+    faces = [
+        (np.array([1.0, 0, 0]), np.array([0, 0, 1.0])),
+        (np.array([-1.0, 0, 0]), np.array([0, 0, 1.0])),
+        (np.array([0, 1.0, 0]), np.array([0, 0, 1.0])),
+        (np.array([0, -1.0, 0]), np.array([0, 0, 1.0])),
+        (np.array([0, 0, 1.0]), np.array([0, 1.0, 0])),
+        (np.array([0, 0, -1.0]), np.array([0, 1.0, 0])),
+    ]
+    f = 0.5 * face_size  # 90° FOV → focal = size/2
+    Kf = np.array([[f, 0, face_size / 2], [0, f, face_size / 2], [0, 0, 1.0]])
+
+    face_imgs, face_bases = [], []
+    for fwd, up in faces:
+        right = np.cross(fwd, up)
+        right /= np.linalg.norm(right)
+        u = np.cross(right, fwd)
+        Twc = np.eye(4)
+        Twc[:3, :3] = np.stack([right, u, -fwd], axis=1)  # OpenGL: -Z = fwd
+        cam = CameraParams(K=Kf, T_world_cam=Twc, width=face_size, height=face_size, znear=0.01, zfar=1e3)
+        rgb, _ = base.render(cam)  # camera at world origin (viewpoint)
+        face_imgs.append(rgb.astype(np.float32))
+        face_bases.append((fwd, right, u))
+
+    # Equirectangular grid matching PanoramaBackground: uu in [0,1] → theta in
+    # [-pi,pi]; vv in [0,1] (top→bottom) → phi in [pi/2, -pi/2].
+    jj, ii = np.meshgrid(np.arange(equi_w), np.arange(equi_h))
+    theta = (jj / equi_w) * 2 * np.pi - np.pi
+    phi = np.pi / 2 - (ii / equi_h) * np.pi
+    dx = np.cos(phi) * np.cos(theta)
+    dy = np.cos(phi) * np.sin(theta)
+    dz = np.sin(phi)
+    dirs = np.stack([dx, dy, dz], axis=-1)  # (H,W,3) world rays
+
+    pano = np.zeros((equi_h, equi_w, 3), np.float32)
+    best = np.full((equi_h, equi_w), -1e9, np.float32)
+    for img, (fwd, right, u) in zip(face_imgs, face_bases):
+        d_f = dirs @ fwd
+        sel = d_f > max(1e-6, 0)  # rays in this face's hemisphere
+        # Pick the face with the largest forward component per pixel.
+        take = sel & (d_f > best)
+        if not take.any():
+            continue
+        s = dirs[take] / d_f[take][:, None]  # project to image plane (z=1)
+        u_img = s @ right
+        v_img = s @ u
+        inside = (np.abs(u_img) <= 1.0) & (np.abs(v_img) <= 1.0)
+        col = np.clip(((u_img + 1) * 0.5 * (face_size - 1)).astype(int), 0, face_size - 1)
+        row = np.clip(((1 - (v_img + 1) * 0.5) * (face_size - 1)).astype(int), 0, face_size - 1)
+        idx = np.where(take)
+        ri, ci = idx[0][inside], idx[1][inside]
+        pano[ri, ci] = img[row[inside], col[inside]]
+        best[ri, ci] = d_f[take][inside]
+
+    from PIL import Image as _Image
+
+    _Image.fromarray(np.clip(pano, 0, 255).astype(np.uint8)).save(out, quality=88)
+    logger.info("Baked GS panorama → %s", out)
+    return out
 
 
 def _fit_backdrop_transform(means: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
@@ -461,6 +679,182 @@ def _fit_backdrop_transform(means: np.ndarray, center: np.ndarray, radius: float
     T[:3, :3] = s * R_gs_to_world
     T[:3, 3] = np.asarray(center, float) - (s * R_gs_to_world) @ c
     return T
+
+
+def _auto_up_sign(means: np.ndarray) -> float:
+    """Best-effort guess of the PCA up-axis sign (which way is "up").
+
+    The floor is a dense, thin slab; project the gaussians onto the PCA up-axis
+    and assume the densest layer is the floor → world-up points away from it.
+    Reliable enough for a rough upload preview; curated presets override this
+    via :data:`GSPLAT_SKYBOX_ALIGN`.
+    """
+    c = means.mean(axis=0)
+    X = means - c
+    cov = (X.T @ X) / max(1, len(X))
+    _, evecs = np.linalg.eigh(cov)
+    u = X @ evecs[:, 0]
+    hist, edges = np.histogram(u, bins=64)
+    peak = 0.5 * (edges[int(hist.argmax())] + edges[int(hist.argmax()) + 1])
+    # Densest slab (floor) on the +u side → up is -u → sign -1, else +1.
+    return -1.0 if peak > float(np.median(u)) else 1.0
+
+
+def _fit_skybox_transform(
+    means: np.ndarray,
+    up_sign: float = 1.0,
+    yaw_deg: float = 0.0,
+    radius: float = 2.5,
+    center: tuple = (0.05, 0.05),
+    floor_z: float = -0.3,
+    floor_pct: float = 2.0,
+) -> np.ndarray:
+    """Fit a ``world_from_gs`` (4×4) for the live skybox backdrop.
+
+    Stands the scene upright (PCA smallest-variance axis × ``up_sign`` → world
+    +Z), applies an extra ``yaw_deg`` about +Z, scales horizontal extent to
+    ~``radius`` m, and places the GS floor (the ``floor_pct`` percentile of
+    world-z) at ``floor_z`` — typically *below* the MuJoCo ground so the MuJoCo
+    floor wins everything below the horizon. Centres the horizontal centroid at
+    ``center``. See :class:`GsplatBackground` (``skybox=True``).
+    """
+    c = means.mean(axis=0)
+    X = means - c
+    cov = (X.T @ X) / max(1, len(X))
+    _, evecs = np.linalg.eigh(cov)  # ascending; col0 = smallest var ≈ up
+    up = evecs[:, 0]
+    major = evecs[:, 2]
+    z = up_sign * up / (np.linalg.norm(up) + 1e-9)
+    x = major - (major @ z) * z
+    x /= np.linalg.norm(x) + 1e-9
+    y = np.cross(z, x)
+    R = np.stack([x, y, z], axis=0)  # rows map gs-axis → world axis
+
+    t = np.deg2rad(yaw_deg)
+    ct, st = np.cos(t), np.sin(t)
+    Rz = np.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
+    R = Rz @ R
+
+    horiz = np.linalg.norm(X @ np.stack([evecs[:, 2], evecs[:, 1]], axis=1), axis=1)
+    r95 = float(np.percentile(horiz, 95)) or 1.0
+    s = float(radius) / r95
+    M = s * R
+
+    pts = X @ M.T
+    floor_zz = float(np.percentile(pts[:, 2], floor_pct))
+    b = np.array([center[0], center[1], float(floor_z) - floor_zz], dtype=float)
+
+    T = np.eye(4)
+    T[:3, :3] = M
+    T[:3, 3] = b - M @ c
+    return T
+
+
+# --------------------------------------------------------------------------- #
+# SPZ (Niantic Gaussian SPlat) reader — pure numpy, no extra deps.
+# This is the format MuJoCo-GS-Web ships its curated scenes in (e.g. the
+# "tabletop" environment). Spec transcribed from the `spz` rust crate.
+# --------------------------------------------------------------------------- #
+
+_SPZ_MAGIC = 0x5053474E  # "NGSP"
+_SPZ_COLOR_SCALE = 0.15
+_SPZ_DIM_FOR_DEGREE = {0: 0, 1: 3, 2: 8, 3: 15}
+
+
+def _decode_spz_rotations(rot: np.ndarray, smallest_three: bool) -> np.ndarray:
+    """``rot`` (N, 4|3) uint8 → (N, 4) quaternion in WXYZ order (gsplat/INRIA)."""
+    N = rot.shape[0]
+    xyzw = np.zeros((N, 4), np.float32)  # [x, y, z, w]
+    if smallest_three:  # version 3
+        comp = (
+            rot[:, 0].astype(np.uint32)
+            | (rot[:, 1].astype(np.uint32) << 8)
+            | (rot[:, 2].astype(np.uint32) << 16)
+            | (rot[:, 3].astype(np.uint32) << 24)
+        )
+        i_largest = (comp >> 30).astype(np.int64)
+        c_mask = np.uint32((1 << 9) - 1)
+        inv_sqrt2 = np.float32(1.0 / np.sqrt(2.0))
+        c = comp.copy()
+        ssq = np.zeros(N, np.float32)
+        for i in (3, 2, 1, 0):  # non-largest comps consume 10 bits each, high index first
+            active = i_largest != i
+            mag = (c & c_mask).astype(np.float32)
+            negbit = (c >> 9) & np.uint32(1)
+            val = inv_sqrt2 * mag / float(c_mask)
+            val = np.where(negbit == 1, -val, val).astype(np.float32)
+            xyzw[active, i] = val[active]
+            ssq[active] += (val * val)[active]
+            c = np.where(active, c >> 10, c)
+        xyzw[np.arange(N), i_largest] = np.sqrt(np.maximum(0.0, 1.0 - ssq)).astype(np.float32)
+    else:  # version 2: "first three" + reconstructed w
+        xyz = rot[:, :3].astype(np.float32) * np.float32(1.0 / 127.5) - 1.0
+        xyzw[:, :3] = xyz
+        xyzw[:, 3] = np.sqrt(np.maximum(0.0, 1.0 - (xyz * xyz).sum(axis=1)))
+    return xyzw[:, [3, 0, 1, 2]].copy()  # → WXYZ
+
+
+def _load_spz_splats(spz_path: Path, device: str) -> dict:
+    """Load a Niantic ``.spz`` (versions 2 & 3) into the same dict layout as
+    :func:`_load_ply_splats`. Higher-order SH is ignored (DC color is enough
+    for a backdrop)."""
+    import gzip
+    import struct
+
+    try:
+        import torch
+    except ImportError as e:  # pragma: no cover
+        raise ImportError("torch is required for .spz loading. Run `pip install '.[gsplat]'`.") from e
+
+    with gzip.open(str(spz_path), "rb") as f:
+        raw = f.read()
+    magic, version, num_points = struct.unpack_from("<iii", raw, 0)
+    sh_degree, frac_bits, _flags, _reserved = struct.unpack_from("<BBBB", raw, 12)
+    if magic != _SPZ_MAGIC:
+        raise ValueError(f"{spz_path}: bad SPZ magic {magic:#x}")
+    if version not in (2, 3):
+        raise ValueError(f"{spz_path}: unsupported SPZ version {version}")
+
+    N = num_points
+    smallest3 = version >= 3
+    pos_bytes = 9  # 24-bit fixed point (version 1 float16 is not produced in practice)
+    rot_bytes = 4 if smallest3 else 3
+    sh_dim = _SPZ_DIM_FOR_DEGREE[sh_degree]
+
+    off = 16
+    pos = np.frombuffer(raw, np.uint8, count=N * pos_bytes, offset=off); off += N * pos_bytes
+    alpha = np.frombuffer(raw, np.uint8, count=N, offset=off); off += N
+    col = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3); off += N * 3
+    scl = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3); off += N * 3
+    rot = np.frombuffer(raw, np.uint8, count=N * rot_bytes, offset=off).reshape(N, rot_bytes)
+    off += N * rot_bytes  # trailing SH (N*sh_dim*3) intentionally ignored
+
+    # positions: 24-bit little-endian signed fixed point / 2^frac_bits
+    p = pos.reshape(N, 3, 3).astype(np.int32)
+    fixed = p[:, :, 0] | (p[:, :, 1] << 8) | (p[:, :, 2] << 16)
+    fixed = np.where(fixed >= 0x800000, fixed - 0x1000000, fixed)
+    means = fixed.astype(np.float32) / float(1 << frac_bits)
+
+    scales = np.exp(scl.astype(np.float32) / 16.0 - 10.0)
+    opac = alpha.astype(np.float32) / 255.0
+    f_dc = (col.astype(np.float32) / 255.0 - 0.5) / _SPZ_COLOR_SCALE
+    colors = np.clip(0.5 + 0.28209479177387814 * f_dc, 0.0, 1.0)
+    quats = _decode_spz_rotations(rot, smallest3)
+
+    logger.info("Loaded SPZ %s: v%d, %d splats, sh_degree=%d", spz_path.name, version, N, sh_degree)
+
+    def to_t(a, dt=None):
+        import torch as _t
+
+        return _t.from_numpy(np.ascontiguousarray(a)).to(dt or _t.float32).to(device)
+
+    return {
+        "means": to_t(means),
+        "scales": to_t(scales),
+        "quats": to_t(quats),
+        "opacities": to_t(opac),
+        "colors": to_t(colors),
+    }
 
 
 def _load_ply_splats(ply_path: Path, device: str) -> dict:

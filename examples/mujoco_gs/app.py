@@ -50,10 +50,8 @@ if str(_THIS_DIR.parent.parent) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR.parent.parent))
 
 from examples.mujoco_gs import agent as agent_mod  # noqa: E402
-from examples.mujoco_gs.backgrounds import (  # noqa: E402
-    GsplatBackground,
-    PanoramaBackground,
-)
+from examples.mujoco_gs.backgrounds import PanoramaBackground  # noqa: E402
+from examples.mujoco_gs.backgrounds import gsplat_scene_names as _gsplat_scene_names  # noqa: E402
 
 logger = logging.getLogger("mujoco_gs.app")
 
@@ -127,7 +125,7 @@ def build_app(
     panorama_path: Optional[str] = None,
     gsplat_ply: Optional[str] = None,
     model_id: Optional[str] = None,
-    initial_camera: str = "front",
+    initial_camera: str = "oblique",
 ):
     try:
         import gradio as gr
@@ -141,6 +139,15 @@ def build_app(
         panorama_path=panorama_path,
         gsplat_ply=gsplat_ply,
         model_id=model_id,
+    )
+
+    # Reflect whichever background actually loaded (the default is the live
+    # 'tabletop' 3DGS skybox, but it falls back to the procedural panorama if
+    # the gsplat runtime/scene is unavailable) in the UI's initial state.
+    _bg_is_live = getattr(holder.compositor.background, "name", "") == "gsplat"
+    _bg_default_choice = "Live 3DGS scene (preset)" if _bg_is_live else "Procedural panorama"
+    _bg_default_status = (
+        "Background → live 3DGS skybox (tabletop)" if _bg_is_live else "Background → procedural panorama"
     )
 
     # ------ callbacks ------ #
@@ -158,27 +165,86 @@ def build_app(
         panorama_upload: Optional[str],
         ply_upload: Optional[str],
         rotation_deg: float,
-    ) -> str:
+        gs_scene: Optional[str],
+    ):
+        """Swap the composite background. Generator: yields status updates
+        (3DGS scenes download + bake a panorama on first use, which is slow)."""
+        from examples.mujoco_gs.backgrounds import (
+            GsplatBackground,
+            bake_gsplat_panorama,
+            download_gsplat_scene,
+            gsplat_skybox_align_for,
+        )
+
         try:
             if choice == "Procedural panorama":
-                bg = PanoramaBackground(rotation_deg=rotation_deg)
-            elif choice == "Custom panorama":
+                holder.set_background(PanoramaBackground(rotation_deg=rotation_deg))
+                yield "Background → procedural panorama"
+                return
+            if choice == "Custom panorama":
                 if not panorama_upload:
-                    return "⚠ Upload a panorama image first."
-                bg = PanoramaBackground(image_path=panorama_upload, rotation_deg=rotation_deg)
-            elif choice == "3D Gaussian Splat (.ply)":
+                    yield "⚠ Upload a panorama image first."
+                    return
+                holder.set_background(PanoramaBackground(image_path=panorama_upload, rotation_deg=rotation_deg))
+                yield "Background → custom panorama"
+                return
+
+            # Live 3DGS skybox: download the .ply (preset) or use the upload,
+            # then render it LIVE behind the arm (real parallax + depth occlusion)
+            # via GsplatBackground(skybox=True) — upright, scaled, the GS floor
+            # pushed below the MuJoCo ground, sub-floor + low-opacity gaussians
+            # clipped. This is the well-integrated path (cf. MuJoCo-GS-Web).
+            if choice == "Live 3DGS scene (preset)":
+                if not gs_scene:
+                    yield "⚠ Pick a scene from the dropdown first."
+                    return
+                yield f"Downloading 3DGS scene '{gs_scene}' (first time ~300 MB)…"
+                ply = download_gsplat_scene(gs_scene)
+                align = gsplat_skybox_align_for(gs_scene)
+                yield "Loading live 3DGS skybox (aligning + clipping gaussians)…"
+                holder.set_background(GsplatBackground(ply_path=str(ply), skybox=True, **align))
+                note = "" if align else " — uncurated alignment, may be rough"
+                yield f"Background → live 3DGS skybox ({Path(str(ply)).stem}{note}). Tip: the 'oblique' camera is the hero angle."
+                return
+            if choice == "Live 3DGS .ply (upload)":
                 if not ply_upload:
-                    return "⚠ Upload a .ply file first."
-                bg = GsplatBackground(ply_path=ply_upload)
+                    yield "⚠ Upload a .ply file first."
+                    return
+                yield "Loading live 3DGS skybox (aligning + clipping gaussians)…"
+                holder.set_background(GsplatBackground(ply_path=ply_upload, skybox=True))
+                yield (
+                    f"Background → live 3DGS skybox ({Path(str(ply_upload)).stem} — "
+                    "auto alignment, may need tuning)."
+                )
+                return
+
+            # 3DGS paths: get a .ply (preset download or upload), bake it to an
+            # equirectangular panorama once (cached), then use PanoramaBackground
+            # — a clean, camera-consistent skybox-style backdrop.
+            if choice == "3DGS scene (preset)":
+                if not gs_scene:
+                    yield "⚠ Pick a scene from the dropdown first."
+                    return
+                yield f"Downloading 3DGS scene '{gs_scene}' (first time ~300 MB)…"
+                ply = download_gsplat_scene(gs_scene)
+            elif choice == "3DGS .ply (upload)":
+                if not ply_upload:
+                    yield "⚠ Upload a .ply file first."
+                    return
+                ply = ply_upload
             else:
-                return f"Unknown background: {choice}"
-            holder.set_background(bg)
-            return f"Background → {bg.name} (ok)"
+                yield f"Unknown background: {choice}"
+                return
+
+            yield "Baking 360° panorama from the 3DGS scene (one-time, ~1 min)…"
+            pano = bake_gsplat_panorama(ply)
+            holder.set_background(PanoramaBackground(image_path=str(pano), rotation_deg=rotation_deg))
+            yield f"Background → 3DGS scene ({Path(str(ply)).stem})"
         except ImportError as e:
-            return f"⚠ {e}"
+            yield f"⚠ {e}"
         except Exception as e:  # pragma: no cover
             logger.exception("Background swap failed.")
-            return f"⚠ {type(e).__name__}: {e}"
+            yield f"⚠ {type(e).__name__}: {e}"
 
     # Live-stream frame size: small enough to push smoothly through a remote
     # `gradio.live` share tunnel (full-res 640×480 PNGs at >10 fps saturate
@@ -271,10 +337,18 @@ def build_app(
                         choices=[
                             "Procedural panorama",
                             "Custom panorama",
-                            "3D Gaussian Splat (.ply)",
+                            "Live 3DGS scene (preset)",
+                            "Live 3DGS .ply (upload)",
+                            "3DGS scene (preset)",
+                            "3DGS .ply (upload)",
                         ],
-                        value="Procedural panorama",
-                        label="Background renderer",
+                        value=_bg_default_choice,
+                        label="Background renderer (Live 3DGS = real parallax/occlusion; '3DGS …' = baked panorama)",
+                    )
+                    gs_scene_dd = gr.Dropdown(
+                        choices=_gsplat_scene_names(),
+                        value=(_gsplat_scene_names()[0] if _gsplat_scene_names() else None),
+                        label="3DGS scene preset — for Live, use 'tabletop' (purpose-built room, clean at every angle). Downloads on first use.",
                     )
                     rotation = gr.Slider(
                         minimum=-180,
@@ -289,12 +363,12 @@ def build_app(
                         type="filepath",
                     )
                     ply_file = gr.File(
-                        label="3DGS .ply (requires `pip install '.[gsplat]'`)",
+                        label="3DGS .ply (Marble export etc.) — for the 'Live 3DGS .ply' or baked '3DGS .ply' options",
                         file_types=[".ply"],
                         type="filepath",
                     )
                     apply_bg_btn = gr.Button("Apply background")
-                    bg_status = gr.Markdown("Background → panorama (procedural)")
+                    bg_status = gr.Markdown(_bg_default_status)
 
             # Right column — chat.
             with gr.Column(scale=5):
@@ -318,7 +392,7 @@ def build_app(
         camera_dd.change(lambda cam: _live_img_html(cam), inputs=[camera_dd], outputs=[live_view])
         apply_bg_btn.click(
             on_background_change,
-            inputs=[bg_choice, panorama_file, ply_file, rotation],
+            inputs=[bg_choice, panorama_file, ply_file, rotation, gs_scene_dd],
             outputs=[bg_status],
         ).then(on_render, inputs=[camera_dd], outputs=[preview])
 
@@ -366,8 +440,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--camera",
         type=str,
-        default="front",
-        help="Initial preview camera (default: front).",
+        default="oblique",
+        help="Initial preview camera (default: oblique — the hero angle, which "
+        "looks best with the live 3DGS backdrops).",
     )
     parser.add_argument("--server-name", type=str, default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)

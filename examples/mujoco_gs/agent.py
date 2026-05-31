@@ -204,8 +204,10 @@ def build(
     if background is None:
         if gsplat_ply:
             background = GsplatBackground(ply_path=gsplat_ply)
-        else:
+        elif panorama_path:
             background = PanoramaBackground(image_path=panorama_path)
+        else:
+            background = _default_live_background()
 
     # 2. Build sim + compositor + scene. Capture the robot config that
     #    actually loaded so the system prompt reflects reality.
@@ -236,6 +238,37 @@ def build(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+_DEFAULT_LIVE_SCENE = "tabletop (indoor room)"
+
+
+def _default_live_background() -> "BackgroundRenderer":
+    """Startup default background: the curated **live 'tabletop' 3DGS skybox**
+    (MuJoCo-GS-Web's purpose-built room — clean from every angle).
+
+    Eagerly downloads + loads the splats so any problem (missing ``gsplat``/
+    ``torch``, no network, bad file) surfaces *here* and we fall back to the
+    dependency-free procedural panorama — startup never hard-fails.
+    """
+    try:
+        import torch  # noqa: F401 — ensure the gsplat runtime is present
+        from gsplat import rasterization  # noqa: F401
+
+        from .backgrounds import download_gsplat_scene, gsplat_skybox_align_for
+
+        ply = download_gsplat_scene(_DEFAULT_LIVE_SCENE)
+        bg = GsplatBackground(ply_path=str(ply), skybox=True, **gsplat_skybox_align_for(_DEFAULT_LIVE_SCENE))
+        bg._load()  # warm + validate now (not mid-render)
+        logger.info("Default background → live 3DGS skybox (%s).", _DEFAULT_LIVE_SCENE)
+        return bg
+    except Exception as e:  # noqa: BLE001 — any failure → safe fallback
+        logger.warning(
+            "Live 3DGS default unavailable (%s); falling back to procedural panorama. "
+            "Install the gsplat extra (`pip install '.[gsplat]'`) for the photoreal default.",
+            e,
+        )
+        return PanoramaBackground()
 
 
 def _extract_agent_text(result: Any) -> str:
