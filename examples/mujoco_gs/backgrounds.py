@@ -282,10 +282,22 @@ class GsplatBackground:
         ply_path: str | Path,
         device: str = "cuda",
         transform: Optional[np.ndarray] = None,
+        auto_backdrop: bool = False,
+        backdrop_center: Optional[tuple] = (0.05, 0.05, 0.25),
+        backdrop_radius: float = 3.0,
     ) -> None:
         self._ply_path = Path(ply_path)
         self._device = device
+        self._explicit_transform = transform is not None
         self._transform = np.asarray(transform, dtype=np.float64) if transform is not None else np.eye(4)
+        # When True and no explicit transform is given, fit a ``world_from_gs``
+        # that stands the captured scene upright, scales it to ~``backdrop_radius``
+        # metres, and centres it on ``backdrop_center`` — so it reads as a
+        # photoreal room *around/behind* the arm (the arm + cube + MuJoCo
+        # ground composite in front via depth). Alignment is approximate.
+        self._auto_backdrop = auto_backdrop and transform is None
+        self._backdrop_center = np.asarray(backdrop_center, dtype=np.float64)
+        self._backdrop_radius = float(backdrop_radius)
         self._splats: Optional[dict] = None  # lazily loaded
 
     # ----- lazy load ----- #
@@ -303,6 +315,10 @@ class GsplatBackground:
         if not self._ply_path.exists():
             raise FileNotFoundError(f"Gaussian Splat .ply not found: {self._ply_path}")
         self._splats = _load_ply_splats(self._ply_path, device=self._device)
+        if self._auto_backdrop:
+            means = self._splats["means"].detach().cpu().numpy()
+            self._transform = _fit_backdrop_transform(means, self._backdrop_center, self._backdrop_radius)
+            logger.info("GsplatBackground: fitted backdrop transform for %s", self._ply_path.name)
 
     # ----- BackgroundRenderer interface ----- #
 
@@ -315,12 +331,22 @@ class GsplatBackground:
         s = self._splats  # type: ignore[assignment]
         assert s is not None  # for type checker
 
-        # Build view matrix: gsplat expects camera_from_world (so we invert).
-        T_cam_world = np.linalg.inv(cam.T_world_cam @ self._transform)
-        viewmat = torch.from_numpy(T_cam_world).float().unsqueeze(0).to(self._device)
+        # View matrix: gsplat wants world→camera in the OpenCV convention
+        # (+X right, +Y down, +Z forward). Our CameraParams.T_world_cam is
+        # camera→world in MuJoCo/OpenGL convention (+X right, +Y up, −Z
+        # forward), and ``self._transform`` is ``world_from_gs`` (places the
+        # gaussians' own frame into the MuJoCo world). So the gaussian→camera
+        # transform is:  gl_to_cv · (world←cam)⁻¹ · (world←gs)
+        #              =  gl_to_cv · cam_from_world · world_from_gs.
+        gl_to_cv = np.diag([1.0, -1.0, -1.0, 1.0])
+        viewmat_np = gl_to_cv @ np.linalg.inv(cam.T_world_cam) @ self._transform
+        viewmat = torch.from_numpy(viewmat_np).float().unsqueeze(0).to(self._device)
         K = torch.from_numpy(cam.K).float().unsqueeze(0).to(self._device)
 
-        rgb, depth, _ = rasterization(
+        # rasterization returns (render_colors, render_alphas, meta). With
+        # render_mode="RGB+D", render_colors is (B, H, W, 4): [..., :3] = RGB,
+        # [..., 3] = per-pixel depth (meters, in the camera frame).
+        render_colors, render_alphas, _ = rasterization(
             means=s["means"],
             quats=s["quats"],
             scales=s["scales"],
@@ -334,12 +360,107 @@ class GsplatBackground:
             far_plane=cam.zfar,
             render_mode="RGB+D",
         )
-        rgb_np = (rgb[0].clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
-        depth_np = depth[0, ..., 0].cpu().numpy().astype(np.float32)
-        # Pixels with no contribution come back as 0; promote to zfar so they
-        # lose the depth test against any MuJoCo geometry.
+        out = render_colors[0]  # (H, W, 4)
+        rgb_np = (out[..., :3].clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        depth_np = out[..., 3].cpu().numpy().astype(np.float32)
+        # Pixels with no gaussian contribution come back at depth 0; promote to
+        # zfar so they lose the depth test against any MuJoCo foreground.
         depth_np = np.where(depth_np <= cam.znear, cam.zfar, depth_np)
         return rgb_np, depth_np
+
+
+# --------------------------------------------------------------------------- #
+# Downloadable 3DGS scene presets (like MuJoCo-GS-Web's scene gallery)
+# --------------------------------------------------------------------------- #
+
+# Real trained 3DGS scenes hosted on HuggingFace (standard INRIA .ply layout).
+# ``bonsai`` is an indoor plant-on-a-table room ≈ a "tabletop" scene; the
+# others are outdoor. Users can also upload their own .ply (e.g. a World Labs
+# Marble export re-saved as .ply).
+GSPLAT_SCENES = {
+    "bonsai (indoor tabletop)": (
+        "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/"
+        "bonsai/point_cloud/iteration_7000/point_cloud.ply"
+    ),
+    "bicycle (outdoor)": (
+        "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/"
+        "bicycle/point_cloud/iteration_7000/point_cloud.ply"
+    ),
+    "stump (outdoor)": (
+        "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/"
+        "stump/point_cloud/iteration_7000/point_cloud.ply"
+    ),
+}
+
+
+def gsplat_scene_names() -> list:
+    """Names of the built-in downloadable 3DGS scenes."""
+    return list(GSPLAT_SCENES.keys())
+
+
+def download_gsplat_scene(name: str, cache_dir: Optional[str | Path] = None) -> Path:
+    """Download (and cache) a preset 3DGS scene ``.ply``; return its path.
+
+    Args:
+        name: a key of :data:`GSPLAT_SCENES`.
+        cache_dir: where to cache (default ``~/.cache/mujoco_gs_scenes``).
+
+    Returns:
+        Local path to the cached ``.ply``.
+    """
+    import urllib.request
+
+    if name not in GSPLAT_SCENES:
+        raise KeyError(f"Unknown scene {name!r}. Known: {list(GSPLAT_SCENES)}")
+    url = GSPLAT_SCENES[name]
+    cache = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "mujoco_gs_scenes"
+    cache.mkdir(parents=True, exist_ok=True)
+    slug = name.split(" ")[0]
+    dest = cache / f"{slug}.ply"
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    logger.info("Downloading 3DGS scene %r → %s", name, dest)
+    tmp = dest.with_suffix(".ply.part")
+    urllib.request.urlretrieve(url, tmp)
+    tmp.rename(dest)
+    logger.info("Downloaded %s (%.0f MB)", dest.name, dest.stat().st_size / 1e6)
+    return dest
+
+
+def _fit_backdrop_transform(means: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
+    """Fit a ``world_from_gs`` SE(3)+scale that stands a captured scene upright,
+    scales it to ~``radius`` m, and centres it on ``center``.
+
+    Heuristics (captured scenes carry no canonical frame):
+      * **Up axis** = the smallest-variance PCA axis of the gaussian positions
+        (a room is wide + deep but short → the thin axis ≈ the floor normal).
+      * **Scale** so the in-plane (horizontal) extent ≈ ``radius``.
+      * **Centre** the scene centroid at ``center``.
+
+    Approximate by design — exposed for tuning. Returns a 4×4 matrix mapping
+    gaussian coords → MuJoCo world coords.
+    """
+    c = means.mean(axis=0)
+    X = means - c
+    # Robust extent: use a percentile to ignore far "floater" gaussians.
+    cov = (X.T @ X) / max(1, len(X))
+    evals, evecs = np.linalg.eigh(cov)  # ascending eigenvalues; columns = axes
+    up = evecs[:, 0]  # smallest variance ≈ floor normal
+    horiz_major = evecs[:, 2]  # largest in-plane axis
+    # Orthonormal world-from-gs basis: gs `up` → +Z, gs major → +X.
+    z = up / (np.linalg.norm(up) + 1e-9)
+    x = horiz_major - (horiz_major @ z) * z
+    x /= np.linalg.norm(x) + 1e-9
+    y = np.cross(z, x)
+    R_gs_to_world = np.stack([x, y, z], axis=0)  # rows map gs-axis → world axis
+    # Horizontal radius (95th pct of in-floor-plane distance) → scale.
+    horiz = np.linalg.norm((X @ np.stack([evecs[:, 2], evecs[:, 1]], axis=1)), axis=1)
+    r95 = float(np.percentile(horiz, 95)) or 1.0
+    s = float(radius) / r95
+    T = np.eye(4)
+    T[:3, :3] = s * R_gs_to_world
+    T[:3, 3] = np.asarray(center, float) - (s * R_gs_to_world) @ c
+    return T
 
 
 def _load_ply_splats(ply_path: Path, device: str) -> dict:
