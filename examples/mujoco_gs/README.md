@@ -71,36 +71,33 @@ Then open http://127.0.0.1:7860 in a browser.
 
 ### Watching the arm move
 
-Motion is rendered to a short **MP4 clip** that autoplays in the video panel
-under the still preview. A compact H.264 video plays back smoothly on the
-client regardless of any buffering proxy / share tunnel — unlike streaming
-many per-frame image updates, which a buffering layer (e.g. SSH / VS Code
-port-forwarding, or the `gradio.live` tunnel) coalesces into a burst at the
-end so the preview looks frozen until it finishes.
+The agent drives motion through the **real `Simulation` API only** — no custom
+tools. A request like *"have the arm wave"* makes the agent call
+`run_policy(robot_name="arm", policy_provider="mock", duration=4.0,
+control_frequency=20.0)` — the genuine strands-robots policy engine, which
+steps the arm in real time. You watch it in the **live MJPEG view** (top-left);
+the still preview shows the composited result afterwards.
 
-* **"▶ Record motion clip" button** (under the preview) — pick a preset
-  (`wave` / `nod` / `reach` / `stir`) and it renders the motion to a clip
-  that autoplays.
-* **Agent chat** — when you ask the agent to move the arm, it calls the
-  `animate` tool, which records the motion to an MP4 (shown autoplaying) plus
-  a final still. Frames are rendered as fast as possible (~11 ms each, not
-  paced in real time), so an 8 s clip is generated in ~2 s; the MP4 metadata
-  sets the playback rate so it still plays for the full duration. The agent
-  uses a clean scripted trajectory rather than the random `run_policy` jitter.
+> The 3DGS / panorama compositing is the example's *display* layer (the live
+> view + still preview render through `HybridCompositor`); it is **not** an
+> agent tool. The agent only ever calls real `Simulation` actions.
+>
+> Because the policy is `mock`, the arm performs *exploratory* motion (it moves
+> and sweeps its joints) rather than a trained skill — that's what the stock
+> API produces without a trained policy. For a real trained policy driving a
+> real task, see the GR00T + LIBERO demo below.
 
 ### Try these prompts
 
-* *“Make the arm wave.”* — agent calls `animate(kind="wave")`; the wave clip
-  autoplays in the video panel.
-* *“Wave for 8 seconds.”* / *“Wave for half a second.”* — the agent passes
-  `duration_s` through to `animate`.
-* *“Reach forward, then show the oblique view.”* — `animate(kind="reach")`
-  + `hybrid_render(camera_name="oblique")`.
-* *“Render the front view.”* — agent calls `hybrid_render` (a still).
+* *“Have the arm wave.”* / *“Do a demo.”* — agent calls
+  `run_policy(policy_provider="mock", duration=4.0, …)`; watch it in the live
+  view.
+* *“Render the front view.”* — agent calls `render(camera_name="front")`.
 * *“Move the cube 10 cm to the left and render the topdown view.”* —
-  agent uses `Simulation.move_object` then `hybrid_render`.
+  agent uses `move_object` then `render`.
 * *“Apply a 5 N upward force to the cube and render.”* —
-  `apply_force` + `step` + `hybrid_render`.
+  `apply_force` + `step` + `render`.
+* *“Pose the elbow at 1.2 rad.”* — `set_joint_positions` + `step`.
 
 ## Real GR00T policy (Panda + LIBERO) — separate, agentic demo
 
@@ -183,7 +180,7 @@ Other facts / caveats:
    ┌───────────────────────────────┐    ┌─────────────────────────────┐
    │  agent.py — MujocoGsAgent     │───▶│  Strands Agent              │
    │            (chat history)     │    │  - Simulation tool          │
-   └────────────┬──────────────────┘    │  - hybrid_render tool       │
+    └────────────┬──────────────────┘    │  - Simulation tool (only)   │
                 │                       └────────────┬────────────────┘
                 │                                    │ tool calls
                 │ render_now()                       ▼
@@ -215,8 +212,9 @@ Other facts / caveats:
   `add_robot` actually succeeded — so the agent never has to "repair" an empty
   scene. The robot that loaded is reported in the build summary and reflected
   in the agent's system prompt.
-* **`agent.py`** — wires the `Simulation` AgentTool + a custom
-  `hybrid_render` tool into a Strands agent.
+* **`agent.py`** — wires the real `Simulation` AgentTool (only) into a Strands
+  agent; "wave" → `run_policy`. The `HybridCompositor` is the display layer,
+  not an agent tool.
 * **`app.py`** — Gradio UI: chat panel + live preview + scene controls +
   background switcher.
 

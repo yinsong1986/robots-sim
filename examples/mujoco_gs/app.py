@@ -15,8 +15,8 @@ Two-column layout that mirrors the MuJoCo-GS-Web vibe but is fully Python:
     +----------------------------+ +-------------------------------------+
 
 * The chat panel goes through :class:`MujocoGsAgent` — every Strands tool
-  call (Simulation actions + the custom ``hybrid_render``) is logged in the
-  Gradio event stream.
+  call (real ``Simulation`` actions, e.g. ``run_policy`` / ``render``) is
+  logged in the Gradio event stream.
 * The "Render now" button calls the compositor outside the agent, so the
   user can poke the scene by hand without burning agent tokens.
 * The "Background" dropdown hot-swaps between the procedural panorama,
@@ -148,17 +148,6 @@ def build_app(
     def on_render(camera: str) -> np.ndarray:
         return holder.render_now(camera_name=camera)
 
-    def on_run_motion(kind: str, camera: str):
-        """Record a motion clip and return (final still, autoplaying video).
-
-        A compact MP4 plays back smoothly on the client regardless of any
-        buffering proxy / share tunnel — unlike streaming many per-frame
-        image updates.
-        """
-        video = holder.record_motion(kind=kind, camera_name=camera, duration_s=4.0, fps=20, width=480, height=360)
-        still = holder.render_now(camera_name=camera)
-        return still, video
-
     def on_reset() -> Tuple[List, np.ndarray, str]:
         holder.reset_scene()
         frame = holder.render_now(camera_name=initial_camera)
@@ -196,28 +185,24 @@ def build_app(
     # the tunnel and the preview looks frozen). The final frame is full-res.
 
     def on_chat(user_message: str, chat_history: list, camera: str):
-        """Run the agent and surface its reply, a final still, and — if it
-        recorded a motion — an autoplaying MP4 clip.
+        """Run one agent turn; show the reply + a freshly composited still.
 
-        Yields (msg_box, chat_history, preview, motion_video). The video is a
-        compact MP4 that plays back smoothly on the client regardless of any
-        buffering proxy (this replaced per-frame live streaming, which a
-        buffering proxy coalesced into a burst at the end).
+        The agent drives the scene with real `Simulation` actions (e.g.
+        `run_policy` for motion); the live MJPEG view above shows the motion
+        as it happens, and this returns the composited still afterwards.
+
+        Yields (msg_box, chat_history, preview).
         """
         import gradio as gr
 
         if not user_message.strip():
-            yield "", chat_history, gr.update(), gr.update()
+            yield "", chat_history, gr.update()
             return
 
         base = chat_history + [{"role": "user", "content": user_message}]
-        working = base + [{"role": "assistant", "content": "_…working (rendering motion if requested)…_"}]
-        # Immediately show the user message + a working placeholder.
-        yield "", working, gr.update(), gr.update()
+        working = base + [{"role": "assistant", "content": "_…working (watch the live view)…_"}]
+        yield "", working, gr.update()
 
-        # Run the (blocking) agent turn in a background thread so the UI stays
-        # responsive; we don't poll-stream frames anymore (the video clip is
-        # the reliable motion channel).
         result: dict = {}
 
         def _run():
@@ -234,18 +219,16 @@ def build_app(
         th.join()
 
         if "err" in result:
-            text, frame, video = result["err"], None, None
+            text, frame = result["err"], None
         else:
-            text, frame, video = result.get("out", ("(no reply)", None, None))
+            text, frame = result.get("out", ("(no reply)", None))
         if frame is None:
             try:
                 frame = holder.render_now(camera_name=camera)
             except Exception:  # pragma: no cover
                 frame = None
         final = base + [{"role": "assistant", "content": text or "(no reply)"}]
-        # Only update the video component if a new clip was produced.
-        video_out = video if video else gr.update()
-        yield "", final, frame, video_out
+        yield "", final, frame
 
     # ------ layout ------ #
 
@@ -274,12 +257,6 @@ def build_app(
                     interactive=False,
                     height=360,
                 )
-                motion_video = gr.Video(
-                    label="Motion clip (autoplays)",
-                    autoplay=True,
-                    interactive=False,
-                    height=360,
-                )
                 with gr.Row():
                     camera_dd = gr.Dropdown(
                         choices=["front", "topdown", "oblique", "default"],
@@ -288,14 +265,6 @@ def build_app(
                     )
                     render_btn = gr.Button("Render now", variant="primary")
                     reset_btn = gr.Button("Reset scene")
-
-                with gr.Row():
-                    motion_dd = gr.Dropdown(
-                        choices=["wave", "nod", "reach", "stir"],
-                        value="wave",
-                        label="Motion",
-                    )
-                    motion_btn = gr.Button("▶ Record motion clip", variant="primary")
 
                 with gr.Accordion("Background", open=False):
                     bg_choice = gr.Radio(
@@ -344,7 +313,6 @@ def build_app(
 
         # ------ wiring ------ #
         render_btn.click(on_render, inputs=[camera_dd], outputs=[preview])
-        motion_btn.click(on_run_motion, inputs=[motion_dd, camera_dd], outputs=[preview, motion_video])
         reset_btn.click(on_reset, outputs=[chatbot, preview, bg_status])
         # Point the live MJPEG <img> at the newly selected camera.
         camera_dd.change(lambda cam: _live_img_html(cam), inputs=[camera_dd], outputs=[live_view])
@@ -358,12 +326,12 @@ def build_app(
         send_btn.click(
             on_chat,
             inputs=[msg_box, chatbot, camera_dd],
-            outputs=[msg_box, chatbot, preview, motion_video],
+            outputs=[msg_box, chatbot, preview],
         )
         msg_box.submit(
             on_chat,
             inputs=[msg_box, chatbot, camera_dd],
-            outputs=[msg_box, chatbot, preview, motion_video],
+            outputs=[msg_box, chatbot, preview],
         )
         clear_btn.click(lambda: [], outputs=[chatbot])
 
