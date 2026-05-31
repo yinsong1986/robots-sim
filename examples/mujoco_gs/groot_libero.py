@@ -34,7 +34,6 @@ markers hidden) is applied by the compositor, so the arm renders clean.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import List, Optional
 
 import numpy as np
@@ -71,10 +70,8 @@ class GrootLiberoRunner:
 
         self._adapters: Optional[dict] = None
         self._task_label_to_name: dict = {}
+        # Latest composited JPEG, served by the app's /live MJPEG route.
         self.latest_jpeg: Optional[bytes] = None
-        self.latest_rgb: Optional[np.ndarray] = None
-        self.running = False
-        self._lock = threading.Lock()
 
     # ----- task discovery ----- #
 
@@ -157,13 +154,11 @@ class GrootLiberoRunner:
                 ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
                     self.latest_jpeg = buf.tobytes()
-                    self.latest_rgb = rgb
                 if on_progress:
                     on_progress(len(frames))
             except Exception as e:  # pragma: no cover
                 logger.debug("on_frame render skipped: %s", e)
 
-        self.running = True
         captured: dict = {}
         try:
             sim.create_world()
@@ -240,8 +235,6 @@ class GrootLiberoRunner:
         except Exception as e:  # pragma: no cover
             logger.exception("Agentic GR00T run failed.")
             return {"error": f"{type(e).__name__}: {e}", "task": task, "instruction": instruction}
-        finally:
-            self.running = False
 
         video = _encode_mp4(frames) if frames else None
         try:
