@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import List, Optional
 
 import numpy as np
@@ -112,8 +111,13 @@ class GrootLiberoRunner:
     def run(self, task_label: str, n_episodes: int = 3, seed: int = 42, on_progress=None) -> dict:
         """Agentically run ``n_episodes`` of ``task_label`` under GR00T.
 
-        A Strands ``Agent`` invokes ``evaluate_benchmark``; a background thread
-        streams the composited live view and collects clip frames.
+        A Strands ``Agent`` invokes a one-shot ``run_libero_eval`` tool that
+        wraps ``evaluate_benchmark`` with a **synchronous** ``on_frame`` —
+        each step renders the composite through ``HybridCompositor`` into the
+        live JPEG buffer (so ``/live`` streams it) and collects clip frames.
+        Synchronous capture (vs a concurrent render thread) is what keeps the
+        MJPEG stream responsive: a background render thread contends with the
+        eval and stalls the stream (the "frozen live view" bug).
 
         Returns ``{task, instruction, success_rate, n_episodes, video,
         agent_summary, error?}``.
@@ -130,8 +134,7 @@ class GrootLiberoRunner:
         from examples.mujoco_gs.compositor import HybridCompositor
 
         try:
-            from strands import Agent
-            from strands_robots.benchmarks.libero import load_libero_suite  # noqa: F401 (already loaded)
+            from strands import Agent, tool
             from strands_robots.simulation import Simulation
             from strands_robots.simulation.benchmark import get_benchmark
         except ImportError as e:  # pragma: no cover
@@ -140,40 +143,34 @@ class GrootLiberoRunner:
         sim = Simulation(tool_name="libero_sim", mesh=False)
         compositor = HybridCompositor(sim, background=PanoramaBackground())
         frames: List[np.ndarray] = []
-        stop = threading.Event()
+        # Throttle the live render to ~every other step so per-step capture
+        # doesn't dominate wall-time, while staying smooth.
+        render_every = 2
 
-        def live_loop():
-            # Render the scene through the compositor at ~15 fps into the live
-            # buffer (+ collect clip frames). Reads mj_data while the eval
-            # steps it on another thread — safe (read-during-step) and the
-            # LIBERO viz_option keeps the arm clean.
-            dt = 1.0 / 15.0
-            while not stop.is_set():
-                t0 = time.time()
-                try:
-                    rgb = compositor.render(camera_name="image", width=self.render_width, height=self.render_height).rgb
-                    frames.append(rgb)
-                    ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    if ok:
-                        with self._lock:
-                            self.latest_jpeg = buf.tobytes()
-                            self.latest_rgb = rgb
-                    if on_progress:
-                        on_progress(len(frames))
-                except Exception as e:  # pragma: no cover
-                    logger.debug("live render skipped: %s", e)
-                elapsed = time.time() - t0
-                if elapsed < dt:
-                    time.sleep(dt - elapsed)
+        def on_frame(step: int, obs: dict, action: dict) -> None:
+            # Synchronous: runs inside the eval loop (no concurrent thread).
+            if step % render_every != 0:
+                return
+            try:
+                rgb = compositor.render(camera_name="image", width=self.render_width, height=self.render_height).rgb
+                frames.append(rgb)
+                ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok:
+                    self.latest_jpeg = buf.tobytes()
+                    self.latest_rgb = rgb
+                if on_progress:
+                    on_progress(len(frames))
+            except Exception as e:  # pragma: no cover
+                logger.debug("on_frame render skipped: %s", e)
 
         self.running = True
-        live_thread = None
+        captured: dict = {}
         try:
             sim.create_world()
             sim.add_robot("robot", data_config="panda")
 
-            # Pre-warm: generate + load the LIBERO scene and register its
-            # cameras/Panda BEFORE eval, so the live render + policy see them.
+            # Pre-warm: generate + load the LIBERO scene so its cameras/Panda
+            # exist before eval.
             spec = get_benchmark(task)
             if spec.scene_path is None and getattr(spec, "_auto_generate_scene", False):
                 generated = spec._generate_scene_from_bddl()
@@ -185,43 +182,66 @@ class GrootLiberoRunner:
                     spec.prewarm(sim)
                 if "robot" not in sim.list_robots():
                     sim.add_robot("robot", data_config="panda")
-            compositor.clear_caches()  # new model → drop stale renderer/cam caches
+            compositor.clear_caches()
+            # Seed the live buffer with the initial (pre-eval) scene frame.
+            on_frame(0, {}, {})
 
-            # Start the live view now that cameras exist.
-            live_thread = threading.Thread(target=live_loop, daemon=True)
-            live_thread.start()
+            # --- agentic: a one-shot tool wrapping evaluate_benchmark + the
+            #     synchronous on_frame closure (the closure can't cross the
+            #     agent's JSON tool boundary, so we capture it in Python scope
+            #     and expose a single tool the agent picks). ---
+            host, port = self.host, self.port
+            data_config, groot_version = self.data_config, self.groot_version
 
-            # --- agentic invocation: let the Agent pick evaluate_benchmark. ---
-            agent_kwargs = {"tools": [sim]}
+            @tool
+            def run_libero_eval(benchmark_name: str, n_episodes: int = 3, seed: int = 42) -> dict:
+                """Run a LIBERO benchmark under the GR00T policy and return the
+                success_rate. Use this for the LIBERO eval.
+
+                Args:
+                    benchmark_name: the registered LIBERO task id.
+                    n_episodes: number of episodes to run.
+                    seed: RNG seed.
+                """
+                res = sim.evaluate_benchmark(
+                    benchmark_name=benchmark_name,
+                    policy_provider="groot",
+                    policy_config={
+                        "host": host,
+                        "port": port,
+                        "data_config": data_config,
+                        "groot_version": groot_version,
+                    },
+                    n_episodes=n_episodes,
+                    seed=seed,
+                    instruction=instruction,
+                    on_frame=on_frame,
+                )
+                payload = next((c["json"] for c in res["content"] if "json" in c), {}) if isinstance(res, dict) else {}
+                captured["success_rate"] = payload.get("success_rate")
+                return res
+
+            agent_kwargs = {"tools": [run_libero_eval]}
             if self.model_id:
                 agent_kwargs["model"] = self.model_id
             agent = Agent(**agent_kwargs)
-            policy_phrase = (
-                f"using the GR00T policy with `policy_provider='groot'` and "
-                f"`policy_config={{'host': '{self.host}', 'port': {self.port}, "
-                f"'data_config': '{self.data_config}', 'groot_version': '{self.groot_version}'}}`"
-            )
             prompt = (
-                f"Make exactly one tool call: invoke the `libero_sim` tool with "
-                f"`action='evaluate_benchmark'`, `benchmark_name='{task}'`, "
-                f"`n_episodes={n_episodes}`, `seed={seed}`, {policy_phrase}. "
-                f"Do not call any other action — the world, robot, and scene are "
-                f"already set up. When the call returns, parse the `success_rate` "
-                f"field from the JSON payload and report it as a percentage of "
-                f"the {n_episodes} episodes, plus a one-sentence description of "
-                f"the task: '{instruction}'."
+                f"Make exactly one tool call: invoke `run_libero_eval` with "
+                f"`benchmark_name='{task}'`, `n_episodes={n_episodes}`, "
+                f"`seed={seed}`. When it returns, report the `success_rate` from "
+                f"the JSON payload as a percentage of the {n_episodes} episodes, "
+                f"plus a one-sentence description of the task: '{instruction}'."
             )
             agent_result = agent(prompt)
             agent_summary = _extract_text(agent_result)
-            success_rate = _extract_success_rate(agent)
+            success_rate = captured.get("success_rate")
+            if success_rate is None:
+                success_rate = _extract_success_rate(agent)
         except Exception as e:  # pragma: no cover
             logger.exception("Agentic GR00T run failed.")
             return {"error": f"{type(e).__name__}: {e}", "task": task, "instruction": instruction}
         finally:
             self.running = False
-            stop.set()
-            if live_thread is not None:
-                live_thread.join(timeout=5)
 
         video = _encode_mp4(frames) if frames else None
         try:
