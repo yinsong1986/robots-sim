@@ -1,0 +1,18 @@
+# Core deps for the MuJoCo-GS hybrid render demo.
+#
+# These are PEP-508 plain pip requirements. If you want the full optional
+# 3DGS path or extras-style installs, see README.md for the pyproject extras
+# you can `pip install '.[gsplat]'` from this directory.
+
+# Strands SDK + agent tool
+strands-agents>=0.1.0
+
+# Upstream simulation (MuJoCo backend) — provides `Simulation` AgentTool.
+strands-robots[sim-mujoco]>=0.3.0
+
+# Numerics & imaging.
+numpy>=1.21
+Pillow>=8.0
+
+# UI (5+ for messages-format Chatbot; 6 also OK)
+gradio>=5.0
