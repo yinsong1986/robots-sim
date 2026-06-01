@@ -1,0 +1,37 @@
+# Optional: pyproject for the example, lets users `pip install '.[gsplat]'`
+# from inside this directory to opt into the real 3DGS background. The
+# example also runs perfectly fine via `pip install -r requirements.txt`,
+# the procedural panorama is the zero-dep default.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mujoco-gs-example"
+version = "0.0.1"
+description = "MuJoCo + 3D Gaussian Splatting hybrid render demo for strands-robots"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "strands-agents",
+    "strands-robots[sim-mujoco]>=0.3.0",
+    "numpy>=1.21",
+    "Pillow>=8.0",
+    "gradio>=5.0",
+]
+
+[project.optional-dependencies]
+# Real 3D Gaussian Splatting background (CUDA-only in practice).
+# Install with: `pip install '.[gsplat]'`
+gsplat = [
+    "gsplat>=1.4",
+    "torch>=2.1",
+    "plyfile>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# This isn't intended to be installed as a real wheel, but hatch needs a
+# package layout to build at all. Point at the example dir itself.
+packages = ["."]
