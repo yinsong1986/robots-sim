@@ -294,6 +294,11 @@ class GsplatBackground:
         clip_below: Optional[float] = 0.0,
         min_opacity: float = 0.25,
         floor_pct: float = 2.0,
+        metric: bool = False,
+        bg_fill: Optional[tuple] = None,
+        own_floor: bool = False,
+        up_axis: Optional[tuple] = None,
+        major_axis: Optional[tuple] = None,
     ) -> None:
         self._ply_path = Path(ply_path)
         self._device = device
@@ -323,6 +328,22 @@ class GsplatBackground:
         self._clip_below = clip_below
         self._min_opacity = float(min_opacity)
         self._floor_pct = float(floor_pct)
+        self._metric = bool(metric)
+        # Explicit up / in-plane axis (GS frame) — overrides PCA when the asset
+        # has a known convention (e.g. a Y-up .spz). None => PCA-estimate.
+        self._up_axis = tuple(up_axis) if up_axis is not None else None
+        self._major_axis = tuple(major_axis) if major_axis is not None else None
+        # Fill colour (0..255 RGB) shown where the splat has no coverage (the
+        # capture's unobserved zenith/edges), so voids read as a plain
+        # ceiling/sky instead of black holes. Defaults to a neutral light grey
+        # in skybox mode (cf. MuJoCo-GS-Web's dark-grey scene background).
+        if bg_fill is None:
+            bg_fill = (188, 188, 192) if self._skybox else (0, 0, 0)
+        self._bg_fill = np.asarray(bg_fill, dtype=np.float32).reshape(3)
+        # When True, this background supplies its own (photoreal) floor, so the
+        # compositor hides the MuJoCo grid ground. The arm + cube then rest on
+        # the GS surface (collision still comes from the hidden MuJoCo floor).
+        self.own_floor = bool(own_floor)
         self._splats: Optional[dict] = None  # lazily loaded
 
 
@@ -355,6 +376,9 @@ class GsplatBackground:
                 center=self._center,
                 floor_z=self._floor_z,
                 floor_pct=self._floor_pct,
+                metric=self._metric,
+                up_axis=self._up_axis,
+                major_axis=self._major_axis,
             )
             if self._clip_below is not None:
                 kept, total = self._clip_splats(self._clip_below, self._min_opacity)
@@ -428,8 +452,14 @@ class GsplatBackground:
             render_mode="RGB+D",
         )
         out = render_colors[0]  # (H, W, 4)
-        rgb_np = (out[..., :3].clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        rgb = out[..., :3].clamp(0, 1).cpu().numpy() * 255.0
         depth_np = out[..., 3].cpu().numpy().astype(np.float32)
+        # Composite the splat over a neutral fill using accumulated alpha, so
+        # un-observed regions (zenith/edges) read as a plain ceiling/sky rather
+        # than black. (No-op when fully covered.)
+        alpha = render_alphas[0, ..., 0].cpu().numpy().astype(np.float32)[..., None]
+        rgb = rgb * alpha + self._bg_fill[None, None, :] * (1.0 - alpha)
+        rgb_np = np.clip(rgb, 0, 255).astype(np.uint8)
         # Pixels with no gaussian contribution come back at depth 0; promote to
         # zfar so they lose the depth test against any MuJoCo foreground.
         depth_np = np.where(depth_np <= cam.znear, cam.zfar, depth_np)
@@ -479,7 +509,23 @@ def gsplat_scene_names() -> list:
 #   ``bicycle`` is intentionally excluded: it's an overcast outdoor capture that
 #   renders as white haze + floaters from every angle (poor as a backdrop).
 GSPLAT_SKYBOX_ALIGN = {
-    "tabletop": {"up_sign": 1.0, "yaw_deg": 0.0},
+    # tabletop is a three.js **Y-up** .spz of a kitchen. Align with the KNOWN
+    # up-axis (GS +Y) — PCA mis-picks a horizontal axis and tilts the room ~36°
+    # (so the arm ends up perpendicular to a wall, not the bench). yaw=180 faces
+    # the counter toward the camera; floor_z=-0.8 drops the room so the ~0.8 m
+    # counter-top lands at world z=0 (the arm's base), seating the arm ON the
+    # bench. own_floor hides MuJoCo's grid so the photoreal floor shows.
+    "tabletop": {
+        "up_axis": (0.0, 1.0, 0.0),
+        "major_axis": (1.0, 0.0, 0.0),
+        "up_sign": 1.0,
+        "yaw_deg": 180.0,
+        "metric": True,
+        "floor_z": -0.8,
+        "center": (0.0, -0.4),
+        "own_floor": True,
+        "clip_below": -1.0,
+    },
     "bonsai": {"up_sign": -1.0, "yaw_deg": 0.0},
     "stump": {"up_sign": 1.0, "yaw_deg": 0.0},
 }
@@ -708,22 +754,33 @@ def _fit_skybox_transform(
     center: tuple = (0.05, 0.05),
     floor_z: float = -0.3,
     floor_pct: float = 2.0,
+    metric: bool = False,
+    up_axis: "Optional[tuple]" = None,
+    major_axis: "Optional[tuple]" = None,
 ) -> np.ndarray:
     """Fit a ``world_from_gs`` (4×4) for the live skybox backdrop.
 
-    Stands the scene upright (PCA smallest-variance axis × ``up_sign`` → world
-    +Z), applies an extra ``yaw_deg`` about +Z, scales horizontal extent to
-    ~``radius`` m, and places the GS floor (the ``floor_pct`` percentile of
-    world-z) at ``floor_z`` — typically *below* the MuJoCo ground so the MuJoCo
-    floor wins everything below the horizon. Centres the horizontal centroid at
-    ``center``. See :class:`GsplatBackground` (``skybox=True``).
+    Stands the scene upright (its up-axis × ``up_sign`` → world +Z), applies an
+    extra ``yaw_deg`` about +Z, then either scales the horizontal extent to
+    ~``radius`` m (captured scenes carry no metric scale) or — when
+    ``metric=True`` — keeps the scene's own metric scale (use this for
+    already-metric assets like the ``.spz`` exports). Places the ``floor_pct``
+    percentile of world-z at ``floor_z`` (set this to *minus the height of the
+    surface the arm should rest on* to seat the arm on a table). Centres the
+    horizontal centroid at ``center``.
+
+    The up-axis is the PCA smallest-variance axis by default (works for casual
+    captures), but for assets with a *known* convention (e.g. a three.js Y-up
+    ``.spz``) pass an explicit ``up_axis`` (and optional ``major_axis`` for the
+    in-plane orientation) — PCA can otherwise pick a horizontal axis and tilt
+    the whole scene. See :class:`GsplatBackground`.
     """
     c = means.mean(axis=0)
     X = means - c
     cov = (X.T @ X) / max(1, len(X))
-    _, evecs = np.linalg.eigh(cov)  # ascending; col0 = smallest var ≈ up
-    up = evecs[:, 0]
-    major = evecs[:, 2]
+    _, evecs = np.linalg.eigh(cov)  # ascending; col0 = smallest var
+    up = np.asarray(up_axis, dtype=float) if up_axis is not None else evecs[:, 0]
+    major = np.asarray(major_axis, dtype=float) if major_axis is not None else evecs[:, 2]
     z = up_sign * up / (np.linalg.norm(up) + 1e-9)
     x = major - (major @ z) * z
     x /= np.linalg.norm(x) + 1e-9
@@ -735,9 +792,10 @@ def _fit_skybox_transform(
     Rz = np.array([[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 1.0]])
     R = Rz @ R
 
-    horiz = np.linalg.norm(X @ np.stack([evecs[:, 2], evecs[:, 1]], axis=1), axis=1)
+    # Horizontal (in-floor-plane) extent → scale: world x/y components of R.
+    horiz = np.linalg.norm(X @ R[:2].T, axis=1)
     r95 = float(np.percentile(horiz, 95)) or 1.0
-    s = float(radius) / r95
+    s = 1.0 if metric else float(radius) / r95
     M = s * R
 
     pts = X @ M.T

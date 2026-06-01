@@ -169,7 +169,12 @@ def build_default_scene(
         height=480,
     )
 
-    sim.step(20)  # let the robot settle on its zero-pose
+    # Stand the arm up on the benchtop in its "home" ready-pose (its zero pose
+    # sprawls flat across the surface). We set both qpos and the actuator
+    # targets (ctrl) so the pose holds when the sim is stepped.
+    _erect_arm(sim, robot_name="arm")
+
+    sim.step(20)  # settle into the home pose (actuators hold it)
 
     summary = {
         "robot_name": "arm",
@@ -180,6 +185,49 @@ def build_default_scene(
     }
     logger.info("MuJoCo-GS scene ready: %s", summary)
     return summary
+
+
+def _erect_arm(sim, robot_name: str = "arm") -> bool:
+    """Stand the arm up in its model's ``home`` keyframe (its zero pose sprawls
+    flat). Sets the arm joints' ``qpos`` *and* the matching actuator targets
+    (``ctrl``) so the pose holds when stepped. Touches only the robot's own
+    hinge/slide joints — never free joints (e.g. the cube). No-op (returns
+    ``False``) if the model has no home-like keyframe.
+    """
+    try:
+        import mujoco
+
+        m, d = sim.mj_model, sim.mj_data
+        key_id = -1
+        for k in range(m.nkey):
+            kn = (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_KEY, k) or "").lower()
+            if "home" in kn:
+                key_id = k
+                break
+        if key_id < 0:
+            logger.info("No 'home' keyframe found; leaving arm in its zero pose.")
+            return False
+
+        kq = m.key_qpos[key_id]
+        ns = f"{robot_name}/"
+        hinge_slide = (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
+        # 1) qpos for the arm's own actuated joints.
+        for j in range(m.njnt):
+            jn = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or ""
+            if jn.startswith(ns) and m.jnt_type[j] in hinge_slide:
+                adr = m.jnt_qposadr[j]
+                d.qpos[adr] = kq[adr]
+        # 2) actuator targets so position actuators hold the pose.
+        for a in range(m.nu):
+            jid = int(m.actuator_trnid[a, 0])
+            if jid >= 0 and m.jnt_type[jid] in hinge_slide:
+                d.ctrl[a] = kq[m.jnt_qposadr[jid]]
+        mujoco.mj_forward(m, d)
+        logger.info("Arm set to 'home' pose (erected on benchtop).")
+        return True
+    except Exception:  # pragma: no cover — non-fatal
+        logger.warning("Could not set arm home pose.", exc_info=True)
+        return False
 
 
 def make_scene_description(robot_config: str = "so101", robot_name: str = "arm") -> str:

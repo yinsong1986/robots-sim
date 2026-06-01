@@ -137,6 +137,10 @@ class HybridCompositor:
         # renderer instead of allocating a GL framebuffer every frame is the
         # single biggest speedup for live streaming (~130 ms → ~11 ms/frame).
         self._renderer_cache: dict = {}
+        # Original alpha of any floor geoms, so we can hide them (set alpha 0)
+        # for backgrounds that bring their own photoreal floor, then restore.
+        self._orig_floor_alpha: dict = {}
+        self._apply_floor_visibility()
 
     def _renderer_for(self, width: int, height: int):
         """Return a cached ``mujoco.Renderer`` for ``(W, H)``.
@@ -215,6 +219,31 @@ class HybridCompositor:
             pass
         return None
 
+    def _apply_floor_visibility(self) -> None:
+        """Hide built-in floor geoms (the robot's ``arm/floor`` and any MuJoCo
+        ``ground`` plane) by setting their alpha to 0 when the active background
+        supplies its own photoreal floor; restore them otherwise.
+
+        Alpha is render-only, so the floor still collides (the cube keeps
+        resting on it) — it just stops painting MuJoCo's blue/white grid over
+        the GS scene's floor.
+        """
+        try:
+            import mujoco
+
+            model = self.sim.mj_model
+            hide = bool(getattr(self.background, "own_floor", False))
+            for gid in range(model.ngeom):
+                name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+                is_floor = name == "ground" or name == "floor" or name.endswith("/floor")
+                if not is_floor:
+                    continue
+                if gid not in self._orig_floor_alpha:
+                    self._orig_floor_alpha[gid] = float(model.geom_rgba[gid, 3])
+                model.geom_rgba[gid, 3] = 0.0 if hide else self._orig_floor_alpha[gid]
+        except Exception:  # pragma: no cover — cosmetics only
+            logger.warning("Could not toggle floor visibility.", exc_info=True)
+
     def _render_sync(self, camera_name: str, W: int, H: int) -> CompositeFrame:
         """The real render — only ever runs on the render-executor thread."""
         cam_key = (camera_name, W, H)
@@ -264,6 +293,9 @@ class HybridCompositor:
         logger.info("HybridCompositor: switching background %s → %s", self.background.name, background.name)
         self.background = background
         self._bg_cache.clear()
+        # Show/hide the built-in MuJoCo floor depending on whether the new
+        # background brings its own photoreal floor.
+        self._apply_floor_visibility()
 
     def clear_caches(self) -> None:
         """Drop cached backgrounds and MuJoCo renderers.
