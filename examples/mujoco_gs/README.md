@@ -56,7 +56,7 @@ upgrade to a real 3DGS scene.
 | Background renderer | `@sparkjsdev/spark` (3DGS, Three.js) | `PanoramaBackground` (procedural, default) or `GsplatBackground` (`gsplat`) |
 | Composite | three.js depth pass | `HybridCompositor` — per-pixel z-compare in numpy |
 | Driving the scene | Keyboard teleop / IK / ONNX RL policies | Strands agent + natural language ⇄ `Simulation` AgentTool actions |
-| GS scene format | `.spz` | `.ply` (re-export from Nerfstudio / Polycam) |
+| GS scene format | `.spz` | `.spz` (Niantic v2/v3) or `.ply` |
 | Where it runs | Any browser, any device | Any host that can run MuJoCo offscreen rendering |
 
 ## Install
@@ -245,9 +245,10 @@ Other facts / caveats:
 
 ## Bringing your own GS scene
 
-The MuJoCo-GS-Web demo accepts `.spz` (sparkjs's binary format). On the
-Python side, the `gsplat` library reads `.ply`. Re-export from your trainer
-of choice:
+This example's GS loader reads both `.spz` (Niantic's binary format, v2/v3 —
+the format of the built-in `tabletop` preset) and `.ply`. The Gradio
+*Background* upload widget currently accepts `.ply` only, so to bring your own
+capture, export a `.ply`:
 
 | Source                | How to get a `.ply`                                        |
 |---|---|
@@ -292,7 +293,8 @@ walls and counters, then load it via `Simulation.load_scene(...)` before
 
 ## Limitations vs. MuJoCo-GS-Web
 
-* **No `.spz` support** (Python `gsplat` reads `.ply`). Re-export.
+* **GS *uploads* are `.ply`-only** — the loader itself also reads `.spz` (the
+  built-in presets use it), but the Gradio upload widget filters to `.ply`.
 * **No spherical-harmonics view-dependent color** for the GS background —
   we use the DC term only, which is fine for backdrop rendering but loses
   some specular fidelity vs. sparkjs.
@@ -303,8 +305,8 @@ walls and counters, then load it via `Simulation.load_scene(...)` before
   point `run_policy` at a real ONNX checkpoint to recreate that part.
 
 These are all deliberate scope cuts to keep this an *example* rather than a
-full feature. PRs welcome — swap in `gsplat`'s SH evaluation, add a `.spz`
-loader, or wire up a Newton/Warp backend for the heavier parallel cases.
+full feature. PRs welcome — swap in `gsplat`'s SH evaluation or wire up a
+Newton/Warp backend for the heavier parallel cases.
 
 ## License
 
