@@ -1078,7 +1078,18 @@ class IsaacSimulation(SimEngine):
 
         if shape == "box":
             cls = FixedCuboid if is_static else DynamicCuboid
-            scale = list(size) if size and len(size) >= 3 else [0.05, 0.05, 0.05]
+            # Per-component fallback to honour the docstring contract
+            # ("Lists shorter than the convention fall back to defaults
+            # for the missing trailing components"). Mirrors the
+            # cylinder / capsule pattern below; previously this branch
+            # was all-or-nothing, so e.g. ``size=[0.10]`` silently fell
+            # back to ``[0.05, 0.05, 0.05]`` instead of the documented
+            # ``[0.10, 0.05, 0.05]`` -- caught in PR #60 review.
+            size_list = list(size) if size else []
+            sx = float(size_list[0]) if len(size_list) >= 1 else 0.05
+            sy = float(size_list[1]) if len(size_list) >= 2 else 0.05
+            sz = float(size_list[2]) if len(size_list) >= 3 else 0.05
+            scale = [sx, sy, sz]
             common["scale"] = np.asarray(scale, dtype=float)
             return cls(**common), scale
         if shape == "sphere":

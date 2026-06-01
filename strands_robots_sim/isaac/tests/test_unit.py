@@ -812,6 +812,37 @@ class TestAddObjectPhase2:
         kwargs = fake_objects.FixedCuboid.call_args.kwargs
         assert "mass" not in kwargs, "Fixed* constructors must not receive mass kwarg"
 
+    def test_box_size_per_component_fallback(self) -> None:
+        """``box`` honours the docstring's per-component fallback contract.
+
+        Pin: lists shorter than 3 entries fall back to defaults for the
+        missing trailing components -- they don't reset the whole scale
+        to defaults. Mirrors the cylinder / capsule pattern.
+
+        Pre-fix behaviour was all-or-nothing: ``size=[0.10]`` silently
+        yielded ``[0.05, 0.05, 0.05]`` (default cube), contradicting
+        the documented contract. PR #60 review caught this; this test
+        locks the fixed shape so it can't drift back.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            r1 = sim.add_object("a", shape="box", size=[0.10])
+            r2 = sim.add_object("b", shape="box", size=[0.10, 0.20])
+            r3 = sim.add_object("c", shape="box", size=[0.10, 0.20, 0.30])
+            r4 = sim.add_object("d", shape="box")  # default
+        # 1-vec: x supplied, y/z default
+        assert r1["content"][0]["json"]["size"] == [0.10, 0.05, 0.05]
+        # 2-vec: x, y supplied; z default
+        assert r2["content"][0]["json"]["size"] == [0.10, 0.20, 0.05]
+        # 3-vec: all supplied
+        assert r3["content"][0]["json"]["size"] == [0.10, 0.20, 0.30]
+        # No size: all defaults
+        assert r4["content"][0]["json"]["size"] == [0.05, 0.05, 0.05]
+        # The same scale flows to the underlying DynamicCuboid call.
+        kwargs_1 = fake_objects.DynamicCuboid.call_args_list[0].kwargs
+        assert list(kwargs_1["scale"]) == [0.10, 0.05, 0.05]
+
     def test_sphere_passes_radius_not_scale(self) -> None:
         """``shape="sphere"`` uses the ``radius=`` kwarg, not ``scale=``."""
         sim, _ = _make_simulation_with_world()
