@@ -346,7 +346,6 @@ class GsplatBackground:
         self.own_floor = bool(own_floor)
         self._splats: Optional[dict] = None  # lazily loaded
 
-
     # ----- lazy load ----- #
 
     def _load(self) -> None:
@@ -488,8 +487,7 @@ class GsplatBackground:
 # Marble export re-saved as .ply).
 GSPLAT_SCENES = {
     "tabletop (indoor room)": (
-        "https://raw.githubusercontent.com/Vector-Wangel/MuJoCo-GS-Web/"
-        "main/assets/environments/tabletop/scene.spz"
+        "https://raw.githubusercontent.com/Vector-Wangel/MuJoCo-GS-Web/main/assets/environments/tabletop/scene.spz"
     ),
     "bonsai (indoor tabletop)": (
         "https://huggingface.co/datasets/dylanebert/3dgs/resolve/main/"
@@ -553,7 +551,6 @@ def gsplat_skybox_align_for(name_or_slug: str) -> dict:
     auto up-sign) when the scene isn't curated (e.g. an uploaded .ply)."""
     slug = Path(str(name_or_slug)).stem.split(" ")[0]
     return dict(GSPLAT_SKYBOX_ALIGN.get(slug, {}))
-
 
 
 def download_gsplat_scene(name: str, cache_dir: Optional[str | Path] = None) -> Path:
@@ -889,15 +886,18 @@ def _load_spz_splats(spz_path: Path, device: str) -> dict:
     smallest3 = version >= 3
     pos_bytes = 9  # 24-bit fixed point (version 1 float16 is not produced in practice)
     rot_bytes = 4 if smallest3 else 3
-    sh_dim = _SPZ_DIM_FOR_DEGREE[sh_degree]
 
     off = 16
-    pos = np.frombuffer(raw, np.uint8, count=N * pos_bytes, offset=off); off += N * pos_bytes
-    alpha = np.frombuffer(raw, np.uint8, count=N, offset=off); off += N
-    col = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3); off += N * 3
-    scl = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3); off += N * 3
+    pos = np.frombuffer(raw, np.uint8, count=N * pos_bytes, offset=off)
+    off += N * pos_bytes
+    alpha = np.frombuffer(raw, np.uint8, count=N, offset=off)
+    off += N
+    col = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3)
+    off += N * 3
+    scl = np.frombuffer(raw, np.uint8, count=N * 3, offset=off).reshape(N, 3)
+    off += N * 3
     rot = np.frombuffer(raw, np.uint8, count=N * rot_bytes, offset=off).reshape(N, rot_bytes)
-    off += N * rot_bytes  # trailing SH (N*sh_dim*3) intentionally ignored
+    off += N * rot_bytes  # trailing SH (sh_degree-dependent) intentionally ignored
 
     # positions: 24-bit little-endian signed fixed point / 2^frac_bits
     p = pos.reshape(N, 3, 3).astype(np.int32)
@@ -914,9 +914,7 @@ def _load_spz_splats(spz_path: Path, device: str) -> dict:
     logger.info("Loaded SPZ %s: v%d, %d splats, sh_degree=%d", spz_path.name, version, N, sh_degree)
 
     def to_t(a, dt=None):
-        import torch as _t
-
-        return _t.from_numpy(np.ascontiguousarray(a)).to(dt or _t.float32).to(device)
+        return torch.from_numpy(np.ascontiguousarray(a)).to(dt or torch.float32).to(device)
 
     return {
         "means": to_t(means),

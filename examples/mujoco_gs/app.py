@@ -204,7 +204,10 @@ def build_app(
                 yield "Loading live 3DGS skybox (aligning + clipping gaussians)…"
                 holder.set_background(GsplatBackground(ply_path=str(ply), skybox=True, **align))
                 note = "" if align else " — uncurated alignment, may be rough"
-                yield f"Background → live 3DGS skybox ({Path(str(ply)).stem}{note}). Tip: the 'oblique' camera is the hero angle."
+                yield (
+                    f"Background → live 3DGS skybox ({Path(str(ply)).stem}{note}). "
+                    "Tip: the 'oblique' camera is the hero angle."
+                )
                 return
             if choice == "Live 3DGS .ply (upload)":
                 if not ply_upload:
@@ -348,7 +351,10 @@ def build_app(
                     gs_scene_dd = gr.Dropdown(
                         choices=_gsplat_scene_names(),
                         value=(_gsplat_scene_names()[0] if _gsplat_scene_names() else None),
-                        label="3DGS scene preset — for Live, use 'tabletop' (purpose-built room, clean at every angle). Downloads on first use.",
+                        label=(
+                            "3DGS scene preset — for Live, use 'tabletop' (purpose-built "
+                            "room, clean at every angle). Downloads on first use."
+                        ),
                     )
                     rotation = gr.Slider(
                         minimum=-180,
