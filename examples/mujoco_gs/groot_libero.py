@@ -235,13 +235,21 @@ class GrootLiberoRunner:
         except Exception as e:  # pragma: no cover
             logger.exception("Agentic GR00T run failed.")
             return {"error": f"{type(e).__name__}: {e}", "task": task, "instruction": instruction}
+        finally:
+            # Always release the MuJoCo model + the compositor's render-executor
+            # thread and cached renderers, even when eval raises (GR00T server
+            # unreachable, BDDL gen fails, EGL context error) — otherwise stale
+            # EGL contexts + MJ models leak across runs of the Gradio app.
+            try:
+                compositor.close()
+            except Exception:  # pragma: no cover
+                pass
+            try:
+                sim.destroy()
+            except Exception:  # pragma: no cover
+                pass
 
         video = _encode_mp4(frames) if frames else None
-        try:
-            compositor.close()
-            sim.destroy()
-        except Exception:  # pragma: no cover
-            pass
 
         return {
             "task": task,

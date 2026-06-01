@@ -76,6 +76,10 @@ pip install '.[gsplat]'
 Linux box you'll usually want `MUJOCO_GL=egl` (set automatically by `app.py`)
 or `MUJOCO_GL=osmesa` if EGL isn't available.
 
+The two installs are *either/or*, not both: `.[gsplat]` is a superset that
+already pulls in `gradio` and the panorama-only deps through the
+`strands-robots` dependency chain, so you don't also need `requirements.txt`.
+
 ## Run
 
 ```bash

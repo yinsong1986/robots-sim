@@ -283,7 +283,14 @@ def _extract_agent_text(result: Any) -> str:
     # Strands AgentResult.message.content -> list of {"text": ...} dicts
     msg = getattr(result, "message", None)
     if msg is not None:
-        content = getattr(msg, "content", None) or msg.get("content") if isinstance(msg, dict) else None
+        # NB: must branch explicitly — `getattr(...) or msg.get(...) if
+        # isinstance(msg, dict) else None` binds as `(... or ...) if dict`, so
+        # the attribute-style message (the common, non-dict case) would return
+        # None and the chat panel would fall through to a raw `str(result)`.
+        if isinstance(msg, dict):
+            content = msg.get("content")
+        else:
+            content = getattr(msg, "content", None)
         if isinstance(content, list):
             texts = [c.get("text", "") for c in content if isinstance(c, dict) and "text" in c]
             if texts:

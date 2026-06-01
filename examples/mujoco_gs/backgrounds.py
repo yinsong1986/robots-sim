@@ -359,6 +359,18 @@ class GsplatBackground:
                 "(see examples/mujoco_gs/README.md) or fall back to "
                 "PanoramaBackground."
             ) from e
+        # Fail loud and early on a CUDA mismatch — the `[gsplat]` extra pins
+        # torch without a CUDA constraint, so a CPU-only (or wrong-CUDA-build)
+        # install pip-installs fine, then would otherwise die with a generic
+        # "no CUDA-capable device" deep inside `gsplat.rasterization` on the
+        # first frame.
+        if self._device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                "GsplatBackground(device='cuda') was requested but "
+                "torch.cuda.is_available() is False. Install a CUDA-matched "
+                "torch build (the gsplat backdrop needs a GPU), or use "
+                "PanoramaBackground on CPU-only hosts."
+            )
         if not self._ply_path.exists():
             raise FileNotFoundError(f"Gaussian Splat not found: {self._ply_path}")
         if self._ply_path.suffix.lower() == ".spz":
