@@ -471,11 +471,48 @@ def main(argv: Optional[List[str]] = None) -> None:
         initial_camera=args.camera,
     )
     demo.queue(default_concurrency_limit=1)  # Gradio events serialized; /live is separate.
+
+    # MJPEG live-stream route. Streams near-real-time JPEG frames over a single
+    # long-lived HTTP response (an <img> in the UI renders them incrementally),
+    # bypassing Gradio's buffered SSE queue, which a port-forwarding / share
+    # proxy coalesces into an end-of-turn burst.
+    from fastapi.responses import StreamingResponse
+
+    def _live_route(camera: str = "front"):
+        return StreamingResponse(
+            _mjpeg_frames(holder, camera),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+        )
+
+    # Mount /live *before* the server accepts requests, so an early hit can't
+    # 404 in the window between launch() and a post-launch mount. Gradio rebuilds
+    # `demo.app` inside launch() (discarding any route added to it beforehand),
+    # so we wrap `App.create_app` to attach the route at app-creation time. This
+    # keeps `demo.launch(share=...)` intact — `gr.mount_gradio_app` + uvicorn
+    # would drop the share tunnel. Falls back to a post-launch mount if Gradio's
+    # internals differ.
+    mounted_pre_serve = False
+    try:
+        import gradio.routes as _gr_routes
+
+        _orig_create_app = _gr_routes.App.create_app
+
+        def _create_app_with_live(*args, **kwargs):
+            app = _orig_create_app(*args, **kwargs)
+            app.add_api_route("/live", _live_route, methods=["GET"])
+            return app
+
+        _gr_routes.App.create_app = staticmethod(_create_app_with_live)
+        mounted_pre_serve = True
+    except Exception:  # pragma: no cover — fall back to post-launch mount
+        logger.debug("Could not hook App.create_app; mounting /live post-launch.", exc_info=True)
+
     launch_kwargs: dict = {
         "server_name": args.server_name,
         "server_port": args.server_port,
         "share": args.share,
-        "prevent_thread_lock": True,  # so we can mount the /live route, then block
+        "prevent_thread_lock": True,  # route mounts at app-create; we block below
     }
     # Gradio 6+ moved `theme` from `Blocks(...)` to `launch(...)`. Older
     # versions don't take it as a launch kwarg, so we feature-test.
@@ -488,21 +525,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         pass
     demo.launch(**launch_kwargs)
 
-    # Mount the MJPEG live-stream route on Gradio's FastAPI app. This streams
-    # near-real-time JPEG frames over a single long-lived HTTP response (an
-    # <img> in the UI renders them incrementally) — bypassing Gradio's
-    # buffered SSE queue, which a port-forwarding / share proxy coalesces into
-    # an end-of-turn burst.
-    from fastapi.responses import StreamingResponse
-
-    def _live_route(camera: str = "front"):
-        return StreamingResponse(
-            _mjpeg_frames(holder, camera),
-            media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
-        )
-
-    demo.app.add_api_route("/live", _live_route, methods=["GET"])
+    if not mounted_pre_serve:
+        demo.app.add_api_route("/live", _live_route, methods=["GET"])
     logger.info("MJPEG live stream mounted at /live")
 
     # Block the main thread (launch used prevent_thread_lock=True).
