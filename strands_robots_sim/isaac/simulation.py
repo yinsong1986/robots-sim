@@ -806,20 +806,65 @@ class IsaacSimulation(SimEngine):
                 }
 
             elif usd_path is not None:
-                # Load from USD (native Isaac format)
-                joint_names = self._load_usd_robot(prim_path, usd_path, pos)
+                # Load from USD (native Isaac format).
+                # Phase 2 wiring (#14): _load_usd_robot now actually
+                # references the USD into the stage, constructs an
+                # Articulation, initialises it, and returns the handle
+                # alongside the joint names. Pre-Phase-2 it returned
+                # joint_names=[] and silently did nothing.
+                try:
+                    joint_names, articulation = self._load_usd_robot(prim_path, usd_path, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Cleanup-clause shape mirrors create_world (#52
+                    # precedent): RuntimeError (Carb / sim init), ValueError
+                    # (USD shape mismatches), OSError (USD file IO failure),
+                    # AttributeError (omni surface drift), TypeError (signature
+                    # drift), ImportError (omni.isaac.core.articulations
+                    # unavailable). Programming bugs propagate.
+                    logger.error(
+                        "Failed to load USD robot '%s' (usd_path=%s): %s",
+                        name,
+                        usd_path,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to load USD robot '{name}': {e}"}],
+                    }
+
                 self._prim_registry.append(prim_path)
 
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
+                logger.info(
+                    "Added robot '%s' (USD: %s, %d joints, articulation=%s)",
+                    name,
+                    usd_path,
+                    len(joint_names),
+                    "wired" if articulation is not None else "phase1",
+                )
                 return {
                     "status": "success",
-                    "content": [{"text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)")}],
+                    "content": [
+                        {
+                            "text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)"),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "usd_path": usd_path,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
+                        }
+                    ],
                 }
 
             elif urdf_path is not None:
@@ -1558,12 +1603,77 @@ class IsaacSimulation(SimEngine):
 
     # --- Private Implementation ----------------------------------------------
 
-    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> list[str]:
-        """Load a robot from USD file. Returns joint names."""
-        # In full implementation: use omni.isaac.core to add USD reference
-        # and extract Articulation joint names
-        logger.info("Loading USD robot from %s at %s", usd_path, prim_path)
-        return []
+    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> tuple[list[str], Any]:
+        """Load a robot from a USD file. Returns ``(joint_names, articulation)``.
+
+        Phase 2 wiring (#14): the previous Phase-1 stub silently returned
+        ``[]`` and didn't touch the stage. This Phase-2 implementation:
+
+        1. References the USD at ``usd_path`` into the stage at
+           ``prim_path`` via ``omni.isaac.core.utils.stage.add_reference_to_stage``.
+        2. Wraps the resulting prim in
+           ``omni.isaac.core.articulations.Articulation``.
+        3. Calls ``articulation.initialize()`` to populate ``dof_names`` /
+           internal handles. ``initialize`` is what triggers the Articulation
+           tree walk that surfaces the joint count; without it
+           ``dof_names`` is ``None`` on most Isaac Sim builds.
+        4. Applies the requested ``position`` via ``set_world_pose`` so
+           the robot lands where the caller asked. Identity ``[0, 0, 0]``
+           is skipped to avoid an unnecessary kernel call.
+        5. Extracts joint names from ``articulation.dof_names`` and returns
+           them alongside the live ``Articulation`` handle. Callers store
+           the handle on ``_RobotState.articulation`` so subsequent
+           ``get_observation`` / ``send_action`` calls can read joint
+           positions and apply targets through it.
+
+        Raises propagate -- the caller (``add_robot`` USD branch) wraps
+        this method in the standard cleanup-clause tuple
+        ``(RuntimeError, ValueError, OSError, AttributeError, TypeError,
+        ImportError)`` so any Isaac-side surface drift returns a
+        structured error envelope rather than blowing up the agent.
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+        from omni.isaac.core.utils.stage import (  # type: ignore[import-not-found]
+            add_reference_to_stage,
+        )
+
+        # Step 1: stage reference. The USD's default prim becomes a child
+        # of ``prim_path``; subsequent Articulation lookups walk that path.
+        add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+
+        # Step 2-3: wrap + initialise. The articulation name has to be
+        # unique within the scene's articulation registry, so derive it
+        # from the prim path's leaf segment to match the caller's
+        # ``add_robot`` ``name`` (the leaf of ``prim_path`` is the
+        # caller-visible robot name by construction).
+        articulation_name = prim_path.rsplit("/", 1)[-1]
+        articulation = Articulation(prim_path=prim_path, name=articulation_name)
+        articulation.initialize()
+
+        # Step 4: position. The USD's authored pose is the default; only
+        # call set_world_pose when the caller actually wanted a non-default
+        # placement. Saves a tensor round-trip on the common
+        # ``position=[0, 0, 0]`` case.
+        if position is not None and any(p != 0.0 for p in position):
+            articulation.set_world_pose(position=np.asarray(position, dtype=float))
+
+        # Step 5: joint names. ``dof_names`` is ``None`` if ``initialize``
+        # didn't surface them (e.g. the USD has no Articulation root on
+        # the referenced prim); coerce to ``[]`` so downstream callers
+        # see the documented "empty joint list" silent-empty mode rather
+        # than a ``TypeError`` on iteration.
+        joint_names = list(articulation.dof_names) if articulation.dof_names else []
+
+        logger.info(
+            "Loaded USD robot at %s from %s (%d joints, articulation=initialized)",
+            prim_path,
+            usd_path,
+            len(joint_names),
+        )
+        return joint_names, articulation
 
     def _load_urdf_robot(self, prim_path: str, urdf_path: str, position: list[float]) -> list[str]:
         """Load a robot from URDF (converted to USD). Returns joint names."""

@@ -1096,3 +1096,318 @@ class TestDestroyAndGetStateSurfaceObjects:
         assert info["num_objects_released"] == 2
         # Post-destroy the dict is empty.
         assert sim._objects == {}
+
+
+def _patched_isaac_articulation_modules() -> "tuple[MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported modules that
+    ``_load_usd_robot`` Phase 2 wiring touches.
+
+    Returns
+    -------
+    articulations_mod, stage_mod, art_handle
+        ``articulations_mod`` stands in for
+        ``omni.isaac.core.articulations`` (its ``.Articulation``
+        constructor returns ``art_handle``). ``stage_mod`` stands in
+        for ``omni.isaac.core.utils.stage`` (``.add_reference_to_stage``).
+        ``art_handle`` is the Articulation MagicMock the constructor
+        returns -- tests can assert on ``.initialize`` /
+        ``.set_world_pose`` / ``.dof_names`` patterns.
+    """
+    articulations_mod = MagicMock()
+    stage_mod = MagicMock()
+    art_handle = MagicMock(name="Articulation_handle")
+    art_handle.dof_names = ["joint_a", "joint_b", "joint_c"]
+    articulations_mod.Articulation.return_value = art_handle
+    return articulations_mod, stage_mod, art_handle
+
+
+class TestLoadUsdRobotPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation._load_usd_robot``.
+
+    Pins the ``add_reference_to_stage`` + ``Articulation`` + ``initialize``
+    chain plus the ``add_robot`` USD-branch integration: success populates
+    ``_RobotState.articulation`` so ``get_observation`` / ``send_action``
+    have a non-``None`` handle to dispatch through.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_load_usd_robot_calls_add_reference_to_stage(self) -> None:
+        """``_load_usd_robot`` references the USD into the stage at
+        the requested ``prim_path``.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r1",
+                usd_path="/path/to/robot.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        stage.add_reference_to_stage.assert_called_once_with(
+            usd_path="/path/to/robot.usd",
+            prim_path="/World/Robots/r1",
+        )
+
+    def test_load_usd_robot_constructs_articulation_at_prim_path(self) -> None:
+        """Articulation is constructed with the same ``prim_path`` used
+        by ``add_reference_to_stage``, with the leaf segment as the
+        articulation registry name.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/panda",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        kwargs = articulations.Articulation.call_args.kwargs
+        assert kwargs["prim_path"] == "/World/Robots/panda"
+        assert kwargs["name"] == "panda"
+
+    def test_load_usd_robot_calls_initialize(self) -> None:
+        """``Articulation.initialize`` is called explicitly so
+        ``dof_names`` is populated before the caller reads it.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.initialize.assert_called_once()
+
+    def test_load_usd_robot_returns_dof_names_and_handle(self) -> None:
+        """Return shape is ``(joint_names: list[str], articulation: Any)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, art = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == ["joint_a", "joint_b", "joint_c"]
+        assert art is art_handle
+
+    def test_load_usd_robot_handles_none_dof_names(self) -> None:
+        """If ``Articulation.dof_names`` is ``None`` (some Isaac builds
+        when the USD has no Articulation root), return an empty list
+        rather than crashing on iteration.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.dof_names = None
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, _ = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == []
+
+    def test_load_usd_robot_skips_set_world_pose_for_origin_position(self) -> None:
+        """``position=[0, 0, 0]`` skips ``set_world_pose`` (USD's
+        authored pose wins; saves a tensor round-trip).
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.set_world_pose.assert_not_called()
+
+    def test_load_usd_robot_calls_set_world_pose_for_non_origin(self) -> None:
+        """Non-zero position triggers ``set_world_pose(position=...)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[1.0, 2.0, 3.0],
+            )
+        art_handle.set_world_pose.assert_called_once()
+        kwargs = art_handle.set_world_pose.call_args.kwargs
+        assert list(kwargs["position"]) == [1.0, 2.0, 3.0]
+
+
+class TestAddRobotUsdBranchPhase2:
+    """Phase 2 wiring of the ``add_robot(usd_path=...)`` integration.
+
+    Pins that the USD branch:
+    - calls ``_load_usd_robot``,
+    - stores the returned ``Articulation`` handle on
+      ``_RobotState.articulation`` (so ``get_observation`` /
+      ``send_action`` light up for USD-loaded robots),
+    - rolls back registry state if ``_load_usd_robot`` raises.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_add_robot_usd_branch_stores_articulation_on_robot_state(self) -> None:
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="my_panda", usd_path="/path/to/panda.usd")
+        assert result["status"] == "success"
+        assert "my_panda" in sim._robots
+        rs = sim._robots["my_panda"]
+        assert rs.articulation is art_handle, (
+            "USD-branch add_robot must wire the Articulation handle onto "
+            "_RobotState.articulation so get_observation / send_action "
+            "have a non-None handle to dispatch through."
+        )
+        assert rs.joint_names == ["joint_a", "joint_b", "joint_c"]
+
+    def test_add_robot_usd_branch_surfaces_structured_json(self) -> None:
+        """Success envelope's ``content[0]["json"]`` carries name /
+        prim_path / usd_path / joint_names / joint_count / position /
+        articulation_wired so an agent can confirm the load shape.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(
+                name="r",
+                usd_path="/foo.usd",
+                position=[0.5, 0.0, 0.0],
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "r"
+        assert info["prim_path"] == "/World/Robots/r"
+        assert info["usd_path"] == "/foo.usd"
+        assert info["joint_count"] == 3
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_usd_branch_returns_error_on_load_failure(self) -> None:
+        """If ``_load_usd_robot`` raises (USD file missing, Articulation
+        init fails, omni surface drift), ``add_robot`` returns the
+        structured error envelope with **no** registry pollution.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        stage.add_reference_to_stage.side_effect = OSError("USD file not found: /missing.usd")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="ghost", usd_path="/missing.usd")
+        assert result["status"] == "error"
+        assert "ghost" in result["content"][0]["text"]
+        assert "USD file not found" in result["content"][0]["text"]
+        # Registry NOT polluted -- caller can retry under the same name.
+        assert "ghost" not in sim._robots
+        assert "/World/Robots/ghost" not in sim._prim_registry
+
+    def test_add_robot_usd_branch_returns_error_on_initialize_failure(self) -> None:
+        """``Articulation.initialize`` failure also leaves registries
+        clean -- some Isaac Sim builds defer Articulation tree-walk to
+        ``initialize`` rather than the constructor.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.initialize.side_effect = RuntimeError("articulation root not found in USD")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="bad", usd_path="/bad.usd")
+        assert result["status"] == "error"
+        assert "articulation root not found" in result["content"][0]["text"]
+        assert "bad" not in sim._robots
+
+    def test_add_robot_procedural_branch_still_has_no_articulation(self) -> None:
+        """Regression pin: the procedural branch (which constructs USD
+        via the build-via-API flow, not via Articulation wrapper) must
+        keep ``_RobotState.articulation = None``. Procedural-robot
+        articulation wiring is a separate Phase 2 slice; this PR
+        intentionally only covers the USD branch.
+        """
+        sim = self._make_sim()
+        # Procedural lookup is hit when no usd_path/urdf_path is given.
+        # ``so100`` is a registered procedural robot.
+        result = sim.add_robot(name="proc", data_config="so100")
+        assert result["status"] == "success"
+        assert sim._robots["proc"].articulation is None, (
+            "Procedural add_robot branch must not silently wire an " "Articulation; that's a separate slice on #14."
+        )
