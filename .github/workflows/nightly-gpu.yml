@@ -1,0 +1,165 @@
+name: Nightly GPU CI (Isaac)
+
+# Nightly GPU integration tests for the Isaac Sim backend.
+#
+# Runs `@pytest.mark.gpu`-marked tests in
+# `strands_robots_sim/isaac/tests/test_gpu_integ.py` against a GPU runner
+# with Isaac Sim pre-installed. Main CI (`test-lint.yml`) stays CPU-only
+# and intentionally skips this suite via `--ignore=test_gpu_integ.py`.
+#
+# Marker note: the canonical pytest marker is `gpu` (declared in
+# pyproject.toml under `[tool.pytest.ini_options]`), gated additionally
+# at the test-module level on `STRANDS_GPU_TEST=1`. This workflow sets
+# both. Tracking issue #17's text says `@pytest.mark.isaac` but the
+# unified `gpu` marker was chosen on R7.1 so the same nightly slot can
+# also serve the future `NewtonSimulation` GPU suite (R14 / #21).
+#
+# Runner: a self-hosted GPU runner with the labels
+# `[self-hosted, linux, gpu, isaac]`. The runner image must provide
+#   - Ubuntu 22.04 + NVIDIA driver matching Isaac Sim requirements
+#   - Isaac Sim 5.x installed at `/opt/isaac-sim` (or wherever
+#     `isaacsim` Python package resolves from)
+#   - Python 3.10+ (Isaac Sim 5.1 ships with 3.10; project pins 3.12 in
+#     CI, so the runner needs 3.12 available too)
+#   - ~50 GB free disk for SDK + USD asset cache
+#   - `STRANDS_ASSETS_DIR` mounted as a persistent cache so USD
+#     conversions survive across runs
+# If GitHub-hosted GPU runners become available to the org, swap the
+# `runs-on` value below to e.g. `ubuntu-latest-gpu` and drop the
+# `self-hosted` label. The rest of the workflow is runner-agnostic.
+
+on:
+  schedule:
+    # 03:17 UTC nightly. Off-hour to avoid contention with main CI on
+    # the org's runners (deliberately not on the hour).
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to test (branch / tag / SHA). Defaults to main.'
+        required: false
+        default: 'main'
+        type: string
+
+# Isaac Sim doesn't share a GPU well across concurrent processes; gate
+# nightly runs to one at a time per ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  isaac-gpu:
+    name: Isaac GPU Tests
+    runs-on: [self-hosted, linux, gpu, isaac]
+    timeout-minutes: 60
+    env:
+      STRANDS_GPU_TEST: '1'
+      # Isaac Sim's default asset cache; allow the runner to override
+      # via repository / org variable if it mounts elsewhere.
+      STRANDS_ASSETS_DIR: ${{ vars.STRANDS_ASSETS_DIR || '/opt/strands-assets' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Show GPU + driver info
+        run: |
+          set -euxo pipefail
+          nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv || true
+          python --version
+
+      - name: Install package with [isaac,dev] extras
+        run: |
+          set -euxo pipefail
+          pip install --no-cache-dir --upgrade pip "virtualenv<21"
+          pip install --no-cache-dir -e '.[isaac,dev]'
+
+      # Skip-soft if Isaac Sim isn't importable on the runner. The DoD
+      # in #17 calls for "exits 0 with a skip warning" rather than a
+      # hard fail, so misprovisioned runners surface as a yellow check
+      # the maintainers can investigate without breaking the badge.
+      - name: Probe Isaac Sim availability
+        id: probe
+        run: |
+          set +e
+          python - <<'PY'
+          import sys
+          try:
+              from strands_robots_sim.isaac import IsaacSimulation
+              ok, msg = IsaacSimulation.is_available()
+          except Exception as exc:  # noqa: BLE001 — diagnostic probe
+              print(f"isaac_available=false")
+              print(f"isaac_reason=import-failed: {exc}")
+              sys.exit(0)
+          print(f"isaac_available={'true' if ok else 'false'}")
+          print(f"isaac_reason={msg or 'available'}")
+          PY
+          # Re-run to capture for outputs (heredoc above prints to log).
+          python - <<'PY' >>"$GITHUB_OUTPUT"
+          try:
+              from strands_robots_sim.isaac import IsaacSimulation
+              ok, msg = IsaacSimulation.is_available()
+              print(f"available={'true' if ok else 'false'}")
+              print(f"reason={msg or 'available'}")
+          except Exception as exc:  # noqa: BLE001
+              print("available=false")
+              print(f"reason=import-failed: {exc}")
+          PY
+
+      - name: Run GPU integration tests
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p test-results
+          pytest -m gpu --tb=short \
+            --junitxml=test-results/junit-isaac-gpu.xml \
+            strands_robots_sim/isaac/tests/test_gpu_integ.py \
+            | tee test-results/pytest.log
+
+      - name: Skip note (Isaac Sim not available on runner)
+        if: steps.probe.outputs.available != 'true'
+        run: |
+          {
+            echo "## Skipped: Isaac Sim not available on runner"
+            echo ""
+            echo "Reason: ${{ steps.probe.outputs.reason }}"
+            echo ""
+            echo "This is a soft-skip per #17's DoD: the workflow exits 0"
+            echo "rather than hard-failing so a misprovisioned runner"
+            echo "surfaces as a yellow run, not a red one."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Summarise pytest failures (first 5 lines)
+        if: failure() && steps.probe.outputs.available == 'true'
+        run: |
+          {
+            echo "## Pytest failures (first 5 lines)"
+            echo ""
+            echo '```'
+            grep -E '^(FAILED|ERROR|E\s+|>)' test-results/pytest.log \
+              | head -n 5 \
+              || echo "(no FAILED/ERROR lines found in pytest.log)"
+            echo '```'
+            echo ""
+            echo "Full log: see the 'isaac-gpu-test-results' artifact below."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: always() && steps.probe.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: isaac-gpu-test-results
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 30

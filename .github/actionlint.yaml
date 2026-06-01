@@ -1,0 +1,11 @@
+# actionlint configuration.
+#
+# Declares custom self-hosted-runner labels used in
+# .github/workflows/nightly-gpu.yml so actionlint stops flagging them.
+#
+# The runner with these labels is provisioned by the org admin; see
+# the workflow file's header comment for the runner image requirements.
+self-hosted-runner:
+  labels:
+    - gpu
+    - isaac

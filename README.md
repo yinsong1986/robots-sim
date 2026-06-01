@@ -125,7 +125,7 @@ Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
   - [ ] R7 (Phase 2) / [#14](https://github.com/strands-labs/robots-sim/issues/14) — data-plane wiring (`add_object` / `add_camera` / `replicate` / articulation construction)
   - [ ] R8 / [#15](https://github.com/strands-labs/robots-sim/issues/15) — `examples/libero/run_isaac.py`
   - [ ] R9 / [#16](https://github.com/strands-labs/robots-sim/issues/16) — `examples/isaac_replicator_synthdata.py`
-  - [ ] R10 / [#17](https://github.com/strands-labs/robots-sim/issues/17) — nightly GPU CI
+  - [ ] R10 / [#17](https://github.com/strands-labs/robots-sim/issues/17) — nightly GPU CI (workflow file lands ahead of runner provisioning)
 - **Stage 4 — Newton** (ships with v0.4.0)
   - [ ] R11 / [#18](https://github.com/strands-labs/robots-sim/issues/18) — `NewtonSimulation(SimEngine)` backend
   - [ ] R12 / [#19](https://github.com/strands-labs/robots-sim/issues/19) — Newton LIBERO examples
@@ -140,7 +140,7 @@ Migrating from the 0.1.x API: [`examples/MIGRATION.md`](examples/MIGRATION.md).
 
 ## Contributing
 
-PRs welcome. `hatch run lint` (black / isort / flake8) and `hatch run test` (an import smoke until backend code lands) before submitting. Backend-specific tests will live under `tests/isaac/` (R7) and `tests/newton/` (R11). GPU CI is tracked separately in [#17](https://github.com/strands-labs/robots-sim/issues/17) (Isaac) and [#21](https://github.com/strands-labs/robots-sim/issues/21) (Newton).
+PRs welcome. `hatch run lint` (black / isort / flake8) and `hatch run test` (an import smoke + the CPU-only Isaac unit suite) before submitting. Backend-specific tests live under `strands_robots_sim/isaac/tests/` (R7); the `@pytest.mark.gpu`-marked subset (currently `test_gpu_integ.py`) runs only in the nightly GPU workflow ([`nightly-gpu.yml`](.github/workflows/nightly-gpu.yml)) on a self-hosted runner with Isaac Sim installed — main CI stays CPU-only. The same workflow will extend to cover Newton once R14 / [#21](https://github.com/strands-labs/robots-sim/issues/21) lands.
 
 ## License
 

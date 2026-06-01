@@ -250,3 +250,10 @@ pytest strands_robots_sim/isaac/tests/ --ignore=strands_robots_sim/isaac/tests/t
 # GPU integration tests (requires Isaac Sim)
 STRANDS_GPU_TEST=1 pytest strands_robots_sim/isaac/tests/test_gpu_integ.py -v
 ```
+
+The GPU subset (anything marked `@pytest.mark.gpu`) is intentionally
+skipped by `pytest` collection in main CI -- `test-lint.yml` only
+exercises the `--ignore=test_gpu_integ.py` path on `ubuntu-latest`
+without an NVIDIA GPU. Those tests run nightly on a self-hosted GPU
+runner via [`.github/workflows/nightly-gpu.yml`](../../.github/workflows/nightly-gpu.yml)
+(also triggerable on demand via the Actions UI's `workflow_dispatch`).
