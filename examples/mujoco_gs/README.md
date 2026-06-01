@@ -7,6 +7,25 @@ AgentTool. Same idea — a MuJoCo physics scene rendered against a photoreal
 through a [Strands](https://github.com/strands-agents/sdk-python) agent and
 shown live in a Gradio UI.
 
+## Gallery
+
+The default scene: an SO-arm stood up in its `home` ready-pose on a kitchen
+benchtop, composited against the **`tabletop`** 3D Gaussian Splatting scene
+(from [MuJoCo-GS-Web](https://vector-wangel.github.io/MuJoCo-GS-Web/)) with
+per-pixel, depth-aware occlusion.
+
+![SO-arm erected on a 3DGS kitchen benchtop — oblique hero view](assets/hero_oblique.jpg)
+
+| Front | Top-down |
+|:---:|:---:|
+| ![Front view of the arm on the benchtop](assets/hero_front.jpg) | ![Top-down view showing the arm seated on the counter](assets/hero_topdown.jpg) |
+
+*The arm (and a small red cube on the bench) are the MuJoCo foreground; the
+kitchen is a `gsplat`-rasterised background. `HybridCompositor` z-composites
+the two so the arm correctly **rests on** the photoreal counter — see the
+top-down view, where the base sits on the benchtop rather than floating.
+Still frames from the live render pipeline.*
+
 ```
    +----------------------------+ +-------------------------------------+
    |  Live composite (RGB)      | |  Strands Agent chat                 |
