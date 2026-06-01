@@ -100,21 +100,31 @@ jobs:
               ok, msg = IsaacSimulation.is_available()
           except Exception as exc:  # noqa: BLE001 — diagnostic probe
               print(f"isaac_available=false")
-              print(f"isaac_reason=import-failed: {exc}")
+              reason = f"import-failed: {exc}".replace("\n", " | ").replace("\r", "")
+              print(f"isaac_reason={reason}")
               sys.exit(0)
+          reason = (msg or "available").replace("\n", " | ").replace("\r", "")
           print(f"isaac_available={'true' if ok else 'false'}")
-          print(f"isaac_reason={msg or 'available'}")
+          print(f"isaac_reason={reason}")
           PY
           # Re-run to capture for outputs (heredoc above prints to log).
+          # `reason` is sanitised to a single line because $GITHUB_OUTPUT is
+          # parsed line-by-line as `key=value`; a multi-line value silently
+          # truncates to its first line (or worse, mis-parses subsequent
+          # lines as new output keys). is_available()'s msg and the
+          # import-failed exc text both routinely contain newlines (wrapped
+          # ImportError, RuntimeError tracebacks, USD-loader diagnostics).
           python - <<'PY' >>"$GITHUB_OUTPUT"
           try:
               from strands_robots_sim.isaac import IsaacSimulation
               ok, msg = IsaacSimulation.is_available()
+              reason = (msg or "available").replace("\n", " | ").replace("\r", "")
               print(f"available={'true' if ok else 'false'}")
-              print(f"reason={msg or 'available'}")
+              print(f"reason={reason}")
           except Exception as exc:  # noqa: BLE001
+              reason = f"import-failed: {exc}".replace("\n", " | ").replace("\r", "")
               print("available=false")
-              print(f"reason=import-failed: {exc}")
+              print(f"reason={reason}")
           PY
 
       - name: Run GPU integration tests
