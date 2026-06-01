@@ -16,6 +16,12 @@ per-pixel, depth-aware occlusion.
 
 ![SO-arm erected on a 3DGS kitchen benchtop — oblique hero view](assets/hero_oblique.jpg)
 
+![The arm waving on the 3DGS kitchen benchtop](assets/arm_wave.gif)
+
+*The arm waving on the benchtop — the MuJoCo foreground composited
+frame-by-frame over the `gsplat`-rasterised kitchen via `HybridCompositor`
+(the same path the live view uses).*
+
 | Front | Top-down |
 |:---:|:---:|
 | ![Front view of the arm on the benchtop](assets/hero_front.jpg) | ![Top-down view showing the arm seated on the counter](assets/hero_topdown.jpg) |
