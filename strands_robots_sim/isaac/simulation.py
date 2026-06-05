@@ -1501,7 +1501,26 @@ class IsaacSimulation(SimEngine):
                 # to RGB defensively so the returned shape is stable
                 # for downstream agents.
                 rgb = np.asarray(rgba)[..., :3]
-                depth = np.asarray(cam.handle.get_depth())
+                depth_raw = cam.handle.get_depth()
+                if depth_raw is None:
+                    # Camera was constructed without the depth annotator
+                    # (Isaac Sim ships rgba on by default but depth is
+                    # opt-in via ``Camera.add_distance_to_image_plane_to_frame()``;
+                    # PR #61's add_camera enables it post-initialize, but
+                    # an older sim or a manually-attached Phase-1 camera
+                    # state may not). Surface a zero-depth array sized to
+                    # rgb so callers see a stable shape, plus a WARNING
+                    # so misconfigured cameras don't silently produce
+                    # zero-depth telemetry.
+                    logger.warning(
+                        "Camera '%s': get_depth() returned None (depth annotator not enabled). "
+                        "Returning zero-depth array; "
+                        "check add_distance_to_image_plane_to_frame() in add_camera.",
+                        camera_name,
+                    )
+                    depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+                else:
+                    depth = np.asarray(depth_raw)
             except (RuntimeError, ValueError, OSError, AttributeError, TypeError) as e:
                 # Cleanup-clause shape mirrors create_world (#52
                 # precedent). The Camera handle's ``get_rgba`` /
