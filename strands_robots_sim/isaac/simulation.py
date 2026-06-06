@@ -781,18 +781,60 @@ class IsaacSimulation(SimEngine):
                 procedural = None
 
             if procedural is not None:
-                # Build procedurally via USD API
-                joint_names = procedural.joint_names
-                self._prim_registry.append(prim_path)
+                # Phase 2 (option 2 / #14): serialize the ProceduralRobot
+                # dataclass to a USD articulation on disk, then route it
+                # through the same _load_usd_robot loader the usd_path
+                # branch uses. This reuses the GPU-validated USD-load
+                # path (reference -> Articulation -> initialize) instead
+                # of a bespoke in-stage articulation builder, so the
+                # procedural builders inherit observable / actuatable
+                # joints. Pre-this-slice the procedural branch only
+                # recorded joint-name strings with articulation=None, so
+                # get_observation returned {} and send_action no-oped.
+                import os
+                import tempfile
 
+                usd_dest = os.path.join(tempfile.gettempdir(), f"strands_isaac_procedural_{name}.usd")
+                try:
+                    from strands_robots_sim.isaac.procedural_usd import (
+                        procedural_robot_to_usd,
+                    )
+
+                    procedural_robot_to_usd(procedural, usd_dest)
+                    joint_names, articulation = self._load_usd_robot(prim_path, usd_dest, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Same cleanup-clause shape as the usd_path / urdf_path
+                    # branches (#52 precedent). Serialization failure
+                    # (pxr surface drift, IO) or Articulation init failure
+                    # surfaces as a structured error envelope with no
+                    # registry pollution.
+                    logger.error(
+                        "Failed to add procedural robot '%s' (config=%s): %s",
+                        name,
+                        procedural.name,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to add procedural robot '{name}': {e}"}],
+                    }
+
+                self._prim_registry.append(prim_path)
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
-                logger.info("Added robot '%s' (procedural, %d joints)", name, len(joint_names))
+                logger.info(
+                    "Added robot '%s' (procedural: %s, %d joints, articulation=%s)",
+                    name,
+                    procedural.name,
+                    len(joint_names),
+                    "wired" if articulation is not None else "none",
+                )
                 return {
                     "status": "success",
                     "content": [
@@ -800,7 +842,16 @@ class IsaacSimulation(SimEngine):
                             "text": (
                                 f"Robot '{name}' added (procedural: {procedural.name}, "
                                 f"{len(joint_names)} joints: {joint_names})"
-                            )
+                            ),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "procedural_config": procedural.name,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
                         }
                     ],
                 }

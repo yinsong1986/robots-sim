@@ -1396,18 +1396,99 @@ class TestAddRobotUsdBranchPhase2:
         assert "articulation root not found" in result["content"][0]["text"]
         assert "bad" not in sim._robots
 
-    def test_add_robot_procedural_branch_still_has_no_articulation(self) -> None:
-        """Regression pin: the procedural branch (which constructs USD
-        via the build-via-API flow, not via Articulation wrapper) must
-        keep ``_RobotState.articulation = None``. Procedural-robot
-        articulation wiring is a separate Phase 2 slice; this PR
-        intentionally only covers the USD branch.
+    def test_add_robot_procedural_branch_now_wires_articulation(self) -> None:
+        """Procedural branch (option 2 / #14) now serializes the
+        ProceduralRobot to USD and routes through ``_load_usd_robot``,
+        so ``_RobotState.articulation`` is populated -- reversing the
+        earlier Phase-1 ``articulation = None`` behaviour.
+
+        Mocks both the ``procedural_robot_to_usd`` serializer (so no
+        real ``pxr`` USD authoring runs) and the
+        ``_load_usd_robot`` omni imports (so no real Isaac Sim runs).
         """
         sim = self._make_sim()
-        # Procedural lookup is hit when no usd_path/urdf_path is given.
-        # ``so100`` is a registered procedural robot.
-        result = sim.add_robot(name="proc", data_config="so100")
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with (
+            patch(
+                "strands_robots_sim.isaac.procedural_usd.procedural_robot_to_usd",
+                return_value="/so100",
+            ) as mock_serialize,
+            patch.dict(
+                "sys.modules",
+                {
+                    "omni.isaac.core.articulations": articulations,
+                    "omni.isaac.core.utils.stage": stage,
+                },
+            ),
+        ):
+            result = sim.add_robot(name="proc", data_config="so100")
         assert result["status"] == "success"
-        assert sim._robots["proc"].articulation is None, (
-            "Procedural add_robot branch must not silently wire an " "Articulation; that's a separate slice on #14."
+        # The serializer was invoked with the resolved ProceduralRobot
+        # + a temp .usd dest path.
+        mock_serialize.assert_called_once()
+        ser_args = mock_serialize.call_args.args
+        assert ser_args[0].name == "so100"  # ProceduralRobot dataclass
+        assert ser_args[1].endswith(".usd")
+        # Articulation handle is now wired (was None pre-option-2).
+        rs = sim._robots["proc"]
+        assert rs.articulation is art_handle, (
+            "Procedural add_robot branch must now wire the Articulation "
+            "handle (via USD serialization + _load_usd_robot) so "
+            "get_observation / send_action work for procedural robots."
         )
+        assert rs.joint_names == ["joint_a", "joint_b", "joint_c"]
+
+    def test_add_robot_procedural_branch_surfaces_structured_json(self) -> None:
+        """Procedural success envelope carries name / prim_path /
+        procedural_config / joint_names / joint_count / position /
+        articulation_wired.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with (
+            patch(
+                "strands_robots_sim.isaac.procedural_usd.procedural_robot_to_usd",
+                return_value="/panda",
+            ),
+            patch.dict(
+                "sys.modules",
+                {
+                    "omni.isaac.core.articulations": articulations,
+                    "omni.isaac.core.utils.stage": stage,
+                },
+            ),
+        ):
+            result = sim.add_robot(name="arm", data_config="panda", position=[0.5, 0.0, 0.0])
+        info = result["content"][0]["json"]
+        assert info["name"] == "arm"
+        assert info["prim_path"] == "/World/Robots/arm"
+        assert info["procedural_config"] == "panda"
+        assert info["joint_count"] == 3
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_procedural_branch_error_on_serialize_failure(self) -> None:
+        """If USD serialization raises, the procedural branch returns a
+        structured error envelope with no registry pollution (mirrors
+        the usd_path / urdf_path branches' cleanup-clause shape).
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with (
+            patch(
+                "strands_robots_sim.isaac.procedural_usd.procedural_robot_to_usd",
+                side_effect=RuntimeError("pxr stage author failed"),
+            ),
+            patch.dict(
+                "sys.modules",
+                {
+                    "omni.isaac.core.articulations": articulations,
+                    "omni.isaac.core.utils.stage": stage,
+                },
+            ),
+        ):
+            result = sim.add_robot(name="proc", data_config="so100")
+        assert result["status"] == "error"
+        assert "pxr stage author failed" in result["content"][0]["text"]
+        assert "proc" not in sim._robots
+        assert "/World/Robots/proc" not in sim._prim_registry
