@@ -7,23 +7,31 @@ rather than a live MJPEG stream:
 
     +------------------------------------+ +---------------------------+
     |  Composite (Isaac RTX + 3DGS)      | |  Controls                 |
-    |                                    | |  [Camera ▼] oblique       |
-    |   <rendered Franka on backdrop>    | |  [Background ▼] panorama  |
-    |                                    | |  [Upload .ply ]           |
+    |                                    | |  [Camera v] oblique       |
+    |   <rendered Franka on backdrop>    | |  [Upload .ply ]           |
     |                                    | |  [Render]  [Wave + render]|
     +------------------------------------+ |  status: ...              |
                                            +---------------------------+
 
 Why render-on-demand, not live: Isaac's RTX renderer isn't
 real-time-cheap like MuJoCo's offscreen path, and the ``SimulationApp``
-boot is heavyweight (~200 s). So the app boots the sim **once** at
-first render and keeps it alive, then re-renders on a button click.
+boot is heavyweight (~200 s). So the app boots the sim once at startup
+and re-renders on a button click.
 
-Thread model: Isaac's RTX render context is thread-affine (like
-MuJoCo's EGL). Gradio runs callbacks on worker threads, so **all** sim
-/ render calls are funnelled through a single dedicated worker thread
-(one ``ThreadPoolExecutor(max_workers=1)``); callbacks submit work and
-block for the result, keeping the public handlers synchronous.
+Threading model -- the important bit. Isaac's ``SimulationApp`` must be
+created on the **main thread** (it installs SIGINT handlers, and
+``signal.signal`` only works on the main thread), and its RTX render
+context is thread-affine. But Gradio serves callbacks on worker
+threads. So we invert control flow:
+
+* The **main thread** owns Isaac: :meth:`IsaacGsApp.boot` creates
+  ``SimulationApp`` + builds the scene, then :meth:`serve_forever`
+  drains a render-request queue (executing each render on the main
+  thread).
+* **Gradio** is launched non-blocking (``prevent_thread_lock=True``) so
+  it serves in background threads; its callbacks enqueue a
+  :class:`_RenderRequest` and block on its event, keeping the handler
+  synchronous while the render runs on the main thread.
 
 Run::
 
@@ -31,9 +39,8 @@ Run::
     # open http://127.0.0.1:7862  (7860/7861 are the mujoco_gs apps)
 
 Needs a working Isaac Sim (RTX GPU) + the Phase-2 wiring (#61 / #62 /
-#63); see the package docstring. The render handler is also importable
-(``render_once``) so it can be exercised headlessly for validation
-without a browser.
+#63). The render handler is importable (``boot`` + ``render_once``) so
+it can be exercised headlessly for validation without a browser.
 """
 
 from __future__ import annotations
@@ -41,16 +48,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import queue
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-# Make importable both as `python -m examples.isaac_gs.app` and
-# `python examples/isaac_gs/app.py`.
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR.parent.parent) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR.parent.parent))
@@ -58,13 +64,25 @@ if str(_THIS_DIR.parent.parent) not in sys.path:
 logger = logging.getLogger("isaac_gs.app")
 
 
+class _RenderRequest:
+    """A render job marshalled from a Gradio worker to the main thread."""
+
+    __slots__ = ("camera", "wave", "done", "result", "error")
+
+    def __init__(self, camera: str, wave: bool) -> None:
+        self.camera = camera
+        self.wave = wave
+        self.done = threading.Event()
+        self.result: "tuple[np.ndarray, str] | None" = None
+        self.error: "Exception | None" = None
+
+
 class IsaacGsApp:
     """Owns the persistent Isaac sim + compositor behind the Gradio UI.
 
-    All sim / render work runs on a single executor thread (Isaac's RTX
-    context is thread-affine). The sim is booted lazily on the first
-    render so app construction (and ``--help``) doesn't pay the ~200 s
-    SimulationApp boot.
+    See the module docstring for the (important) threading model: Isaac
+    on the main thread, Gradio in background threads, renders marshalled
+    to the main thread via a queue.
     """
 
     def __init__(
@@ -81,20 +99,20 @@ class IsaacGsApp:
         self.width = int(width)
         self.height = int(height)
 
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="isaac_gs")
-        self._lock = threading.Lock()
+        self._queue: "queue.Queue[_RenderRequest]" = queue.Queue()
+        self._bg_lock = threading.Lock()
+        self._pending_bg: "tuple[str | None, str | None] | None" = None
         self._sim = None
         self._compositor = None
         self._build = None
         self._cameras: list[str] = []
-        self._booted = False
+        self._stop = threading.Event()
+        self._serving = False
 
-    # --- sim lifecycle (runs on the executor thread) --------------------
+    # --- main-thread lifecycle ------------------------------------------
 
-    def _ensure_booted(self) -> None:
-        """Boot SimulationApp + build the scene once. Executor-thread only."""
-        if self._booted:
-            return
+    def boot(self) -> None:
+        """Create SimulationApp + build the scene. **Main thread only.**"""
         from strands_robots_sim.isaac import IsaacConfig, IsaacSimulation
 
         available, reason = IsaacSimulation.is_available()
@@ -104,14 +122,61 @@ class IsaacGsApp:
         from examples.isaac_gs.compositor import IsaacHybridCompositor
         from examples.isaac_gs.scene import add_preset_cameras, build_default_scene
 
-        logger.info("Booting IsaacSimulation (first render; ~200 s)...")
+        logger.info("Booting IsaacSimulation on the main thread (~200 s)...")
         sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1, render_mode="rtx_realtime"))
         self._build = build_default_scene(sim, camera_width=self.width, camera_height=self.height)
         self._cameras = add_preset_cameras(sim, width=self.width, height=self.height)
         self._compositor = IsaacHybridCompositor(sim, background=self._make_background())
         self._sim = sim
-        self._booted = True
         logger.info("Scene ready: cameras=%s robot=%s", self._cameras, self._build.robot_name)
+
+    def serve_forever(self, poll: float = 0.05) -> None:
+        """Main-thread loop: drain render requests. Runs after :meth:`boot`."""
+        self._serving = True
+        try:
+            while not self._stop.is_set():
+                try:
+                    req = self._queue.get(timeout=poll)
+                except queue.Empty:
+                    continue
+                try:
+                    self._apply_pending_background()
+                    req.result = self._render_on_main(req.camera, req.wave)
+                except Exception as exc:  # noqa: BLE001 - surfaced to caller
+                    req.error = exc
+                finally:
+                    req.done.set()
+        finally:
+            self._serving = False
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _render_on_main(self, camera: str, wave: bool) -> "tuple[np.ndarray, str]":
+        camera = camera if camera in self._cameras else (self._cameras[0] if self._cameras else "front")
+        if wave and self._build and self._build.robot_joint_count > 0:
+            import math
+
+            jn = self._sim.robot_joint_names(self._build.robot_name)
+            if jn:
+                angle = 0.6 * math.sin(time.time())
+                self._sim.send_action({jn[0]: angle}, robot_name=self._build.robot_name)
+                self._sim.step(5)
+        frame = self._compositor.render(camera_name=camera)
+        fg_px = int(frame.mask.sum())
+        status = f"camera={camera} foreground_px={fg_px} size={frame.rgb.shape[1]}x{frame.rgb.shape[0]}"
+        return frame.rgb, status
+
+    def _apply_pending_background(self) -> None:
+        with self._bg_lock:
+            pending = self._pending_bg
+            self._pending_bg = None
+        if pending is None:
+            return
+        self.gsplat_ply, self.panorama_path = pending
+        if self._compositor is not None:
+            self._compositor.background = self._make_background()
+            self._compositor._bg_cache.clear()
 
     def _make_background(self):
         if self.gsplat_ply:
@@ -124,57 +189,42 @@ class IsaacGsApp:
             return PanoramaBackground(panorama_path=self.panorama_path)
         return PanoramaBackground()
 
-    def _render_on_thread(self, camera: str, wave: bool) -> "tuple[np.ndarray, str]":
-        """Render one composite on the executor thread. Returns (rgb, status)."""
-        self._ensure_booted()
-        camera = camera if camera in self._cameras else (self._cameras[0] if self._cameras else "front")
-        if wave and self._build and self._build.robot_joint_count > 0:
-            import math
-            import time as _t
-
-            jn = self._sim.robot_joint_names(self._build.robot_name)
-            if jn:
-                angle = 0.6 * math.sin(_t.time())
-                self._sim.send_action({jn[0]: angle}, robot_name=self._build.robot_name)
-                self._sim.step(5)
-        frame = self._compositor.render(camera_name=camera)
-        fg_px = int(frame.mask.sum())
-        status = f"camera={camera} foreground_px={fg_px} size={frame.rgb.shape[1]}x{frame.rgb.shape[0]}"
-        return frame.rgb, status
-
     # --- public handlers (called from Gradio worker threads) ------------
 
-    def render_once(self, camera: str = "oblique", wave: bool = False) -> "tuple[np.ndarray, str]":
-        """Submit a render to the executor thread and block for the result."""
-        with self._lock:
-            fut = self._executor.submit(self._render_on_thread, camera, wave)
-        return fut.result()
+    def render_once(
+        self, camera: str = "oblique", wave: bool = False, timeout: float = 600.0
+    ) -> "tuple[np.ndarray, str]":
+        """Enqueue a render for the main thread and block for the result.
+
+        When no :meth:`serve_forever` loop is active (e.g. a headless
+        test that called :meth:`boot` on the main thread itself), renders
+        inline on the caller's thread instead.
+        """
+        if not self._serving:
+            self._apply_pending_background()
+            return self._render_on_main(camera, wave)
+        req = _RenderRequest(camera, wave)
+        self._queue.put(req)
+        if not req.done.wait(timeout=timeout):
+            raise TimeoutError(f"render timed out after {timeout}s")
+        if req.error is not None:
+            raise req.error
+        assert req.result is not None
+        return req.result
 
     def set_background(self, gsplat_ply: Optional[str], panorama_path: Optional[str]) -> str:
-        """Swap the compositor background. Applied on the executor thread."""
-        self.gsplat_ply = gsplat_ply or None
-        self.panorama_path = panorama_path or None
-
-        def _apply():
-            if self._compositor is not None:
-                self._compositor.background = self._make_background()
-                self._compositor._bg_cache.clear()
-            return "background updated"
-
-        with self._lock:
-            fut = self._executor.submit(_apply)
-        return fut.result()
+        """Queue a background swap; applied on the main thread before the next render."""
+        with self._bg_lock:
+            self._pending_bg = (gsplat_ply or None, panorama_path or None)
+        return "background queued — applies on next render"
 
     def shutdown(self) -> None:
-        def _destroy():
-            if self._sim is not None:
+        self.stop()
+        if self._sim is not None:
+            try:
                 self._sim.destroy()
-
-        try:
-            self._executor.submit(_destroy).result(timeout=60)
-        except Exception:  # noqa: BLE001
-            pass
-        self._executor.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def build_ui(app: IsaacGsApp):
@@ -189,7 +239,7 @@ def build_ui(app: IsaacGsApp):
             "An RTX-rendered **simulated** Franka composited into a photoreal "
             "background (procedural panorama by default; upload a `.ply` for a "
             "real captured 3DGS scene — the digital-twin use case). "
-            "Render-on-demand: the first render boots Isaac Sim (~200 s)."
+            "Render-on-demand: Isaac Sim boots once at startup (~200 s)."
         )
         with gr.Row():
             with gr.Column(scale=3):
@@ -207,12 +257,10 @@ def build_ui(app: IsaacGsApp):
                 status = gr.Textbox(label="status", interactive=False)
 
         def on_render(cam):
-            rgb, st = app.render_once(camera=cam, wave=False)
-            return rgb, st
+            return app.render_once(camera=cam, wave=False)
 
         def on_wave(cam):
-            rgb, st = app.render_once(camera=cam, wave=True)
-            return rgb, st
+            return app.render_once(camera=cam, wave=True)
 
         def on_apply_bg(ply_file):
             ply_path = ply_file.name if ply_file is not None else None
@@ -238,7 +286,7 @@ def main(argv: "list[str] | None" = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    os.environ.setdefault("MUJOCO_GL", "egl")  # harmless; some deps probe it
+    os.environ.setdefault("MUJOCO_GL", "egl")
 
     app = IsaacGsApp(
         default_camera=args.camera,
@@ -248,10 +296,28 @@ def main(argv: "list[str] | None" = None) -> None:
         height=args.height,
     )
     demo = build_ui(app)
+
+    # Boot Isaac on the MAIN thread (SimulationApp requires it), THEN
+    # launch Gradio non-blocking so it serves in background threads while
+    # the main thread runs the Isaac render loop.
+    app.boot()
+    demo.launch(
+        server_name=args.server_name,
+        server_port=args.server_port,
+        share=args.share,
+        prevent_thread_lock=True,
+    )
+    print(f"[isaac_gs] UI at http://{args.server_name}:{args.server_port} — Ctrl-C to stop", flush=True)
     try:
-        demo.launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
+        app.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
         app.shutdown()
+        try:
+            demo.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 if __name__ == "__main__":
