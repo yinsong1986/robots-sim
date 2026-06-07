@@ -30,9 +30,9 @@ class SceneBuild:
 # composite shows the robot standing in the scene rather than a tight
 # close-up. Used by the Gradio app's camera dropdown.
 CAMERA_PRESETS: "dict[str, tuple[list[float], list[float]]]" = {
-    "oblique": ([2.2, -2.2, 1.6], [0.0, 0.0, 0.4]),
-    "front": ([3.0, 0.0, 1.0], [0.0, 0.0, 0.4]),
-    "topdown": ([0.05, 0.0, 3.4], [0.0, 0.0, 0.3]),
+    "oblique": ([3.2, -3.2, 2.2], [0.0, 0.0, 0.4]),
+    "front": ([4.2, 0.0, 1.4], [0.0, 0.0, 0.4]),
+    "topdown": ([0.05, 0.0, 4.6], [0.0, 0.0, 0.3]),
 }
 
 
