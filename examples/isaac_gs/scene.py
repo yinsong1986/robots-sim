@@ -25,6 +25,17 @@ class SceneBuild:
     object_names: list[str]
 
 
+# Hero camera presets (pos, target) framing the whole Franka + cube on the
+# backdrop. Pulled back from the arm (~1.2 m tall, base at origin) so the
+# composite shows the robot standing in the scene rather than a tight
+# close-up. Used by the Gradio app's camera dropdown.
+CAMERA_PRESETS: "dict[str, tuple[list[float], list[float]]]" = {
+    "oblique": ([2.2, -2.2, 1.6], [0.0, 0.0, 0.4]),
+    "front": ([3.0, 0.0, 1.0], [0.0, 0.0, 0.4]),
+    "topdown": ([0.05, 0.0, 3.4], [0.0, 0.0, 0.3]),
+}
+
+
 def _default_franka_usd(sim: "object") -> str:
     """Resolve Isaac's bundled Franka Panda USD from the assets root.
 
@@ -134,3 +145,29 @@ def build_default_scene(
         build.object_names,
     )
     return build
+
+
+def add_preset_cameras(
+    sim: "object",
+    width: int = 640,
+    height: int = 480,
+    presets: "dict[str, tuple[list[float], list[float]]] | None" = None,
+) -> "list[str]":
+    """Add the hero camera presets (``CAMERA_PRESETS``) to a built scene.
+
+    Used by the Gradio app so the camera dropdown can switch angles
+    without re-adding cameras per render. Skips any preset name already
+    present. Returns the list of camera names available.
+    """
+    presets = presets or CAMERA_PRESETS
+    added: list[str] = []
+    for name, (pos, tgt) in presets.items():
+        if name in sim._cameras:
+            added.append(name)
+            continue
+        r = sim.add_camera(name=name, position=list(pos), target=list(tgt), width=width, height=height, fov=60.0)
+        if r.get("status") == "success":
+            added.append(name)
+        else:
+            logger.warning("add_camera(%s) failed: %s", name, r)
+    return added
