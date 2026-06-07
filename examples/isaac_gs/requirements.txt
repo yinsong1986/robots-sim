@@ -15,5 +15,21 @@ pillow>=10.0
 numpy>=1.24
 
 # Optional: real 3D Gaussian Splatting backgrounds (the digital-twin path).
-# Needs CUDA. Uncomment or `pip install gsplat` separately.
-# gsplat>=1.0
+#
+# gsplat needs CUDA. A plain `pip install gsplat` builds the CUDA kernels
+# from source at first use via nvcc -- which the Isaac Sim container does
+# NOT ship (it has the CUDA *runtime* for RTX, but no CUDA *toolkit*). In
+# that environment gsplat silently disables its CUDA backend ("No CUDA
+# toolkit found") and the first rasterization raises
+# `AttributeError: 'NoneType' object has no attribute 'CameraModelType'`.
+#
+# Install a PRE-BUILT wheel instead -- it ships precompiled kernels, so no
+# nvcc is needed. Pick the wheel matching the env's torch + CUDA build from
+# https://docs.gsplat.studio/whl/ . For Isaac Sim 4.5 (torch 2.5.1+cu118)
+# the pt24cu118 wheel loads cleanly (the 2.4->2.5 ABI gap is a non-issue):
+#
+#   pip install --index-url https://docs.gsplat.studio/whl/pt24cu118 \
+#       'gsplat==1.5.3+pt24cu118'
+#
+# (no pt25 wheels are published yet; pt24cu118 is the right match.)
+# gsplat==1.5.3+pt24cu118

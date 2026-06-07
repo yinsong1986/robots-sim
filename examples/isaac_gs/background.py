@@ -25,6 +25,45 @@ logger = logging.getLogger("isaac_gs.background")
 DEFAULT_GS_SCENE = "tabletop (indoor room)"
 
 
+def _gsplat_rasterizer_available() -> "tuple[bool, str]":
+    """Check that gsplat can actually CUDA-rasterize, not just import.
+
+    A plain ``pip install gsplat`` is *importable* even when its CUDA
+    kernels are unavailable: gsplat JIT-builds them from source on first
+    use via ``nvcc``, and the Isaac Sim container ships the CUDA runtime
+    (for RTX) but no CUDA *toolkit*. gsplat then disables its CUDA
+    backend ("No CUDA toolkit found") and the first
+    :func:`gsplat.rasterization` call raises
+    ``AttributeError: 'NoneType' object has no attribute 'CameraModelType'``.
+
+    Importing alone can't catch this, so we probe with a trivial
+    one-gaussian rasterization. A broken backend then falls back to the
+    procedural panorama *up front* instead of erroring on every render.
+    Install a pre-built gsplat wheel (ships compiled kernels, no nvcc) to
+    get the real captured scene -- see ``requirements.txt``.
+    """
+    try:
+        import torch
+        from gsplat import rasterization
+    except Exception as exc:  # noqa: BLE001
+        return False, f"gsplat/torch not importable ({type(exc).__name__}: {exc})"
+    if not torch.cuda.is_available():
+        return False, "no CUDA device available to torch"
+    try:
+        dev = "cuda"
+        means = torch.tensor([[0.0, 0.0, 2.0]], device=dev)
+        quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=dev)
+        scales = torch.full((1, 3), 0.1, device=dev)
+        opacities = torch.ones(1, device=dev)
+        colors = torch.ones(1, 3, device=dev)
+        viewmats = torch.eye(4, device=dev)[None]
+        Ks = torch.tensor([[[8.0, 0.0, 8.0], [0.0, 8.0, 8.0], [0.0, 0.0, 1.0]]], device=dev)
+        rasterization(means, quats, scales, opacities, colors, viewmats, Ks, width=16, height=16)
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001 - a disabled CUDA backend surfaces here
+        return False, f"gsplat CUDA rasterizer unavailable ({type(exc).__name__}: {exc})"
+
+
 def resolve_background(
     gsplat_ply: Optional[str] = None,
     gsplat_scene: Optional[str] = None,
@@ -48,8 +87,18 @@ def resolve_background(
     from examples.mujoco_gs.backgrounds import GsplatBackground, PanoramaBackground
 
     if gsplat_ply:
-        logger.info("background: live 3DGS skybox from %s", gsplat_ply)
-        return GsplatBackground(ply_path=gsplat_ply, skybox=True)
+        ok, reason = _gsplat_rasterizer_available()
+        if ok:
+            logger.info("background: live 3DGS skybox from %s", gsplat_ply)
+            return GsplatBackground(ply_path=gsplat_ply, skybox=True)
+        logger.warning(
+            "background: uploaded 3DGS %s requested but the gsplat CUDA rasterizer is "
+            "unavailable (%s); falling back to procedural panorama. Install a pre-built "
+            "`gsplat` wheel -- see requirements.txt.",
+            gsplat_ply,
+            reason,
+        )
+        return PanoramaBackground()
 
     if panorama:
         logger.info("background: panorama image %s", panorama)
@@ -60,7 +109,9 @@ def resolve_background(
 
     scene = gsplat_scene or DEFAULT_GS_SCENE
     try:
-        import gsplat  # noqa: F401  -- probe the CUDA rasterizer is importable
+        ok, reason = _gsplat_rasterizer_available()
+        if not ok:
+            raise RuntimeError(reason)
 
         from examples.mujoco_gs.backgrounds import download_gsplat_scene, gsplat_skybox_align_for
 
@@ -73,7 +124,7 @@ def resolve_background(
     except Exception as exc:  # noqa: BLE001 - any failure falls back to panorama
         logger.warning(
             "background: 3DGS scene %r unavailable (%s: %s); falling back to procedural panorama. "
-            "Install `gsplat` (CUDA) for the real captured scene.",
+            "Install a pre-built `gsplat` wheel (CUDA) for the real captured scene -- see requirements.txt.",
             scene,
             type(exc).__name__,
             exc,
