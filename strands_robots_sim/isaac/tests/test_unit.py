@@ -1244,6 +1244,34 @@ class TestRenderFramePathPhase2:
         assert "rgb" not in result
         assert "depth" not in result
 
+    def test_phase2_camera_malformed_rgb_returns_error_envelope(self) -> None:
+        """A not-yet-warmed camera whose ``get_rgba`` returns a malformed
+        (1-D / empty) buffer -> structured error envelope, not an
+        unhandled IndexError on ``rgb.shape[1]``.
+
+        Regression pin for the gap found during the isaac_gs example's
+        GPU validation: freshly-added cameras whose RTX render product
+        hasn't accumulated a frame return a 1-D array; the json
+        ``resolution`` build then IndexError'd.
+        """
+        import numpy as np
+
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        # 1-D buffer (e.g. empty / not-yet-rendered render product).
+        handle.get_rgba.return_value = np.zeros((0,), dtype=np.uint8)
+        cs = _CameraState(name="cold", prim_path="/World/Cameras/cold", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["cold"] = cs
+
+        result = sim.render("cold")
+        assert result["status"] == "error"
+        assert "malformed RGB buffer" in result["content"][0]["text"]
+        assert "rgb" not in result
+        assert "depth" not in result
+
     def test_phase2_camera_get_depth_failure_returns_error_envelope(self) -> None:
         """Pin failure path also covers ``get_depth`` raising independently
         of ``get_rgba``.

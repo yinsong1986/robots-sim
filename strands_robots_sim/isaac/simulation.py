@@ -1501,6 +1501,22 @@ class IsaacSimulation(SimEngine):
                 # to RGB defensively so the returned shape is stable
                 # for downstream agents.
                 rgb = np.asarray(rgba)[..., :3]
+                # A camera whose RTX render product hasn't accumulated a
+                # frame yet (e.g. added after the last world step, not
+                # warmed up) returns a malformed / empty buffer -- a 1-D
+                # or 0-size array rather than ``(H, W, C)``. Guard so we
+                # raise a structured RuntimeError (caught below) instead
+                # of an unhandled IndexError when building the json
+                # ``resolution`` from ``rgb.shape[1]``. Caught during the
+                # isaac_gs example's GPU validation with multiple
+                # freshly-added cameras.
+                if rgb.ndim < 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0:
+                    raise RuntimeError(
+                        f"camera {camera_name!r} returned a malformed RGB buffer "
+                        f"(shape {np.asarray(rgba).shape}); the RTX render product "
+                        "likely hasn't accumulated a frame yet -- step the world a "
+                        "few times after add_camera before rendering."
+                    )
                 depth_raw = cam.handle.get_depth()
                 if depth_raw is None:
                     # Camera was constructed without the depth annotator
