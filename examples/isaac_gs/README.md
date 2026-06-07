@@ -66,6 +66,45 @@ python -m examples.isaac_gs.render_demo --gsplat-ply /path/to/kitchen.ply
 Frames are written as PNGs under the output dir; a grep-stable summary line
 (`isaac_gs  frames=N  robot=...  out=...  backend=isaac`) closes the run.
 
+## Browser app (`app.py`)
+
+A Gradio web UI — the browser-accessible companion to the CLI, analogous to
+`mujoco_gs/app.py`:
+
+```bash
+python -m examples.isaac_gs.app --server-port 7862
+# open http://127.0.0.1:7862   (7860/7861 are the mujoco_gs apps)
+```
+
+Camera dropdown (oblique / front / topdown presets), a `.ply` background
+upload, and **Render** / **Wave + render** buttons. It's **render-on-demand**,
+not a live MJPEG stream: Isaac's RTX renderer isn't real-time-cheap like
+MuJoCo's offscreen path, and the `SimulationApp` boot is ~200 s.
+
+**Threading**: Isaac's `SimulationApp` must be created on the main thread (it
+installs SIGINT handlers) and its RTX context is thread-affine, but Gradio
+serves callbacks on worker threads. So the app inverts control — Isaac owns
+the main thread (`boot()` + a `serve_forever()` render loop), Gradio launches
+non-blocking (`prevent_thread_lock=True`) in background threads, and render
+requests marshal to the main thread via a queue.
+
+## How the composite is built
+
+* **No sim ground plane** (`create_world(ground_plane=False)`): the background
+  (3DGS / panorama) *is* the visible floor. A sim ground plane would give
+  every pixel finite depth, masking the whole frame as foreground and
+  occluding the backdrop everywhere.
+* **Explicit lights** (`_add_lighting`): Isaac's default lighting rides with
+  the default ground plane we omit, so the scene authors its own distant key
+  + dome fill light via `UsdLux` — otherwise the robot renders as an unlit
+  black silhouette.
+* **Fixed-base Franka + static cube**: with no ground plane, the Franka stays
+  up (fixed base) and the cube is `is_static=True` so it doesn't fall through.
+* **Depth mask**: a pixel is foreground iff the RTX camera saw finite,
+  positive geometry depth there (the robot + cube); everything else shows the
+  background. Camera warmup (a few stepped throwaway renders) primes each
+  camera's RTX render product so `get_rgba()` returns well-formed frames.
+
 ## Runtime dependencies
 
 This example exercises the Phase-2 camera + render wiring on `IsaacSimulation`:
