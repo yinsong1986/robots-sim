@@ -128,7 +128,28 @@ class IsaacGsApp:
         self._cameras = add_preset_cameras(sim, width=self.width, height=self.height)
         self._compositor = IsaacHybridCompositor(sim, background=self._make_background())
         self._sim = sim
+        self._warmup_cameras()
         logger.info("Scene ready: cameras=%s robot=%s", self._cameras, self._build.robot_name)
+
+    def _warmup_cameras(self, steps: int = 30) -> None:
+        """Prime each camera's RTX render product before first real render.
+
+        Cameras added after the initial ``sim.step`` (the preset cameras)
+        haven't produced a frame yet, so ``get_rgba()`` can come back
+        malformed (empty / 1-D) until the render product is triggered.
+        Stepping the world + a guarded throwaway render per camera warms
+        them so the first user render returns a well-formed frame.
+        """
+        if self._sim is None:
+            return
+        self._sim.step(steps)
+        for cam in self._cameras:
+            for _ in range(3):
+                try:
+                    self._sim.render(camera_name=cam)
+                except Exception:  # noqa: BLE001 - warmup is best-effort
+                    pass
+                self._sim.step(2)
 
     def serve_forever(self, poll: float = 0.05) -> None:
         """Main-thread loop: drain render requests. Runs after :meth:`boot`."""

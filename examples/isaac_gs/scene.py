@@ -36,6 +36,37 @@ CAMERA_PRESETS: "dict[str, tuple[list[float], list[float]]]" = {
 }
 
 
+def _add_lighting(sim: "object") -> None:
+    """Add explicit key + dome lights to the stage.
+
+    The digital-twin composite uses ``ground_plane=False`` (so the
+    background provides the floor, not occluded by a sim ground). But
+    Isaac's default lighting is part of the default-ground-plane
+    subtree, so without it the robot renders as an unlit black
+    silhouette. Author a distant key light + a dome fill light directly
+    so lighting is independent of the (absent) floor.
+
+    No-op if ``pxr`` / the stage aren't available.
+    """
+    try:
+        import omni.usd  # type: ignore[import-not-found]
+        from pxr import Gf, Sdf, UsdGeom, UsdLux  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+
+    key = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/KeyLight"))
+    key.CreateIntensityAttr(3000.0)
+    key.CreateAngleAttr(1.0)
+    UsdGeom.Xformable(key.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-50.0, 10.0, 0.0))
+
+    dome = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
+    dome.CreateIntensityAttr(800.0)
+    logger.info("Added key + dome lights (ground-plane lighting unavailable with ground_plane=False)")
+
+
 def _default_franka_usd(sim: "object") -> str:
     """Resolve Isaac's bundled Franka Panda USD from the assets root.
 
@@ -85,9 +116,17 @@ def build_default_scene(
     SceneBuild
         What loaded (robot name + joint count, camera, objects).
     """
-    cw = sim.create_world()
+    # No ground plane in the digital-twin composite: the background
+    # (captured-real 3DGS scene / panorama) is the visible floor, so a
+    # sim ground plane would occlude it everywhere. The Franka USD is
+    # fixed-base (stays up without one); the cube is static (below) so
+    # it doesn't fall through. Lighting is added explicitly via
+    # _add_lighting since Isaac's default light rides with the ground
+    # plane we're omitting.
+    cw = sim.create_world(ground_plane=False)
     if cw.get("status") != "success":
         raise RuntimeError(f"create_world failed: {cw}")
+    _add_lighting(sim)
 
     usd = robot_usd or _default_franka_usd(sim)
     # Name "robot" is not a procedural alias, so the usd_path branch is
@@ -98,17 +137,19 @@ def build_default_scene(
     robot_info = rr.get("content", [{}])[0].get("json", {})
     joint_count = int(robot_info.get("joint_count") or 0)
 
-    # A small red cube on the ground, in front of the arm -- a second
-    # RTX foreground element so the composite shows depth ordering
-    # between two objects + the background.
+    # A small red cube in front of the arm -- a second RTX foreground
+    # element so the composite shows depth ordering between two objects
+    # + the background. Static (is_static=True) so it doesn't fall
+    # through the absent ground plane.
     obj_names: list[str] = []
     co = sim.add_object(
         name="cube",
         shape="box",
-        position=[0.4, 0.0, 0.03],
+        position=[0.4, 0.0, 0.4],
         size=[0.05, 0.05, 0.05],
         color=[1.0, 0.0, 0.0],
         mass=0.1,
+        is_static=True,
     )
     if co.get("status") == "success":
         obj_names.append("cube")
