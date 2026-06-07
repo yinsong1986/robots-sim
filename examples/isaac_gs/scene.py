@@ -25,14 +25,22 @@ class SceneBuild:
     object_names: list[str]
 
 
-# Hero camera presets (pos, target) framing the whole Franka + cube on the
-# backdrop. Pulled back from the arm (~1.2 m tall, base at origin) so the
-# composite shows the robot standing in the scene rather than a tight
-# close-up. Used by the Gradio app's camera dropdown.
+# Hero camera presets (pos, target) framing the Franka on the 3DGS backdrop.
+#
+# CRITICAL: a captured 3DGS room only renders from viewpoints *inside* its
+# shell -- it's reconstructed from photos taken within the room, so gaussians
+# carry color/opacity only for inward-facing surfaces. The default tabletop
+# scene spans ~x[-2,1.8] y[-1.6,0.6] z[-0.8,1.6] (centroid ≈ origin), so eyes
+# must sit INSIDE that ~2 m volume or the splat renders empty (the grey fill).
+# Earlier presets sat 3-5 m out (outside the shell) and the room came back
+# blank. These eyes are ~1.5-2 m from the arm, inside the room, looking at the
+# Franka so the photoreal kitchen reads behind it. (A true top-down isn't
+# possible -- the capture has no ceiling -- so the third angle is a reverse
+# view rather than an overhead one.)
 CAMERA_PRESETS: "dict[str, tuple[list[float], list[float]]]" = {
-    "oblique": ([3.2, -3.2, 2.2], [0.0, 0.0, 0.4]),
-    "front": ([4.2, 0.0, 1.4], [0.0, 0.0, 0.4]),
-    "topdown": ([0.05, 0.0, 4.6], [0.0, 0.0, 0.3]),
+    "oblique": ([1.5, -1.0, 1.1], [0.0, 0.0, 0.4]),
+    "front": ([1.2, -1.2, 1.0], [0.0, 0.0, 0.4]),
+    "reverse": ([-1.4, -1.0, 1.1], [0.0, 0.0, 0.4]),
 }
 
 
@@ -156,8 +164,13 @@ def build_default_scene(
     else:
         logger.warning("add_object(cube) failed (non-fatal): %s", co)
 
-    pos = camera_position or [1.6, -1.6, 1.2]
-    tgt = camera_target or [0.0, 0.0, 0.3]
+    # Default camera == the "front" CAMERA_PRESETS pose: an INSIDE-the-room
+    # eye (see the CAMERA_PRESETS note on why eyes must sit inside the ~2 m
+    # 3DGS shell). The app skips re-adding "front" since this creates it, so
+    # this default must stay in sync with CAMERA_PRESETS["front"]; render_demo
+    # also renders this camera.
+    pos = camera_position or [1.2, -1.2, 1.0]
+    tgt = camera_target or [0.0, 0.0, 0.4]
     ca = sim.add_camera(
         name=camera_name,
         position=pos,
