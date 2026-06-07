@@ -63,6 +63,10 @@ if str(_THIS_DIR.parent.parent) not in sys.path:
 
 logger = logging.getLogger("isaac_gs.app")
 
+# Background dropdown sentinels (non-scene choices).
+PANORAMA_CHOICE = "procedural panorama"
+UPLOAD_CHOICE = "uploaded .ply"
+
 
 class _RenderRequest:
     """A render job marshalled from a Gradio worker to the main thread."""
@@ -90,18 +94,20 @@ class IsaacGsApp:
         default_camera: str = "oblique",
         panorama_path: Optional[str] = None,
         gsplat_ply: Optional[str] = None,
+        gsplat_scene: Optional[str] = None,
         width: int = 640,
         height: int = 480,
     ) -> None:
         self.default_camera = default_camera
         self.panorama_path = panorama_path
         self.gsplat_ply = gsplat_ply
+        self.gsplat_scene = gsplat_scene
         self.width = int(width)
         self.height = int(height)
 
         self._queue: "queue.Queue[_RenderRequest]" = queue.Queue()
         self._bg_lock = threading.Lock()
-        self._pending_bg: "tuple[str | None, str | None] | None" = None
+        self._pending_bg: "dict | None" = None
         self._sim = None
         self._compositor = None
         self._build = None
@@ -194,21 +200,24 @@ class IsaacGsApp:
             self._pending_bg = None
         if pending is None:
             return
-        self.gsplat_ply, self.panorama_path = pending
+        # pending is a dict of resolve_background kwargs.
+        self.gsplat_ply = pending.get("gsplat_ply")
+        self.gsplat_scene = pending.get("gsplat_scene")
+        self.panorama_path = pending.get("panorama")
+        self._prefer_gs = pending.get("prefer_gs", True)
         if self._compositor is not None:
             self._compositor.background = self._make_background()
             self._compositor._bg_cache.clear()
 
     def _make_background(self):
-        if self.gsplat_ply:
-            from examples.mujoco_gs.backgrounds import GsplatBackground
+        from examples.isaac_gs.background import resolve_background
 
-            return GsplatBackground(ply_path=self.gsplat_ply)
-        from examples.mujoco_gs.backgrounds import PanoramaBackground
-
-        if self.panorama_path:
-            return PanoramaBackground(panorama_path=self.panorama_path)
-        return PanoramaBackground()
+        return resolve_background(
+            gsplat_ply=self.gsplat_ply,
+            gsplat_scene=self.gsplat_scene,
+            panorama=self.panorama_path,
+            prefer_gs=getattr(self, "_prefer_gs", True),
+        )
 
     # --- public handlers (called from Gradio worker threads) ------------
 
@@ -233,11 +242,25 @@ class IsaacGsApp:
         assert req.result is not None
         return req.result
 
-    def set_background(self, gsplat_ply: Optional[str], panorama_path: Optional[str]) -> str:
-        """Queue a background swap; applied on the main thread before the next render."""
+    def set_background(self, choice: str, ply_upload: Optional[str] = None) -> str:
+        """Queue a background swap; applied on the main thread before the next render.
+
+        ``choice`` is a UI dropdown value: a 3DGS preset scene name, the
+        ``PANORAMA_CHOICE`` sentinel, or the ``UPLOAD_CHOICE`` sentinel
+        (in which case ``ply_upload`` is the uploaded ``.ply`` path).
+        """
+        if ply_upload and choice == UPLOAD_CHOICE:
+            kwargs = {"gsplat_ply": ply_upload}
+            msg = f"background queued: uploaded 3DGS {ply_upload}"
+        elif choice == PANORAMA_CHOICE:
+            kwargs = {"prefer_gs": False}
+            msg = "background queued: procedural panorama"
+        else:
+            kwargs = {"gsplat_scene": choice}
+            msg = f"background queued: 3DGS scene {choice!r}"
         with self._bg_lock:
-            self._pending_bg = (gsplat_ply or None, panorama_path or None)
-        return "background queued — applies on next render"
+            self._pending_bg = kwargs
+        return msg + " — applies on next render"
 
     def shutdown(self) -> None:
         self.stop()
@@ -254,12 +277,28 @@ def build_ui(app: IsaacGsApp):
 
     from examples.isaac_gs.scene import CAMERA_PRESETS
 
+    # Background choices: the curated 3DGS skybox presets + procedural
+    # panorama + an uploaded-.ply sentinel.
+    try:
+        from examples.mujoco_gs.backgrounds import gsplat_skybox_scene_names
+
+        gs_scenes = gsplat_skybox_scene_names()
+    except Exception:  # noqa: BLE001
+        gs_scenes = []
+    bg_choices = gs_scenes + [PANORAMA_CHOICE, UPLOAD_CHOICE]
+    # Default the dropdown to the configured default GS scene if it's a
+    # known skybox preset, else the first available scene, else panorama.
+    from examples.isaac_gs.background import DEFAULT_GS_SCENE
+
+    default_bg = DEFAULT_GS_SCENE if DEFAULT_GS_SCENE in gs_scenes else (gs_scenes[0] if gs_scenes else PANORAMA_CHOICE)
+
     with gr.Blocks(title="Isaac Sim + 3DGS hybrid render") as demo:
         gr.Markdown(
             "# Isaac Sim + 3DGS hybrid render\n"
             "An RTX-rendered **simulated** Franka composited into a photoreal "
-            "background (procedural panorama by default; upload a `.ply` for a "
-            "real captured 3DGS scene — the digital-twin use case). "
+            "background — by default a real captured **3D Gaussian Splatting** "
+            "scene (the digital-twin use case), falling back to a procedural "
+            "panorama if `gsplat` isn't installed. "
             "Render-on-demand: Isaac Sim boots once at startup (~200 s)."
         )
         with gr.Row():
@@ -271,7 +310,8 @@ def build_ui(app: IsaacGsApp):
                     value=app.default_camera if app.default_camera in CAMERA_PRESETS else "oblique",
                     label="Camera",
                 )
-                ply_upload = gr.File(label="3DGS background (.ply) — optional", file_types=[".ply"])
+                bg_dd = gr.Dropdown(choices=bg_choices, value=default_bg, label="Background")
+                ply_upload = gr.File(label="3DGS .ply upload (with 'uploaded .ply')", file_types=[".ply"])
                 apply_bg_btn = gr.Button("Apply background")
                 render_btn = gr.Button("Render", variant="primary")
                 wave_btn = gr.Button("Wave + render")
@@ -283,13 +323,13 @@ def build_ui(app: IsaacGsApp):
         def on_wave(cam):
             return app.render_once(camera=cam, wave=True)
 
-        def on_apply_bg(ply_file):
+        def on_apply_bg(choice, ply_file):
             ply_path = ply_file.name if ply_file is not None else None
-            return app.set_background(gsplat_ply=ply_path, panorama_path=app.panorama_path)
+            return app.set_background(choice=choice, ply_upload=ply_path)
 
         render_btn.click(on_render, inputs=[camera_dd], outputs=[preview, status])
         wave_btn.click(on_wave, inputs=[camera_dd], outputs=[preview, status])
-        apply_bg_btn.click(on_apply_bg, inputs=[ply_upload], outputs=[status])
+        apply_bg_btn.click(on_apply_bg, inputs=[bg_dd, ply_upload], outputs=[status])
 
     return demo
 
@@ -298,6 +338,11 @@ def main(argv: "list[str] | None" = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--panorama", default=None, help="Equirectangular panorama image for the background.")
     parser.add_argument("--gsplat-ply", default=None, help="3DGS .ply for the background (needs gsplat).")
+    parser.add_argument(
+        "--gsplat-scene",
+        default=None,
+        help="Named built-in 3DGS preset (default: the tabletop scene when gsplat is installed).",
+    )
     parser.add_argument("--camera", default="oblique", help="Initial camera preset (oblique / front / topdown).")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -313,6 +358,7 @@ def main(argv: "list[str] | None" = None) -> None:
         default_camera=args.camera,
         panorama_path=args.panorama,
         gsplat_ply=args.gsplat_ply,
+        gsplat_scene=args.gsplat_scene,
         width=args.width,
         height=args.height,
     )

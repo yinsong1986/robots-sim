@@ -59,7 +59,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gsplat-ply",
         default=None,
         help="Path to a .ply / .spz 3DGS capture for the background. "
-        "Requires `pip install gsplat`. Default: procedural panorama (no ML deps).",
+        "Requires `pip install gsplat`. Overrides the default preset scene.",
+    )
+    p.add_argument(
+        "--gsplat-scene",
+        default=None,
+        help="Named built-in 3DGS preset for the background (e.g. "
+        "'tabletop (indoor room)'). Default: the tabletop preset, "
+        "auto-downloaded + skybox-aligned, when gsplat is installed.",
     )
     p.add_argument(
         "--robot-usd",
@@ -93,16 +100,19 @@ def _date_out(out: "str | None") -> str:
 
 
 def _make_background(args: argparse.Namespace):
-    """Construct the background renderer from CLI args (reused from mujoco_gs)."""
-    if args.gsplat_ply:
-        from examples.mujoco_gs.backgrounds import GsplatBackground
+    """Construct the background renderer from CLI args.
 
-        return GsplatBackground(ply_path=args.gsplat_ply)
-    from examples.mujoco_gs.backgrounds import PanoramaBackground
+    Defaults to the real 3DGS ``tabletop`` scene (falls back to the
+    procedural panorama if gsplat isn't installed) -- see
+    ``examples.isaac_gs.background.resolve_background``.
+    """
+    from examples.isaac_gs.background import resolve_background
 
-    if args.panorama:
-        return PanoramaBackground(panorama_path=args.panorama)
-    return PanoramaBackground()
+    return resolve_background(
+        gsplat_ply=args.gsplat_ply,
+        gsplat_scene=args.gsplat_scene,
+        panorama=args.panorama,
+    )
 
 
 def _save_png(path: str, rgb) -> None:
