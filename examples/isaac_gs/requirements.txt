@@ -1,0 +1,19 @@
+# Isaac Sim + 3DGS hybrid-render example — runtime deps.
+#
+# The heavy backend (Isaac Sim itself) is NOT pip-installable; install it
+# separately (RTX GPU + Omniverse / Isaac Lab / NGC docker) and then:
+#   pip install 'strands-robots-sim[isaac]'
+#
+# This file lists only the light extras the example's render/composite path
+# needs on top of a working Isaac Sim + strands-robots-sim[isaac].
+
+# Image IO for saving composited PNGs (falls back to numpy .npy if absent).
+pillow>=10.0
+
+# numpy is already pulled in by strands-robots-sim; pinned loosely here for
+# the standalone-install case.
+numpy>=1.24
+
+# Optional: real 3D Gaussian Splatting backgrounds (the digital-twin path).
+# Needs CUDA. Uncomment or `pip install gsplat` separately.
+# gsplat>=1.0
