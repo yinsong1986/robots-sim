@@ -314,6 +314,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-episodes", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
+        "--robot-usd",
+        default=None,
+        help="USD robot asset for add_robot(usd_path=...). Default: bundled Franka "
+        "Panda from the assets root. Mutually exclusive with --robot-urdf.",
+    )
+    p.add_argument(
+        "--robot-urdf",
+        default=None,
+        help="URDF robot asset for add_robot(urdf_path=...). Mutually exclusive with --robot-usd.",
+    )
+    p.add_argument(
         "--auto-server",
         dest="auto_server",
         action="store_true",
@@ -347,10 +358,38 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | None]":
+    """Resolve which robot asset to load → ``(usd_path, urdf_path)``.
+
+    Same contract as ``run_isaac.py._resolve_robot_asset``: ``--robot-urdf``
+    > ``--robot-usd`` > default Franka Panda USD from the assets root
+    (``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``). Loads a
+    *real* robot rather than the procedural stick-figure (see
+    ``run_isaac.py`` for the rationale). ``get_assets_root_path`` is
+    imported lazily (only resolvable after ``create_world``).
+    """
+    if args.robot_urdf is not None:
+        return None, args.robot_urdf
+    if args.robot_usd is not None:
+        return args.robot_usd, None
+    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+
+    assets_root = get_assets_root_path()
+    if not assets_root:
+        raise RuntimeError(
+            "Could not resolve the Isaac Sim assets root for the default Franka USD. "
+            "Pass --robot-usd / --robot-urdf with an explicit asset path, or configure "
+            "a Nucleus server / internet access for the Omniverse CDN."
+        )
+    return f"{assets_root}/Isaac/Robots/Franka/franka.usd", None
+
+
 def main() -> None:
     global _sim
 
     args = _build_parser().parse_args()
+    if args.robot_usd is not None and args.robot_urdf is not None:
+        raise SystemExit("--robot-usd and --robot-urdf are mutually exclusive; pass at most one.")
     suite = _suite_for_task(args.task)
 
     # Fail-fast on hosts without Isaac Sim. Same probe as run_isaac.py
@@ -386,12 +425,19 @@ def main() -> None:
         if result.get("status") != "success":
             raise RuntimeError(f"create_world failed: {result}")
 
-        # Procedural Panda. Same Phase-1 caveat as run_isaac.py: the
-        # procedural branch leaves _RobotState.articulation=None until
-        # the procedural-articulation slice on #14 lands, so
-        # `evaluate_benchmark` will run but produce success_rate=0
-        # by construction.
-        result = _sim.add_robot(name="robot", data_config="panda")
+        # Load a *real* robot asset (default: bundled Franka Panda USD;
+        # override via --robot-usd / --robot-urdf). Routes through
+        # add_robot's usd_path / urdf_path branch (real Articulation,
+        # observable joints) rather than the procedural builder, which
+        # produces a kinematically-approximate stick-figure unusable for
+        # LIBERO. See run_isaac.py's _resolve_robot_asset docstring.
+        robot_usd, robot_urdf = _resolve_robot_asset(args)
+        if robot_urdf is not None:
+            print(f"[setup] loading robot from URDF: {robot_urdf}")
+            result = _sim.add_robot(name="robot", urdf_path=robot_urdf)
+        else:
+            print(f"[setup] loading robot from USD: {robot_usd}")
+            result = _sim.add_robot(name="robot", usd_path=robot_usd)
         if result.get("status") != "success":
             raise RuntimeError(f"add_robot failed: {result}")
 

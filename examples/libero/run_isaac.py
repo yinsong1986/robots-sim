@@ -4,41 +4,50 @@
 Companion to ``run_mujoco.py``: same CLI shape, same two grep-stable
 output lines, same ``evaluate_benchmark(...)`` driver. Differs in
 backend choice (``IsaacSimulation`` instead of MuJoCo's
-``Simulation``), procedural Panda construction (Isaac builds the
-robot on its own USD stage rather than loading a LIBERO MJCF), and
-an explicit ``add_camera(...)`` call (Isaac doesn't auto-attach
+``Simulation``), real-asset robot loading (loads the bundled Franka
+Panda USD via ``add_robot(usd_path=...)`` rather than a LIBERO MJCF),
+and an explicit ``add_camera(...)`` call (Isaac doesn't auto-attach
 viewport cameras the way MuJoCo does -- the camera prim has to land
 on the stage before ``render`` / recorder pulls from it).
 
-This file is **draft / scaffolding** as of 2026-06: the ``--policy
-mock`` path runs end-to-end against the procedural Panda that ships
-in main today, but the resulting ``success_rate`` is structurally
-``0.0`` until two pieces of unmerged Phase-2 wiring land. Both are
-explicitly documented inline at their call sites:
+Robot asset
+-----------
+By default this loads Isaac Sim's bundled **Franka Panda USD**,
+resolved from the assets root
+(``get_assets_root_path()/Isaac/Robots/Franka/franka.usd`` -- reachable
+over HTTPS from the Omniverse CDN, no local Nucleus required). Override
+with ``--robot-usd PATH`` or ``--robot-urdf PATH`` to load your own
+asset.
 
-* `#61 (add_camera Phase 2) <https://github.com/strands-labs/robots-sim/pull/61>`_
-  — wires :meth:`IsaacSimulation.add_camera` to actually create the
-  RTX camera prim so ``render`` returns non-blank frames. Without
-  this, the GR00T policy's ``video.image`` observation key would be
-  empty zero-arrays, so ``--policy=groot`` cannot reach
-  ``success_rate>0``. ``--policy=mock`` doesn't read images and
-  therefore tolerates the missing camera, but you'll notice the
-  printed video path goes to a placeholder file.
-* `#14 (procedural-robot articulation Phase 2) <https://github.com/strands-labs/robots-sim/issues/14>`_
-  — the procedural ``add_robot("panda")`` branch currently leaves
-  ``_RobotState.articulation`` as ``None``, so
-  ``get_observation`` returns ``{}`` and ``send_action`` silently
-  no-ops on procedural robots.
-  `PR #63 <https://github.com/strands-labs/robots-sim/pull/63>`_
-  /
-  `PR #64 <https://github.com/strands-labs/robots-sim/pull/64>`_
-  wired the USD- / URDF-loaded paths but the procedural path is its
-  own slice on #14.
+This deliberately loads a **real** robot, not the procedural builder
+(``add_robot(data_config="panda")``): the procedural Panda is a
+kinematically approximate stick-figure (right joint count, wrong link
+geometry / masses / joint origins) -- fine for lifecycle smoke tests,
+useless for a LIBERO manipulation policy whose end-effector targets
+depend on correct kinematics. Loading the real Franka USD constructs
+a true ``omni.isaac.core.articulations.Articulation`` whose joints are
+observable via ``get_observation`` and actuatable via ``send_action``
+(GPU-validated: 9 DoF -- 7 arm + 2 fingers).
 
-Once both land, the same script produces meaningful ``success_rate``
-values without any code change here. The CLI surface is fixed now so
-shell wrappers / matrix-driver scripts can be written today against
-the eventual end-to-end behaviour.
+Dependency status (as of 2026-06)
+---------------------------------
+The real-asset robot load rides on the USD- / URDF-loaded
+``add_robot`` paths:
+
+* `PR #63 <https://github.com/strands-labs/robots-sim/pull/63>`_ --
+  ``add_robot(usd_path=...)`` Articulation construction (the default
+  path this script uses).
+* `PR #64 <https://github.com/strands-labs/robots-sim/pull/64>`_ --
+  ``add_robot(urdf_path=...)`` for the ``--robot-urdf`` override.
+
+Until those merge, the robot load no-ops on a stock ``main`` build.
+The camera / video path additionally rides on:
+
+* `PR #61 (add_camera Phase 2) <https://github.com/strands-labs/robots-sim/pull/61>`_
+  + `PR #62 (render frame-path) <https://github.com/strands-labs/robots-sim/pull/62>`_
+  -- without them ``render`` returns blank frames, so ``--policy=groot``'s
+  ``video.image`` observation is empty. ``--policy=mock`` doesn't read
+  images and tolerates their absence.
 
 Tracks `#15 <https://github.com/strands-labs/robots-sim/issues/15>`_
 (R8 — example file). Filename is ``run_isaac.py`` rather than the
@@ -46,30 +55,20 @@ issue's pre-rescope ``libero_isaac.py`` to match the post-rescope
 ``examples/libero/run_<backend>.py`` layout that ``run_mujoco.py``
 established (see ``examples/libero_example.py:126``).
 
-Why no ``run_isaac_agent.py`` yet
----------------------------------
-``run_mujoco_agent.py`` wraps the ``Simulation`` AgentTool's full
-64-action enum so the agent can pick ``evaluate_benchmark`` from
-natural language. The Isaac-side equivalent of that AgentTool surface
-hasn't been built yet -- ``IsaacSimulation`` currently exposes the
-``SimEngine`` ABC directly (good for programmatic flows) but is not
-yet wrapped as an AgentTool. Once that wrapper exists (likely a
-sibling-repo follow-up), a ``run_isaac_agent.py`` can mirror
-``run_mujoco_agent.py``'s shape against it.
-
 Usage
 -----
 ::
 
-    # 1) Smoke test, GPU + Isaac Sim 5.x required (see is_available()
-    #    error path for setup hints):
+    # 1) Smoke test, GPU + Isaac Sim required (see is_available()
+    #    error path for setup hints). Loads the default Franka USD:
     python examples/libero/run_isaac.py --policy mock --n-episodes 5
 
+    # 1b) Bring your own robot asset:
+    python examples/libero/run_isaac.py --policy mock --robot-usd /path/to/robot.usd
+    python examples/libero/run_isaac.py --policy mock --robot-urdf /path/to/robot.urdf
+
     # 2) Real LIBERO eval against `nvidia/GR00T-N1.7-LIBERO`. Same
-    #    GR00T-inference-container lifecycle as `run_mujoco.py`. Only
-    #    meaningful once #14's procedural-robot articulation Phase 2
-    #    wiring lands; until then `success_rate` will be 0 because
-    #    `get_observation` returns `{}` for procedural Panda.
+    #    GR00T-inference-container lifecycle as `run_mujoco.py`.
     python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 
 Requires
@@ -152,6 +151,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--n-episodes", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--robot-usd",
+        default=None,
+        help="Path / URL to a USD robot asset to load via add_robot(usd_path=...). "
+        "Default: Isaac Sim's bundled Franka Panda resolved from the assets root "
+        "(`get_assets_root_path()/Isaac/Robots/Franka/franka.usd`). Mutually "
+        "exclusive with --robot-urdf.",
+    )
+    p.add_argument(
+        "--robot-urdf",
+        default=None,
+        help="Path to a URDF robot asset to load via add_robot(urdf_path=...). "
+        "Mutually exclusive with --robot-usd. Converted to USD on import via "
+        "the Isaac URDF importer.",
+    )
     p.add_argument(
         "--auto-server",
         dest="auto_server",
@@ -291,8 +305,50 @@ def _resolve_task(suite: str, requested_task: str) -> str:
     raise RuntimeError(f"--task {requested_task!r} is not in the {suite} suite. Available: {sorted(registered)[:3]}…")
 
 
+def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | None]":
+    """Resolve which robot asset to load → ``(usd_path, urdf_path)``.
+
+    Precedence:
+
+    1. ``--robot-urdf`` if given → ``(None, urdf)``.
+    2. ``--robot-usd`` if given → ``(usd, None)``.
+    3. Default → the bundled Franka Panda USD resolved from Isaac Sim's
+       assets root (``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``).
+       Reachable over HTTPS from the public Omniverse CDN even without a
+       local Nucleus server, so the example runs out-of-the-box on any
+       Isaac Sim install with internet.
+
+    Why a *real* asset (not the procedural builder): the procedural
+    ``add_robot(data_config="panda")`` path produces a kinematically
+    approximate stick-figure (correct joint count, wrong link geometry /
+    masses / joint origins) -- fine for lifecycle smoke tests, useless
+    for a LIBERO manipulation policy. Loading the real Franka USD gives
+    the correct kinematics a GR00T / LIBERO policy expects.
+
+    ``get_assets_root_path`` is imported lazily (only resolvable after
+    ``create_world`` has booted ``SimulationApp``), so this is called
+    *after* ``sim.create_world()`` in :func:`main`.
+    """
+    if args.robot_urdf is not None:
+        return None, args.robot_urdf
+    if args.robot_usd is not None:
+        return args.robot_usd, None
+    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+
+    assets_root = get_assets_root_path()
+    if not assets_root:
+        raise RuntimeError(
+            "Could not resolve the Isaac Sim assets root for the default Franka USD. "
+            "Pass --robot-usd / --robot-urdf with an explicit asset path, or configure "
+            "a Nucleus server / internet access for the Omniverse CDN."
+        )
+    return f"{assets_root}/Isaac/Robots/Franka/franka.usd", None
+
+
 def main() -> None:
     args = _build_parser().parse_args()
+    if args.robot_usd is not None and args.robot_urdf is not None:
+        raise SystemExit("--robot-usd and --robot-urdf are mutually exclusive; pass at most one.")
     suite = _suite_for_task(args.task)
 
     # Fail-fast on hosts without Isaac Sim. The is_available probe is
@@ -342,19 +398,23 @@ def main() -> None:
         if result.get("status") != "success":
             raise RuntimeError(f"create_world failed: {result}")
 
-        # Procedural Panda — same robot shape as the LIBERO MJCF the
-        # MuJoCo file's pre-warm path loads. ``data_config="panda"``
-        # routes through the procedural builder shipped in PR #46
-        # (`isaac/procedural.py:_build_panda`); no URDF/USD asset on
-        # disk required.
+        # Load a *real* robot asset (default: Isaac's bundled Franka
+        # Panda USD; override via --robot-usd / --robot-urdf). This
+        # routes through add_robot's usd_path / urdf_path branch, which
+        # constructs a real ``omni.isaac.core.articulations.Articulation``
+        # (joints observable via get_observation, actuatable via
+        # send_action) -- see PR #63 (USD) / PR #64 (URDF).
         #
-        # Phase-1 caveat: ``_RobotState.articulation`` is ``None`` for
-        # procedural robots until #14's procedural-articulation slice
-        # lands. ``evaluate_benchmark`` will still loop, but
-        # ``get_observation`` returns ``{}`` and ``send_action``
-        # silently no-ops on procedural robots, so ``success_rate`` is
-        # 0 by construction. See module docstring for the gating PRs.
-        result = sim.add_robot(name="robot", data_config="panda")
+        # Name "robot" is deliberately NOT a procedural alias (so the
+        # usd_path / urdf_path branch is taken, not procedural lookup)
+        # and matches the LIBERO/RoboSuite convention for the Franka.
+        robot_usd, robot_urdf = _resolve_robot_asset(args)
+        if robot_urdf is not None:
+            print(f"[setup] loading robot from URDF: {robot_urdf}")
+            result = sim.add_robot(name="robot", urdf_path=robot_urdf)
+        else:
+            print(f"[setup] loading robot from USD: {robot_usd}")
+            result = sim.add_robot(name="robot", usd_path=robot_usd)
         if result.get("status") != "success":
             raise RuntimeError(f"add_robot failed: {result}")
 
