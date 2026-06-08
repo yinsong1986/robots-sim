@@ -424,7 +424,7 @@ def main(argv: "list[str] | None" = None) -> None:
         default=None,
         help="Named built-in 3DGS preset (default: the tabletop scene when gsplat is installed).",
     )
-    parser.add_argument("--camera", default="oblique", help="Initial camera preset (oblique / front / reverse).")
+    parser.add_argument("--camera", default="oblique", help="Initial camera preset (oblique / front / topdown).")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--server-name", default="127.0.0.1")

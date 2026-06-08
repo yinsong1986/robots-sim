@@ -25,22 +25,22 @@ class SceneBuild:
     object_names: list[str]
 
 
-# Hero camera presets (pos, target) framing the Franka on the 3DGS backdrop.
-#
-# CRITICAL: a captured 3DGS room only renders from viewpoints *inside* its
-# shell -- it's reconstructed from photos taken within the room, so gaussians
-# carry color/opacity only for inward-facing surfaces. The default tabletop
-# scene spans ~x[-2,1.8] y[-1.6,0.6] z[-0.8,1.6] (centroid ≈ origin), so eyes
-# must sit INSIDE that ~2 m volume or the splat renders empty (the grey fill).
-# Earlier presets sat 3-5 m out (outside the shell) and the room came back
-# blank. These eyes are ~1.5-2 m from the arm, inside the room, looking at the
-# Franka so the photoreal kitchen reads behind it. (A true top-down isn't
-# possible -- the capture has no ceiling -- so the third angle is a reverse
-# view rather than an overhead one.)
-CAMERA_PRESETS: "dict[str, tuple[list[float], list[float]]]" = {
-    "oblique": ([1.5, -1.0, 1.1], [0.0, 0.0, 0.4]),
-    "front": ([1.2, -1.2, 1.0], [0.0, 0.0, 0.4]),
-    "reverse": ([-1.4, -1.0, 1.1], [0.0, 0.0, 0.4]),
+# Hero camera presets (pos, target, fov_deg) framing the Franka in the 3DGS
+# room. These mirror the MuJoCo-GS demo's authored cameras verbatim
+# (examples/mujoco_gs/scene.py) -- the tabletop 3DGS scene + its skybox
+# alignment (GSPLAT_SKYBOX_ALIGN["tabletop"]) were tuned together with these
+# poses, so reusing them reproduces the level, full-kitchen framing. They sit
+# CLOSE (~1 m) and LOW, looking at the low workspace centre ([0.05,0.05,0.18]);
+# higher/farther eyes either fall outside the ~2 m captured shell (blank splat)
+# or graze the countertop from above (no room context).
+CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
+    "oblique": ([0.75, -0.7, 0.55], [0.05, 0.05, 0.18], 55.0),
+    "front": ([0.05, -0.95, 0.45], [0.05, 0.05, 0.18], 58.0),
+    # MuJoCo's topdown looks *straight* down ([0.05,0.05,1.25]->[0.05,0.05,0]),
+    # but a perfectly vertical view direction is degenerate for a +Z-up look-at
+    # (zero roll axis). Use a high, slightly-offset eye so it's a well-defined
+    # elevated/overhead angle (counter + floor, level horizon).
+    "topdown": ([0.05, -0.5, 1.15], [0.05, 0.05, 0.1], 62.0),
 }
 
 
@@ -164,20 +164,18 @@ def build_default_scene(
     else:
         logger.warning("add_object(cube) failed (non-fatal): %s", co)
 
-    # Default camera == the "front" CAMERA_PRESETS pose: an INSIDE-the-room
-    # eye (see the CAMERA_PRESETS note on why eyes must sit inside the ~2 m
-    # 3DGS shell). The app skips re-adding "front" since this creates it, so
-    # this default must stay in sync with CAMERA_PRESETS["front"]; render_demo
-    # also renders this camera.
-    pos = camera_position or [1.2, -1.2, 1.0]
-    tgt = camera_target or [0.0, 0.0, 0.4]
+    # Default camera == the "front" CAMERA_PRESETS pose (mirrors MuJoCo-GS).
+    # The app skips re-adding "front" since this creates it, so this default
+    # must stay in sync with CAMERA_PRESETS["front"]; render_demo renders it too.
+    pos = camera_position or [0.05, -0.95, 0.45]
+    tgt = camera_target or [0.05, 0.05, 0.18]
     ca = sim.add_camera(
         name=camera_name,
         position=pos,
         target=tgt,
         width=camera_width,
         height=camera_height,
-        fov=60.0,
+        fov=58.0,
     )
     if ca.get("status") != "success":
         raise RuntimeError(f"add_camera({camera_name!r}) failed: {ca}")
@@ -215,11 +213,11 @@ def add_preset_cameras(
     """
     presets = presets or CAMERA_PRESETS
     added: list[str] = []
-    for name, (pos, tgt) in presets.items():
+    for name, (pos, tgt, fov) in presets.items():
         if name in sim._cameras:
             added.append(name)
             continue
-        r = sim.add_camera(name=name, position=list(pos), target=list(tgt), width=width, height=height, fov=60.0)
+        r = sim.add_camera(name=name, position=list(pos), target=list(tgt), width=width, height=height, fov=float(fov))
         if r.get("status") == "success":
             added.append(name)
         else:

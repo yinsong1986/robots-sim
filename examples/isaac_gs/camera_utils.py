@@ -103,8 +103,19 @@ def get_camera_params(
     position = np.asarray(position, dtype=np.float64).reshape(3)
     quat_wxyz = np.asarray(quat_wxyz, dtype=np.float64).reshape(4)
 
+    # ``Camera.get_world_pose()`` returns the camera *prim's* world orientation,
+    # whose local axes are offset from the OpenGL optical frame this module's
+    # ``CameraParams`` promises (+X right, +Y up, -Z forward). ``add_camera``
+    # aims the physical camera correctly via ``set_camera_view`` (so the RTX
+    # foreground is right), but feeding the raw prim rotation to a renderer that
+    # assumes the GL convention rolls/misaims the backdrop. Apply the fixed
+    # camera-local correction prim->GL (empirically, and consistent across
+    # poses: prim +X -> GL -Z, prim +Y -> GL -X, prim +Z -> GL +Y) so a
+    # composited 3DGS/panorama background is upright and aligned with the
+    # foreground. ``R_gl = R_prim @ PRIM_TO_GL``.
+    PRIM_TO_GL = np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
     T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = _quat_wxyz_to_rotmat(quat_wxyz)
+    T[:3, :3] = _quat_wxyz_to_rotmat(quat_wxyz) @ PRIM_TO_GL
     T[:3, 3] = position
 
     return IsaacCameraParams(
