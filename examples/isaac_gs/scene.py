@@ -41,6 +41,16 @@ CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
     "topdown": ([0.05, -0.61, 1.56], [0.05, 0.05, 0.30], 62.0),
 }
 
+# SO-101 (SO-ARM100) tabletop arm: a much smaller (~0.4 m) robot than the
+# Franka, imported from the MuJoCo Menagerie MJCF (the URDF import doesn't
+# render in RTX). Its gravity-settled default pose centres ~[0,-0.18,-0.03]
+# and extends along -Y; these eyes (~1.2 m, aimed there) frame it reliably.
+SO101_CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
+    "oblique": ([0.94, -1.0, 0.56], [0.0, -0.18, -0.03], 48.0),
+    "front": ([0.0, -1.35, 0.38], [0.0, -0.18, -0.03], 50.0),
+    "topdown": ([0.2, -1.0, 0.78], [0.0, -0.18, -0.03], 50.0),
+}
+
 
 def _add_lighting(sim: "object") -> None:
     """Add explicit key + dome lights to the stage.

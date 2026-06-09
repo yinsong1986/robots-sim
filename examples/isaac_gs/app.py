@@ -170,6 +170,8 @@ class IsaacGsApp:
         gsplat_scene: Optional[str] = None,
         width: int = 640,
         height: int = 480,
+        robot_usd: Optional[str] = None,
+        camera_presets: Optional[dict] = None,
     ) -> None:
         self.default_camera = default_camera
         self.panorama_path = panorama_path
@@ -177,6 +179,10 @@ class IsaacGsApp:
         self.gsplat_scene = gsplat_scene
         self.width = int(width)
         self.height = int(height)
+        # Robot: default None -> build_default_scene loads the bundled Franka.
+        # Pass an SO-101 (or other) USD + matching camera presets to swap it.
+        self.robot_usd = robot_usd
+        self.camera_presets = camera_presets
 
         self._queue: "queue.Queue[_RenderRequest]" = queue.Queue()
         self._bg_lock = threading.Lock()
@@ -218,8 +224,19 @@ class IsaacGsApp:
 
         logger.info("Booting IsaacSimulation on the main thread (~200 s)...")
         sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1, render_mode="rtx_realtime"))
-        self._build = build_default_scene(sim, camera_width=self.width, camera_height=self.height)
-        self._cameras = add_preset_cameras(sim, width=self.width, height=self.height)
+        # Robot-aware: build_default_scene creates the "front" camera, so align
+        # it with the chosen presets' "front" pose; add_preset_cameras adds the
+        # rest. Defaults (no robot_usd / presets) = the bundled Franka.
+        presets = self.camera_presets
+        front = (presets or {}).get("front")
+        bd_kwargs: dict = {"camera_width": self.width, "camera_height": self.height}
+        if self.robot_usd:
+            bd_kwargs["robot_usd"] = self.robot_usd
+        if front:
+            bd_kwargs["camera_position"] = list(front[0])
+            bd_kwargs["camera_target"] = list(front[1])
+        self._build = build_default_scene(sim, **bd_kwargs)
+        self._cameras = add_preset_cameras(sim, width=self.width, height=self.height, presets=presets)
         self._compositor = IsaacHybridCompositor(sim, background=self._make_background())
         self._sim = sim
         self._warmup_cameras()
@@ -514,6 +531,17 @@ def main(argv: "list[str] | None" = None) -> None:
         help="Named built-in 3DGS preset (default: the tabletop scene when gsplat is installed).",
     )
     parser.add_argument("--camera", default="oblique", help="Initial camera preset (oblique / front / topdown).")
+    parser.add_argument(
+        "--robot",
+        default="franka",
+        choices=["franka", "so101"],
+        help="Which arm to load (default: bundled Franka). 'so101' needs --robot-usd (an MJCF-imported SO-101 USD).",
+    )
+    parser.add_argument(
+        "--robot-usd",
+        default=None,
+        help="USD path for a non-default robot (e.g. the MJCF-imported SO-101). Required for --robot so101.",
+    )
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--server-name", default="127.0.0.1")
@@ -530,6 +558,19 @@ def main(argv: "list[str] | None" = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     os.environ.setdefault("MUJOCO_GL", "egl")
 
+    # Robot selection: default Franka, or an MJCF-imported SO-101 USD with its
+    # own (smaller-arm) camera presets.
+    robot_usd = None
+    camera_presets = None
+    if args.robot == "so101":
+        from examples.isaac_gs.scene import SO101_CAMERA_PRESETS
+
+        robot_usd = args.robot_usd
+        camera_presets = SO101_CAMERA_PRESETS
+        if not robot_usd:
+            logger.warning("--robot so101 needs --robot-usd; falling back to the bundled Franka.")
+            camera_presets = None
+
     app = IsaacGsApp(
         default_camera=args.camera,
         panorama_path=args.panorama,
@@ -537,6 +578,8 @@ def main(argv: "list[str] | None" = None) -> None:
         gsplat_scene=args.gsplat_scene,
         width=args.width,
         height=args.height,
+        robot_usd=robot_usd,
+        camera_presets=camera_presets,
     )
 
     # Build the natural-language agent (optional: degrades to a buttons-only UI
