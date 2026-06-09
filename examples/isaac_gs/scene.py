@@ -26,21 +26,19 @@ class SceneBuild:
 
 
 # Hero camera presets (pos, target, fov_deg) framing the Franka in the 3DGS
-# room. These mirror the MuJoCo-GS demo's authored cameras verbatim
-# (examples/mujoco_gs/scene.py) -- the tabletop 3DGS scene + its skybox
-# alignment (GSPLAT_SKYBOX_ALIGN["tabletop"]) were tuned together with these
-# poses, so reusing them reproduces the level, full-kitchen framing. They sit
-# CLOSE (~1 m) and LOW, looking at the low workspace centre ([0.05,0.05,0.18]);
-# higher/farther eyes either fall outside the ~2 m captured shell (blank splat)
-# or graze the countertop from above (no room context).
+# room. Adapted from the MuJoCo-GS demo's authored cameras (the tabletop scene
+# + its skybox alignment were tuned together with those), then pulled back
+# ~1.3x and aimed higher (target z~0.3-0.4 rather than the workspace floor) so
+# the WHOLE arm fits with margin -- the Franka's default pose stands tall, and
+# a low aim clipped the top. Eyes stay INSIDE the ~2 m captured shell (z < the
+# ~1.6 m ceiling) so the splat still fills the frame; aiming higher captures
+# the arm without grazing the unobserved ceiling.
 CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
-    "oblique": ([0.75, -0.7, 0.55], [0.05, 0.05, 0.18], 55.0),
-    "front": ([0.05, -0.95, 0.45], [0.05, 0.05, 0.18], 58.0),
-    # MuJoCo's topdown looks *straight* down ([0.05,0.05,1.25]->[0.05,0.05,0]),
-    # but a perfectly vertical view direction is degenerate for a +Z-up look-at
-    # (zero roll axis). Use a high, slightly-offset eye so it's a well-defined
-    # elevated/overhead angle (counter + floor, level horizon).
-    "topdown": ([0.05, -0.5, 1.15], [0.05, 0.05, 0.1], 62.0),
+    "oblique": ([0.96, -0.93, 0.88], [0.05, 0.05, 0.40], 55.0),
+    "front": ([0.05, -1.25, 0.75], [0.05, 0.05, 0.40], 58.0),
+    # A high, slightly-offset eye (a perfectly vertical look-at is degenerate
+    # for a +Z-up roll axis); kept under the ~1.6 m shell ceiling.
+    "topdown": ([0.05, -0.61, 1.56], [0.05, 0.05, 0.30], 62.0),
 }
 
 
@@ -164,11 +162,11 @@ def build_default_scene(
     else:
         logger.warning("add_object(cube) failed (non-fatal): %s", co)
 
-    # Default camera == the "front" CAMERA_PRESETS pose (mirrors MuJoCo-GS).
-    # The app skips re-adding "front" since this creates it, so this default
-    # must stay in sync with CAMERA_PRESETS["front"]; render_demo renders it too.
-    pos = camera_position or [0.05, -0.95, 0.45]
-    tgt = camera_target or [0.05, 0.05, 0.18]
+    # Default camera == the "front" CAMERA_PRESETS pose. The app skips
+    # re-adding "front" since this creates it, so this default must stay in
+    # sync with CAMERA_PRESETS["front"]; render_demo renders it too.
+    pos = camera_position or [0.05, -1.25, 0.75]
+    tgt = camera_target or [0.05, 0.05, 0.40]
     ca = sim.add_camera(
         name=camera_name,
         position=pos,
