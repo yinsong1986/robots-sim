@@ -255,17 +255,42 @@ class IsaacGsApp:
     def _render_on_main(self, camera: str, wave: bool) -> "tuple[np.ndarray, str]":
         camera = camera if camera in self._cameras else (self._cameras[0] if self._cameras else "front")
         if wave and self._build and self._build.robot_joint_count > 0:
-            import math
-
-            jn = self._sim.robot_joint_names(self._build.robot_name)
-            if jn:
-                angle = 0.6 * math.sin(time.time())
-                self._sim.send_action({jn[0]: angle}, robot_name=self._build.robot_name)
-                self._sim.step(5)
+            self._wave_arm()
         frame = self._compositor.render(camera_name=camera)
         fg_px = int(frame.mask.sum())
         status = f"camera={camera} foreground_px={fg_px} size={frame.rgb.shape[1]}x{frame.rgb.shape[0]}"
         return frame.rgb, status
+
+    def _wave_arm(self) -> None:
+        """Swing the base joint so the arm visibly moves (for the wave button).
+
+        The bundled Franka USD loads without actuator drive gains, so joint
+        position *targets* (``send_action``) don't track -- the arm wouldn't
+        move. For a reliable visual wave we set the base joint position
+        directly (kinematic) via the articulation; this always moves the arm
+        and is stable (no PD overshoot). Falls back to ``send_action`` if the
+        articulation handle isn't reachable (e.g. a Phase-1 stub robot).
+        """
+        import math
+
+        name = self._build.robot_name
+        angle = 0.6 * math.sin(time.time())
+        robot = getattr(self._sim, "_robots", {}).get(name)
+        art = getattr(robot, "articulation", None) if robot is not None else None
+        if art is not None:
+            try:
+                cur = art.get_joint_positions()
+                arr = np.asarray(cur.cpu().numpy() if hasattr(cur, "cpu") else cur, dtype=float).copy()
+                arr[0] = angle
+                art.set_joint_positions(arr)
+                self._sim.step(2)
+                return
+            except Exception:  # noqa: BLE001 - fall back to the action API
+                pass
+        jn = self._sim.robot_joint_names(name)
+        if jn:
+            self._sim.send_action({jn[0]: angle}, robot_name=name)
+            self._sim.step(5)
 
     def _apply_pending_background(self) -> None:
         with self._bg_lock:
