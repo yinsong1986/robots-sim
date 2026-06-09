@@ -1688,11 +1688,18 @@ class IsaacSimulation(SimEngine):
         #
         #     focal_length = horizontal_aperture / (2 * tan(fov / 2))
         #
-        # USD's default horizontal aperture is 24 mm (Camera class
-        # default). The math is: tan(60deg/2) = tan(30) = 0.577,
-        # so 24 / (2 * 0.577) = 20.78 mm focal length for the
-        # default 60 deg FOV. ``Camera.set_focal_length`` takes mm.
-        horizontal_aperture_mm = 24.0
+        # The horizontal aperture MUST be the camera's actual aperture,
+        # read back from the prim -- assuming a nominal 24 mm is wrong on
+        # Isaac's Camera (its default aperture + unit convention yield
+        # fx≈6348 px at 640 px, i.e. a ~6° telephoto, instead of the
+        # intended 60° / fx≈554). Deriving the focal length from the
+        # read-back aperture makes the resulting pixel intrinsics
+        # fx = width / (2*tan(fov/2)) exactly, independent of the
+        # aperture's absolute value or units.
+        try:
+            horizontal_aperture_mm = float(camera.get_horizontal_aperture())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            horizontal_aperture_mm = 24.0
         focal_length_mm = horizontal_aperture_mm / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
         camera.set_focal_length(focal_length_mm)
 
