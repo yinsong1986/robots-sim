@@ -187,6 +187,21 @@ class IsaacGsApp:
         self._cameras: list[str] = []
         self._stop = threading.Event()
         self._serving = False
+        # The "current" camera the agent / chat drive (the live view + agent
+        # renders follow it). Buttons still pass their own camera explicitly.
+        self._ui_camera = default_camera
+
+    @property
+    def current_camera(self) -> str:
+        """The camera the agent/chat currently target."""
+        cam = self._ui_camera
+        if cam in self._cameras or not self._cameras:
+            return cam
+        return self._cameras[0]
+
+    def set_camera(self, view: str) -> None:
+        """Set the current agent/chat camera (validated against presets)."""
+        self._ui_camera = view
 
     # --- main-thread lifecycle ------------------------------------------
 
@@ -369,8 +384,13 @@ class IsaacGsApp:
                 pass
 
 
-def build_ui(app: IsaacGsApp):
-    """Construct the Gradio Blocks UI bound to an :class:`IsaacGsApp`."""
+def build_ui(app: IsaacGsApp, agent: "object | None" = None):
+    """Construct the Gradio Blocks UI bound to an :class:`IsaacGsApp`.
+
+    If ``agent`` (a Strands ``Agent``) is provided, a chat panel drives the
+    scene by natural language; otherwise the chat panel is shown disabled and
+    the buttons still work.
+    """
     import gradio as gr
 
     from examples.isaac_gs.scene import CAMERA_PRESETS
@@ -393,49 +413,93 @@ def build_ui(app: IsaacGsApp):
     with gr.Blocks(title="Isaac Sim + 3DGS hybrid render") as demo:
         gr.Markdown(
             "# Isaac Sim + 3DGS hybrid render\n"
-            "An RTX-rendered **simulated** Franka composited into a photoreal "
-            "background — by default a real captured **3D Gaussian Splatting** "
-            "scene (the digital-twin use case), falling back to a procedural "
-            "panorama if `gsplat` isn't installed. "
-            "A **live MJPEG view** streams the composite hands-free (Isaac RTX "
-            "isn't real-time, so it runs at a few fps); the buttons grab a "
-            "full-res still on demand. Isaac Sim boots once at startup (~200 s)."
+            "An RTX-rendered **simulated** Franka composited into a real captured "
+            "**3D Gaussian Splatting** room (the digital-twin use case). A **live "
+            "MJPEG view** streams the composite hands-free; the buttons grab a "
+            "full-res still. Type commands to the **agent** on the right (e.g. "
+            "*“switch to topdown and wave”*, *“use the bonsai background”*)."
         )
         initial_camera = app.default_camera if app.default_camera in CAMERA_PRESETS else "oblique"
         with gr.Row():
             with gr.Column(scale=3):
-                # Live MJPEG view (hands-free, near real-time) + a full-res
-                # still you can grab on demand with the buttons below.
+                # Live MJPEG view (hands-free) + a full-res still on demand.
                 live_view = gr.HTML(_live_img_html(initial_camera))
-                preview = gr.Image(label="Composite still (Isaac RTX + 3DGS)", height=480)
-            with gr.Column(scale=1):
-                camera_dd = gr.Dropdown(
-                    choices=list(CAMERA_PRESETS.keys()),
-                    value=initial_camera,
-                    label="Camera",
-                )
-                bg_dd = gr.Dropdown(choices=bg_choices, value=default_bg, label="Background")
-                ply_upload = gr.File(label="3DGS .ply upload (with 'uploaded .ply')", file_types=[".ply"])
-                apply_bg_btn = gr.Button("Apply background")
-                render_btn = gr.Button("Render still", variant="primary")
-                wave_btn = gr.Button("Wave + render")
+                preview = gr.Image(label="Composite still (Isaac RTX + 3DGS)", height=420)
+                with gr.Row():
+                    camera_dd = gr.Dropdown(
+                        choices=list(CAMERA_PRESETS.keys()), value=initial_camera, label="Camera", scale=2
+                    )
+                    render_btn = gr.Button("Render still", variant="primary")
+                    wave_btn = gr.Button("Wave + render")
+                with gr.Accordion("Background", open=False):
+                    bg_dd = gr.Dropdown(choices=bg_choices, value=default_bg, label="Background")
+                    ply_upload = gr.File(label="3DGS .ply upload (with 'uploaded .ply')", file_types=[".ply"])
+                    apply_bg_btn = gr.Button("Apply background")
                 status = gr.Textbox(label="status", interactive=False)
+            with gr.Column(scale=2):
+                chat_label = "Agent" if agent is not None else "Agent (disabled — no LLM backend)"
+                # Gradio's Chatbot message format: newer versions (>=5) use the
+                # OpenAI-style {"role","content"} list and dropped the ``type``
+                # kwarg; older ones need type="messages". Feature-test so the UI
+                # builds on either.
+                try:
+                    chatbot = gr.Chatbot(label=chat_label, type="messages", height=480)
+                except TypeError:
+                    chatbot = gr.Chatbot(label=chat_label, height=480)
+                msg_box = gr.Textbox(
+                    label="Message",
+                    placeholder="e.g. 'switch to topdown and wave' / 'use the bonsai background'",
+                    lines=2,
+                )
+                with gr.Row():
+                    send_btn = gr.Button("Send", variant="primary")
+                    clear_btn = gr.Button("Clear")
 
         def on_render(cam):
+            app.set_camera(cam)
             return app.render_once(camera=cam, wave=False)
 
         def on_wave(cam):
+            app.set_camera(cam)
             return app.render_once(camera=cam, wave=True)
 
         def on_apply_bg(choice, ply_file):
             ply_path = ply_file.name if ply_file is not None else None
             return app.set_background(choice=choice, ply_upload=ply_path)
 
+        def on_chat(message, history):
+            history = list(history or [])
+            if not message or not message.strip():
+                return "", history, gr.update(), gr.update(), gr.update()
+            history.append({"role": "user", "content": message})
+            if agent is None:
+                history.append(
+                    {"role": "assistant", "content": "Agent chat is disabled (no LLM backend configured)."}
+                )
+                return "", history, gr.update(), gr.update(), gr.update()
+            from examples.isaac_gs.agent import extract_text
+
+            try:
+                reply = extract_text(agent(message)) or "(done)"
+            except Exception as exc:  # noqa: BLE001
+                reply = f"agent error: {type(exc).__name__}: {exc}"
+            history.append({"role": "assistant", "content": reply})
+            cam = app.current_camera
+            try:
+                frame, _status = app.render_once(camera=cam)
+            except Exception:  # noqa: BLE001
+                frame = gr.update()
+            return "", history, frame, _live_img_html(cam), cam
+
         render_btn.click(on_render, inputs=[camera_dd], outputs=[preview, status])
         wave_btn.click(on_wave, inputs=[camera_dd], outputs=[preview, status])
         apply_bg_btn.click(on_apply_bg, inputs=[bg_dd, ply_upload], outputs=[status])
         # Point the live MJPEG <img> at the newly selected camera.
-        camera_dd.change(lambda cam: _live_img_html(cam), inputs=[camera_dd], outputs=[live_view])
+        camera_dd.change(lambda cam: (_live_img_html(cam), app.set_camera(cam))[0], inputs=[camera_dd], outputs=[live_view])
+        chat_io = dict(inputs=[msg_box, chatbot], outputs=[msg_box, chatbot, preview, live_view, camera_dd])
+        send_btn.click(on_chat, **chat_io)
+        msg_box.submit(on_chat, **chat_io)
+        clear_btn.click(lambda: [], outputs=[chatbot])
 
     return demo
 
@@ -455,6 +519,12 @@ def main(argv: "list[str] | None" = None) -> None:
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7862, help="Default 7862 (7860/7861 are mujoco_gs).")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio share link.")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Strands model id for the chat agent (e.g. a Bedrock model). Default: Strands' default.",
+    )
+    parser.add_argument("--no-agent", action="store_true", help="Disable the chat agent (buttons-only UI).")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -468,7 +538,18 @@ def main(argv: "list[str] | None" = None) -> None:
         width=args.width,
         height=args.height,
     )
-    demo = build_ui(app)
+
+    # Build the natural-language agent (optional: degrades to a buttons-only UI
+    # if strands-agents / an LLM backend isn't available).
+    agent = None
+    if not args.no_agent:
+        try:
+            from examples.isaac_gs.agent import build_agent
+
+            agent = build_agent(app, model_id=args.model)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Agent unavailable (%s); running buttons-only UI.", exc)
+    demo = build_ui(app, agent=agent)
 
     # MJPEG live-stream route. Streams near-real-time JPEG frames over a single
     # long-lived HTTP response (the <img> in the UI renders them incrementally),
