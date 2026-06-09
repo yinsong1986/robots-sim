@@ -43,12 +43,15 @@ CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
 
 # SO-101 (SO-ARM100) tabletop arm: a much smaller (~0.4 m) robot than the
 # Franka, imported from the MuJoCo Menagerie MJCF (the URDF import doesn't
-# render in RTX). Its gravity-settled default pose centres ~[0,-0.18,-0.03]
-# and extends along -Y; these eyes (~1.2 m, aimed there) frame it reliably.
+# render in RTX). The display USD holds the upright "home" pose via joint
+# drives (centre ~[0,-0.12,0.12]). It renders empty at close range, so instead
+# of moving in we keep the eye ~1.1 m back and use a NARROW fov (~30 deg) to
+# zoom -- that enlarges the small arm to a centred hero shot while the 3DGS
+# room still fills the frame.
 SO101_CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
-    "oblique": ([0.94, -1.0, 0.56], [0.0, -0.18, -0.03], 48.0),
-    "front": ([0.0, -1.35, 0.38], [0.0, -0.18, -0.03], 50.0),
-    "topdown": ([0.2, -1.0, 0.78], [0.0, -0.18, -0.03], 50.0),
+    "oblique": ([0.8, -0.9, 0.58], [0.0, -0.12, 0.12], 30.0),
+    "front": ([0.0, -1.15, 0.46], [0.0, -0.12, 0.12], 30.0),
+    "topdown": ([0.12, -0.85, 0.9], [0.0, -0.12, 0.10], 33.0),
 }
 
 
@@ -107,6 +110,7 @@ def build_default_scene(
     camera_target: "list[float] | None" = None,
     camera_width: int = 640,
     camera_height: int = 480,
+    camera_fov: float = 58.0,
 ) -> SceneBuild:
     """Build the demo scene on a fresh ``IsaacSimulation``.
 
@@ -183,7 +187,7 @@ def build_default_scene(
         target=tgt,
         width=camera_width,
         height=camera_height,
-        fov=58.0,
+        fov=camera_fov,
     )
     if ca.get("status") != "success":
         raise RuntimeError(f"add_camera({camera_name!r}) failed: {ca}")

@@ -235,6 +235,8 @@ class IsaacGsApp:
         if front:
             bd_kwargs["camera_position"] = list(front[0])
             bd_kwargs["camera_target"] = list(front[1])
+            if len(front) > 2:
+                bd_kwargs["camera_fov"] = float(front[2])
         self._build = build_default_scene(sim, **bd_kwargs)
         self._cameras = add_preset_cameras(sim, width=self.width, height=self.height, presets=presets)
         self._compositor = IsaacHybridCompositor(sim, background=self._make_background())
