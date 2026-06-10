@@ -1117,6 +1117,11 @@ def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, M
     viewports_mod = MagicMock()
     stage_mod = MagicMock()
     camera_handle = MagicMock(name="Camera_handle")
+    # add_camera derives focal length from the camera's *actual* horizontal
+    # aperture (read back via get_horizontal_aperture), so the mock must report
+    # a real number -- otherwise float(MagicMock()) defaults to 1.0. USD's
+    # nominal 24 mm keeps the pinhole relation assertions below meaningful.
+    camera_handle.get_horizontal_aperture.return_value = 24.0
     sensor_mod.Camera.return_value = camera_handle
     return sensor_mod, viewports_mod, stage_mod, camera_handle
 
