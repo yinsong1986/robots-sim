@@ -91,7 +91,7 @@ def _live_img_html(camera: str) -> str:
 <div style="border:2px solid #4a90d9; border-radius:8px; padding:6px; background:#0b0b0b;
             max-width:{LIVE_W + 16}px; margin:0 auto;">
   <div style="color:#9cc; font-size:13px; margin-bottom:4px;">
-    <span style="color:#e33;">&#9679;</span> Live view &mdash; {camera} (Isaac RTX + 3DGS, near real-time MJPEG)
+    <span style="color:#e33;">&#9679;</span> Live view (Isaac RTX + 3DGS, near real-time) &mdash; follows the camera selector / agent
   </div>
   <img src="/live?camera={camera}&t={bust}"
        style="width:100%; aspect-ratio:{LIVE_W} / {LIVE_H}; height:auto; display:block;
@@ -109,7 +109,10 @@ def _mjpeg_frames(app: "IsaacGsApp", camera: str):
     (the same render queue the buttons use), keeping the RTX context
     thread-affine. We only drive renders once the main-thread serve loop is
     live -- rendering Isaac off the main thread (pre-serve) is unsafe -- and
-    block-render one frame at a time, so the queue never backs up.
+    block-render one frame at a time, so the queue never backs up. The stream
+    follows ``app.current_camera`` (driven by the dropdown / agent) so it never
+    needs to reconnect when the view changes -- it's one persistent stream that
+    is never a Gradio event output, hence never greyed out during processing.
     """
     import io
 
@@ -122,7 +125,7 @@ def _mjpeg_frames(app: "IsaacGsApp", camera: str):
             t0 = time.time()
             if getattr(app, "_serving", False):
                 try:
-                    rgb, _status = app.render_once(camera=camera)
+                    rgb, _status = app.render_once(camera=app.current_camera)
                     im = Image.fromarray(np.asarray(rgb)[:, :, :3].astype(np.uint8))
                     if im.size != (LIVE_W, LIVE_H):
                         im = im.resize((LIVE_W, LIVE_H))
@@ -489,11 +492,11 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None):
         def on_chat(message, history):
             history = list(history or [])
             if not message or not message.strip():
-                return "", history, gr.update(), gr.update(), gr.update()
+                return "", history, gr.update(), gr.update()
             history.append({"role": "user", "content": message})
             if agent is None:
                 history.append({"role": "assistant", "content": "Agent chat is disabled (no LLM backend configured)."})
-                return "", history, gr.update(), gr.update(), gr.update()
+                return "", history, gr.update(), gr.update()
             from examples.isaac_gs.agent import extract_text
 
             try:
@@ -506,16 +509,17 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None):
                 frame, _status = app.render_once(camera=cam)
             except Exception:  # noqa: BLE001
                 frame = gr.update()
-            return "", history, frame, _live_img_html(cam), cam
+            return "", history, frame, cam
 
         render_btn.click(on_render, inputs=[camera_dd], outputs=[preview, status])
         wave_btn.click(on_wave, inputs=[camera_dd], outputs=[preview, status])
         apply_bg_btn.click(on_apply_bg, inputs=[bg_dd, ply_upload], outputs=[status])
-        # Point the live MJPEG <img> at the newly selected camera.
-        camera_dd.change(
-            lambda cam: (_live_img_html(cam), app.set_camera(cam))[0], inputs=[camera_dd], outputs=[live_view]
-        )
-        chat_io = dict(inputs=[msg_box, chatbot], outputs=[msg_box, chatbot, preview, live_view, camera_dd])
+        # The live MJPEG stream follows app.current_camera, so the dropdown just
+        # updates that. We deliberately do NOT output to live_view: the <img> is
+        # never recreated (no reconnect) and is never a Gradio event output, so
+        # it keeps streaming and never greys out while a chat turn processes.
+        camera_dd.change(lambda cam: app.set_camera(cam), inputs=[camera_dd], outputs=[])
+        chat_io = dict(inputs=[msg_box, chatbot], outputs=[msg_box, chatbot, preview, camera_dd])
         send_btn.click(on_chat, **chat_io)
         msg_box.submit(on_chat, **chat_io)
         clear_btn.click(lambda: [], outputs=[chatbot])
