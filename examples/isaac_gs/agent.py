@@ -31,8 +31,11 @@ def _scene_names() -> list:
         return []
 
 
-def build_agent(app, model_id: Optional[str] = None) -> Any:
+def build_agent(app, model_id: Optional[str] = None, robot_label: str = "robot arm") -> Any:
     """Build a Strands ``Agent`` bound to an :class:`IsaacGsApp`.
+
+    ``robot_label`` names the loaded arm (e.g. "SO-101" or "Franka") so the
+    agent describes the scene truthfully.
 
     Returns ``None`` (chat disabled) if ``strands-agents`` or the LLM backend
     isn't available, so the rest of the app still runs.
@@ -75,30 +78,43 @@ def build_agent(app, model_id: Optional[str] = None) -> Any:
         return msg
 
     @tool
+    def spawn_cube(color: str = "red") -> str:
+        """Add a small colored cube to the scene in front of the arm, then re-render.
+
+        ``color`` is a common name: red, green, blue, yellow, orange, purple,
+        white, or black. The cube is static (it stays put in the workspace).
+        """
+        msg = app.spawn_cube(color=color)
+        app.render_once(camera=app.current_camera)
+        return msg
+
+    @tool
     def describe_scene() -> str:
         """Describe what's in the scene (robot, cameras, available backgrounds)."""
         return (
-            "A simulated Franka arm on a tabletop, composited live over a photoreal "
+            f"A simulated {robot_label} on a tabletop, composited live over a photoreal "
             f"3D Gaussian Splatting room. Cameras: {', '.join(cameras)}. "
             f"3DGS scenes: {', '.join(scenes) or 'none'}. Current camera: {app.current_camera}."
         )
 
     system_prompt = (
         "You control an Isaac Sim + 3D Gaussian Splatting (3DGS) robotics demo. A "
-        "simulated Franka arm sits on a tabletop, composited LIVE over a photoreal "
-        "3DGS room. The scene is ALREADY built -- never try to create, reset, or "
-        "destroy it.\n\n"
+        f"simulated {robot_label} sits on a tabletop, composited LIVE over a photoreal "
+        "3DGS room. The scene is ALREADY built -- never rebuild, reset, or destroy it "
+        "(you may add a cube with spawn_cube, but do not recreate the world or arm).\n\n"
         "Drive it with these tools ONLY:\n"
         f"  - move_camera(view): one of {cameras}.\n"
         "  - wave_arm(): the arm waves.\n"
         f"  - change_background(scene): a 3DGS scene {scenes} or 'procedural panorama'.\n"
+        "  - spawn_cube(color): drop a small static colored cube into the scene.\n"
         "  - describe_scene(): a short summary.\n\n"
         "Keep replies SHORT (one or two sentences). Call at most one or two tools per "
-        "turn. If a request isn't supported by a tool, say so briefly. Be concise."
+        f"turn. Refer to the robot as the {robot_label}. If a request isn't supported by "
+        "a tool, say so briefly. Be concise."
     )
 
     kwargs: dict = {
-        "tools": [move_camera, wave_arm, change_background, describe_scene],
+        "tools": [move_camera, wave_arm, change_background, spawn_cube, describe_scene],
         "system_prompt": system_prompt,
     }
     if model_id:

@@ -48,10 +48,23 @@ CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
 # of moving in we keep the eye ~1.1 m back and use a NARROW fov (~30 deg) to
 # zoom -- that enlarges the small arm to a centred hero shot while the 3DGS
 # room still fills the frame.
+#
+# Azimuth note: the arm's base sits on the -Y (room) side and its working face
+# (gripper opening + coloured servo detail) points toward the -X/-Y quadrant.
+# A camera due -Y therefore looks at the arm's BACK, so "front" is authored
+# from the -X,-Y side (the arm's actual front) and "oblique" from +X,-Y (a 3/4
+# from the opposite side) so the two presets show genuinely different angles.
+# "topdown" note: the 3DGS room was captured at eye level, so a true nadir
+# floats the arm over the (downward-ray) floor and the base projects past the
+# counter edge -- it can't composite cleanly. A steep angle that looks down the
+# arm's length also self-occludes the base (only the gripper shows). So
+# "topdown" is an ELEVATED BROADSIDE view (oblique's +X,-Y azimuth, raised to
+# z~0.70): high enough to read as looking down, but it still sees the whole arm
+# base->gripper grounded on the counter.
 SO101_CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
-    "oblique": ([0.8, -0.9, 0.58], [0.0, -0.12, 0.12], 30.0),
-    "front": ([0.0, -1.15, 0.46], [0.0, -0.12, 0.12], 30.0),
-    "topdown": ([0.12, -0.85, 0.9], [0.0, -0.12, 0.10], 33.0),
+    "oblique": ([0.8, -0.9, 0.58], [0.0, -0.12, 0.12], 34.0),
+    "front": ([-0.6, -1.0, 0.46], [0.0, -0.12, 0.12], 33.0),
+    "topdown": ([0.84, -0.88, 0.70], [0.0, -0.11, 0.15], 36.0),
 }
 
 

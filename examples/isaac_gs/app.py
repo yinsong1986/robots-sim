@@ -145,15 +145,22 @@ def _mjpeg_frames(app: "IsaacGsApp", camera: str):
 
 
 class _RenderRequest:
-    """A render job marshalled from a Gradio worker to the main thread."""
+    """A job marshalled from a Gradio worker to Isaac's main thread.
 
-    __slots__ = ("camera", "wave", "done", "result", "error")
+    Usually a render (``camera`` + ``wave``). If ``op`` is set, the serve
+    loop runs that callable on the main thread instead and stores its return
+    value in ``result`` -- this is how stage mutations that MUST run on the
+    main thread (e.g. ``add_object``) are marshalled, mirroring renders.
+    """
 
-    def __init__(self, camera: str, wave: bool) -> None:
+    __slots__ = ("camera", "wave", "op", "done", "result", "error")
+
+    def __init__(self, camera: str = "oblique", wave: bool = False, op=None) -> None:
         self.camera = camera
         self.wave = wave
+        self.op = op
         self.done = threading.Event()
-        self.result: "tuple[np.ndarray, str] | None" = None
+        self.result: "object | None" = None
         self.error: "Exception | None" = None
 
 
@@ -199,6 +206,8 @@ class IsaacGsApp:
         # The "current" camera the agent / chat drive (the live view + agent
         # renders follow it). Buttons still pass their own camera explicitly.
         self._ui_camera = default_camera
+        self._spawn_count = 0
+        self._rest_joints = None
 
     @property
     def current_camera(self) -> str:
@@ -278,7 +287,10 @@ class IsaacGsApp:
                     continue
                 try:
                     self._apply_pending_background()
-                    req.result = self._render_on_main(req.camera, req.wave)
+                    if req.op is not None:
+                        req.result = req.op()
+                    else:
+                        req.result = self._render_on_main(req.camera, req.wave)
                 except Exception as exc:  # noqa: BLE001 - surfaced to caller
                     req.error = exc
                 finally:
@@ -299,26 +311,42 @@ class IsaacGsApp:
         return frame.rgb, status
 
     def _wave_arm(self) -> None:
-        """Swing the base joint so the arm visibly moves (for the wave button).
+        """Move a joint so the arm visibly "waves" while staying fully in frame.
 
-        The bundled Franka USD loads without actuator drive gains, so joint
-        position *targets* (``send_action``) don't track -- the arm wouldn't
-        move. For a reliable visual wave we set the base joint position
-        directly (kinematic) via the articulation; this always moves the arm
-        and is stable (no PD overshoot). Falls back to ``send_action`` if the
-        articulation handle isn't reachable (e.g. a Phase-1 stub robot).
+        The robot USDs load without actuator drive gains that track position
+        *targets* (``send_action``), so for a reliable visual we set joint
+        positions directly (kinematic) via the articulation, oscillating ONE
+        joint around the captured rest pose:
+
+        * SO-101: the ELBOW. A base pan rotates the whole arm toward the camera
+          and foreshortens it -- in the tight front view that clips the arm to a
+          partial sliver (the reported bug). The elbow swings the forearm
+          *within* the broadside plane, so the arm stays fully framed in every
+          preset while still clearly moving.
+        * Franka (bundled fallback): the base joint, as before.
+
+        Falls back to ``send_action`` if the articulation handle isn't reachable.
         """
         import math
 
         name = self._build.robot_name
-        angle = 0.6 * math.sin(time.time())
+        # SO-101 (custom presets) waves the elbow; the bundled Franka waves base.
+        wave_joint = 2 if self.camera_presets else 0
+        amp = 0.22 if self.camera_presets else 0.3
+        delta = amp * math.sin(time.time())
         robot = getattr(self._sim, "_robots", {}).get(name)
         art = getattr(robot, "articulation", None) if robot is not None else None
         if art is not None:
             try:
                 cur = art.get_joint_positions()
                 arr = np.asarray(cur.cpu().numpy() if hasattr(cur, "cpu") else cur, dtype=float).copy()
-                arr[0] = angle
+                # Capture the rest pose once and always oscillate around it (the
+                # live view doesn't step physics back to home between waves, so
+                # reading "current" would let the pose drift).
+                if self._rest_joints is None or len(self._rest_joints) != len(arr):
+                    self._rest_joints = arr.copy()
+                j = wave_joint if wave_joint < len(arr) else 0
+                arr[j] = float(self._rest_joints[j]) + delta
                 art.set_joint_positions(arr)
                 self._sim.step(2)
                 return
@@ -326,7 +354,9 @@ class IsaacGsApp:
                 pass
         jn = self._sim.robot_joint_names(name)
         if jn:
-            self._sim.send_action({jn[0]: angle}, robot_name=name)
+            j = wave_joint if wave_joint < len(jn) else 0
+            base = float(self._rest_joints[j]) if self._rest_joints is not None and j < len(self._rest_joints) else 0.0
+            self._sim.send_action({jn[j]: base + delta}, robot_name=name)
             self._sim.step(5)
 
     def _apply_pending_background(self) -> None:
@@ -377,6 +407,98 @@ class IsaacGsApp:
         assert req.result is not None
         return req.result
 
+    def _run_on_main(self, op, timeout: float = 120.0):
+        """Run ``op`` on Isaac's main thread (or inline if not serving).
+
+        Stage mutations (e.g. ``add_object``) MUST run on the thread that owns
+        the RTX/USD context, so we marshal them through the same queue the
+        renders use rather than touching the stage from a Gradio worker.
+        """
+        if not self._serving:
+            self._apply_pending_background()
+            return op()
+        req = _RenderRequest(op=op)
+        self._queue.put(req)
+        if not req.done.wait(timeout=timeout):
+            raise TimeoutError(f"main-thread op timed out after {timeout}s")
+        if req.error is not None:
+            raise req.error
+        return req.result
+
+    def spawn_cube(self, color: str = "red", position: "list[float] | None" = None, size: float = 0.04) -> str:
+        """Add a small **static** colored cube to the live scene.
+
+        Marshalled onto the main thread via :meth:`_run_on_main`. The cube is
+        static because the digital-twin composite has no ground plane (the 3DGS
+        room is the visible floor) -- a dynamic cube would fall through it.
+        ``position`` defaults to the current camera's look-at point so the cube
+        lands in frame; ``color`` is a common name.
+        """
+        if self._sim is None:
+            return "Scene isn't ready yet."
+        colors = {
+            "red": [0.85, 0.12, 0.12],
+            "green": [0.12, 0.70, 0.20],
+            "blue": [0.15, 0.35, 0.90],
+            "yellow": [0.95, 0.85, 0.10],
+            "orange": [0.95, 0.50, 0.10],
+            "purple": [0.60, 0.20, 0.80],
+            "white": [0.90, 0.90, 0.90],
+            "black": [0.08, 0.08, 0.08],
+        }
+        cname = (color or "red").strip().lower()
+        rgb = colors.get(cname)
+        if rgb is None:
+            cname, rgb = "red", colors["red"]
+        self._spawn_count += 1
+        name = f"cube_{self._spawn_count}"
+        pos = [float(p) for p in position] if position is not None else self._default_object_pos()
+
+        def _op():
+            r = self._sim.add_object(
+                name=name,
+                shape="box",
+                position=pos,
+                size=[size, size, size],
+                color=rgb,
+                mass=0.1,
+                is_static=True,
+            )
+            # The live render path only READS each camera's RTX render
+            # product; it's refreshed when the sim steps. A freshly-created
+            # USD prim also needs an update tick to flush onto the render
+            # stage, so a single step renders the stage *before* the cube is
+            # realized. Step a few times so the new prim is flushed AND
+            # accumulated into every camera's product before the next read.
+            self._sim.step(6)
+            return r
+
+        r = self._run_on_main(_op)
+        if not (isinstance(r, dict) and r.get("status") == "success"):
+            text = r
+            if isinstance(r, dict):
+                try:
+                    text = r.get("content", [{}])[0].get("text", "") or r
+                except Exception:  # noqa: BLE001
+                    text = r
+            return f"Couldn't add the cube: {text}"
+        return f"Added a {cname} cube ({name}) at {[round(p, 2) for p in pos]}."
+
+    def _default_object_pos(self) -> "list[float]":
+        """A validated, in-frame spawn point on the workspace surface.
+
+        The 3DGS "counter" the arm sits on is at z~=0.09 (not the world floor),
+        so cubes need that height to rest on it rather than sink onto the
+        cabinet faces below. SO-101 gets a spot front-right of the arm (clear of
+        it, visible from every preset); Franka mirrors its startup cube. A small
+        per-spawn x-jitter keeps repeated cubes from stacking exactly.
+        """
+        base = [0.20, -0.20, 0.10] if self.camera_presets else [0.40, 0.0, 0.40]
+        # Cycle x over {0.15, 0.20, 0.25} (1-based spawn count) so repeated
+        # cubes sit side-by-side on the counter instead of stacking.
+        jitter = 0.05 * ((self._spawn_count - 1) % 3 - 1)
+        return [base[0] + jitter, base[1], base[2]]
+
     def set_background(self, choice: str, ply_upload: Optional[str] = None) -> str:
         """Queue a background swap; applied on the main thread before the next render.
 
@@ -406,12 +528,13 @@ class IsaacGsApp:
                 pass
 
 
-def build_ui(app: IsaacGsApp, agent: "object | None" = None):
+def build_ui(app: IsaacGsApp, agent: "object | None" = None, robot_label: str = "robot arm"):
     """Construct the Gradio Blocks UI bound to an :class:`IsaacGsApp`.
 
     If ``agent`` (a Strands ``Agent``) is provided, a chat panel drives the
     scene by natural language; otherwise the chat panel is shown disabled and
-    the buttons still work.
+    the buttons still work. ``robot_label`` names the loaded arm (e.g.
+    "SO-101 arm" / "Franka arm") so the header matches what's on screen.
     """
     import gradio as gr
 
@@ -435,7 +558,7 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None):
     with gr.Blocks(title="Isaac Sim + 3DGS hybrid render") as demo:
         gr.Markdown(
             "# Isaac Sim + 3DGS hybrid render\n"
-            "An RTX-rendered **simulated** Franka composited into a real captured "
+            f"An RTX-rendered **simulated {robot_label}** composited into a real captured "
             "**3D Gaussian Splatting** room (the digital-twin use case). A **live "
             "MJPEG view** streams the composite hands-free; the buttons grab a "
             "full-res still. Type commands to the **agent** on the right (e.g. "
@@ -568,14 +691,17 @@ def main(argv: "list[str] | None" = None) -> None:
     # own (smaller-arm) camera presets.
     robot_usd = None
     camera_presets = None
+    robot_label = "Franka arm"
     if args.robot == "so101":
         from examples.isaac_gs.scene import SO101_CAMERA_PRESETS
 
         robot_usd = args.robot_usd
         camera_presets = SO101_CAMERA_PRESETS
+        robot_label = "SO-101 arm"
         if not robot_usd:
             logger.warning("--robot so101 needs --robot-usd; falling back to the bundled Franka.")
             camera_presets = None
+            robot_label = "Franka arm"
 
     app = IsaacGsApp(
         default_camera=args.camera,
@@ -595,10 +721,10 @@ def main(argv: "list[str] | None" = None) -> None:
         try:
             from examples.isaac_gs.agent import build_agent
 
-            agent = build_agent(app, model_id=args.model)
+            agent = build_agent(app, model_id=args.model, robot_label=robot_label)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Agent unavailable (%s); running buttons-only UI.", exc)
-    demo = build_ui(app, agent=agent)
+    demo = build_ui(app, agent=agent, robot_label=robot_label)
 
     # MJPEG live-stream route. Streams near-real-time JPEG frames over a single
     # long-lived HTTP response (the <img> in the UI renders them incrementally),
