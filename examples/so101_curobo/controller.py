@@ -31,6 +31,35 @@ from .scene import build_pick_place_scene, make_sim
 logger = logging.getLogger("so101_curobo.controller")
 
 
+class _FallbackPlanner:
+    """Wrap a primary planner; fall back to ScriptedPlanner if it raises.
+
+    Keeps the demo robust when cuRobo is installed but a specific pick-place
+    pose is infeasible for the 5-DOF SO-101 (a known calibration gap -- see
+    README #67 T5): the arm still moves and an episode is still recorded.
+    """
+
+    def __init__(self, primary):
+        self.primary = primary
+        self.name = getattr(primary, "name", "planner")
+        self._scripted = None
+
+    def plan_pick_place(self, **kwargs):
+        try:
+            return self.primary.plan_pick_place(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - infeasible/unreachable -> fallback
+            if self._scripted is None:
+                from .planner import ScriptedPlanner
+
+                self._scripted = ScriptedPlanner()
+            logger.warning(
+                "%s planning failed (%s); using scripted fallback.", getattr(self.primary, "name", "?"), str(exc)[:140]
+            )
+            self.name = f"scripted(fallback from {getattr(self.primary, 'name', '?')})"
+            scripted_keys = ("joint_names", "start_q", "gripper_joint", "cube_xy", "place_xy", "steps_per_phase")
+            return self._scripted.plan_pick_place(**{k: v for k, v in kwargs.items() if k in scripted_keys})
+
+
 class SO101CuroboDemo:
     """Backend-agnostic SO-101 pick-and-place + synthetic-data controller."""
 
@@ -43,6 +72,7 @@ class SO101CuroboDemo:
         fps: int = 20,
         camera_size: tuple = (320, 240),
         record_images: bool = True,
+        planner_kwargs: Optional[dict] = None,
     ):
         self.backend = backend
         self.repo_id = repo_id
@@ -51,6 +81,8 @@ class SO101CuroboDemo:
         self.fps = fps
         self.camera_size = camera_size
         self.record_images = record_images
+        # Extra kwargs forwarded to make_planner (e.g. cuRobo urdf_path/asset_path).
+        self.planner_kwargs = dict(planner_kwargs or {})
 
         self._lock = threading.RLock()
         self.sim = None
@@ -79,7 +111,9 @@ class SO101CuroboDemo:
                     raise
             self.backend = backend
             self.scene = build_pick_place_scene(self.sim, camera_size=self.camera_size, backend=backend)
-            self.planner = make_planner(prefer=self.prefer_planner, robot_cfg="so101")
+            self.planner = _FallbackPlanner(
+                make_planner(prefer=self.prefer_planner, robot_cfg="so101", **self.planner_kwargs)
+            )
             self.collector = LeRobotDataCollector(
                 self.sim,
                 self.scene,

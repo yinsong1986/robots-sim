@@ -20,7 +20,7 @@ joint targets and the executor/collector speak the `SimEngine` surface, so the
 | Scripted joint-space pick-and-place planner | ✅ works now (demonstrative motion; grasps not guaranteed) |
 | CPU/CI smoke (state+action, no GL) | ✅ `smoke_test.py` |
 | Strands agent + Gradio UI | ✅ works now (buttons always; chat needs an LLM backend) |
-| **cuRobo** collision-aware planning | ⛔ lazy-imported; cuRobo not installed (issue #67 T3/T4/T5) |
+| **cuRobo** collision-aware planning | ✅ **installs + plans on driver 550 (validated, #67 T3/T4/T5)**; selected via `--planner curobo`. The 5-DOF SO-101 can't hit arbitrary 6-DOF grasp poses, so the tabletop pick-place currently **falls back to the scripted planner** (see T5 note below). |
 | **Isaac Sim** backend (`--backend isaac`) | ⛔ falls back to MuJoCo until the runtime + `create_simulation("isaac")` (T1) are present |
 
 Missing cuRobo / Isaac / lerobot / LLM each disable only their own feature with
@@ -74,11 +74,28 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
 - **Isaac:** `--backend isaac` calls `create_simulation("isaac", render_mode="rtx_realtime")`.
   Needs the Isaac Sim runtime (~30 GB) and backend registration (#67 **T1**), plus a
   faithful SO-101 USD via `add_robot(usd_path=...)` (**T2**). Falls back to MuJoCo otherwise.
-- **cuRobo:** `--planner curobo`. Install per the
-  [cuRobo docs](https://nvlabs.github.io/curobo/latest/getting-started/installation.html)
-  (driver ≥ 580 for the latest release — **T3**), author the SO-101 robot YAML (**T4**),
-  and wire `CuroboMotionPlanner._ensure()` (`MotionGen` warmup + world sync, **T5**).
-  Until then `make_planner()` returns the scripted fallback.
+- **cuRobo:** `--planner curobo` (+ `--curobo-urdf` / `SO101_URDF`). **Validated on
+  driver 550 / CUDA 12.4 / L4** (the docs' driver ≥ 580 is conservative — CUDA 12.x
+  kernels run on a 12.4 driver). Install recipe:
+  ```bash
+  export CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST=8.9
+  python -m venv --system-site-packages .venv && source .venv/bin/activate
+  pip install -U pip setuptools wheel ninja
+  git clone --depth 1 https://github.com/NVlabs/curobo && cd curobo
+  sed -i '/Topic :: Scientific\/Engineering :: Robotics/d' pyproject.toml  # newer setuptools rejects it
+  pip install -e . --no-build-isolation
+  pip install 'cuda-core[cu12]'   # the refactored cuRobo's runtime kernel backend (required)
+  ```
+  `CuroboMotionPlanner` builds the SO-101 model from a URDF via the new
+  `RobotBuilder` (T4, auto-derives the 5-DOF arm chain to `gripper_frame_link`)
+  and plans EEF pose-to-pose trajectories with `MotionPlanner.plan_pose` (T5,
+  validated: 41-waypoint collision-free plans).
+  **5-DOF caveat:** the SO-101 has 5 arm DOF and cannot achieve arbitrary 6-DOF
+  grasp poses, so fully-constrained tabletop pick-place poses are often
+  infeasible — the demo logs this and falls back to the scripted planner.
+  Finishing a real cuRobo grasp needs position-priority / joint-limit-aware IK
+  (or a `plan_cspace` joint goal from a valid grasp config); that's the
+  remaining T5 refinement.
 
 ## Issue #67 task mapping
 
@@ -86,9 +103,9 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
 |---|---|---|
 | T1 backend registration | `scene.make_sim("isaac")` | stub + clear error |
 | T2 faithful SO-101 asset | `add_robot(usd_path=...)` hook | MuJoCo SO-101 used now |
-| T3 cuRobo install validation | `planner.CUROBO_INSTALL_HINT` | documented |
-| T4 cuRobo SO-101 config | `CuroboMotionPlanner` | TODO (needs cuRobo) |
-| T5 `CuroboMotionPlanner` | `planner.py` | lazy wrapper + hint |
+| T3 cuRobo install validation | `planner.CUROBO_INSTALL_HINT` | ✅ validated on driver 550 (recipe above) |
+| T4 cuRobo SO-101 config | `CuroboMotionPlanner._ensure` (`RobotBuilder`) | ✅ builds the 5-DOF model from URDF |
+| T5 `CuroboMotionPlanner` | `planner.py` | ✅ wired; pose-to-pose validated; pick-place falls back (5-DOF IK refinement pending) |
 | T6 executor + gripper | `collector._execute_and_record` | ✅ |
 | T7 `LeRobotDataCollector` | `collector.py` | ✅ (multi-episode, success check) |
 | T8 domain randomization | `record_dataset(randomize=True)` → `sim.randomize` | ✅ basic |

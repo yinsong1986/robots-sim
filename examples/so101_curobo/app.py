@@ -115,6 +115,8 @@ def main(argv: "list[str] | None" = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--backend", default="mujoco", choices=["mujoco", "isaac"])
     p.add_argument("--planner", default="auto", choices=["auto", "scripted", "curobo"])
+    p.add_argument("--curobo-urdf", default=None, help="SO-101 URDF for cuRobo (or env SO101_URDF).")
+    p.add_argument("--curobo-asset", default="", help="Mesh root for the SO-101 URDF (or env SO101_ASSET).")
     p.add_argument("--repo-id", default="local/so101_curobo_pickplace")
     p.add_argument("--root", default=None, help="On-disk dataset dir (default: HF cache).")
     p.add_argument("--no-images", action="store_true", help="Record state+action only (no GL/EGL needed).")
@@ -134,12 +136,19 @@ def main(argv: "list[str] | None" = None) -> None:
 
     from examples.so101_curobo.controller import SO101CuroboDemo
 
+    planner_kwargs = {}
+    if args.curobo_urdf:
+        planner_kwargs["urdf_path"] = args.curobo_urdf
+    if args.curobo_asset:
+        planner_kwargs["asset_path"] = args.curobo_asset
+
     demo = SO101CuroboDemo(
         backend=args.backend,
         repo_id=args.repo_id,
         root=args.root,
         prefer_planner=args.planner,
         record_images=not args.no_images,
+        planner_kwargs=planner_kwargs,
     ).build()
 
     if args.smoke:
