@@ -91,7 +91,8 @@ def _live_img_html(camera: str) -> str:
 <div style="border:2px solid #4a90d9; border-radius:8px; padding:6px; background:#0b0b0b;
             max-width:{LIVE_W + 16}px; margin:0 auto;">
   <div style="color:#9cc; font-size:13px; margin-bottom:4px;">
-    <span style="color:#e33;">&#9679;</span> Live view (Isaac RTX + 3DGS, near real-time) &mdash; follows the camera selector / agent
+    <span style="color:#e33;">&#9679;</span> Live view (Isaac RTX + 3DGS, near real-time)
+    &mdash; follows the camera selector / agent
   </div>
   <img src="/live?camera={camera}&t={bust}"
        style="width:100%; aspect-ratio:{LIVE_W} / {LIVE_H}; height:auto; display:block;
@@ -568,7 +569,9 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None, robot_label: str = 
         with gr.Row():
             with gr.Column(scale=3):
                 # Live MJPEG view (hands-free) + a full-res still on demand.
-                live_view = gr.HTML(_live_img_html(initial_camera))
+                # Not bound to a variable: it's never a Gradio event in/output
+                # (see camera_dd.change below), so the <img> never reconnects.
+                gr.HTML(_live_img_html(initial_camera))
                 preview = gr.Image(label="Composite still (Isaac RTX + 3DGS)", height=420)
                 with gr.Row():
                     camera_dd = gr.Dropdown(
@@ -638,7 +641,7 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None, robot_label: str = 
         wave_btn.click(on_wave, inputs=[camera_dd], outputs=[preview, status])
         apply_bg_btn.click(on_apply_bg, inputs=[bg_dd, ply_upload], outputs=[status])
         # The live MJPEG stream follows app.current_camera, so the dropdown just
-        # updates that. We deliberately do NOT output to live_view: the <img> is
+        # updates that. We deliberately do NOT output to the live <img>: it is
         # never recreated (no reconnect) and is never a Gradio event output, so
         # it keeps streaming and never greys out while a chat turn processes.
         camera_dd.change(lambda cam: app.set_camera(cam), inputs=[camera_dd], outputs=[])
