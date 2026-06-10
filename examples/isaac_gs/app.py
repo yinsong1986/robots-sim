@@ -492,9 +492,7 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None):
                 return "", history, gr.update(), gr.update(), gr.update()
             history.append({"role": "user", "content": message})
             if agent is None:
-                history.append(
-                    {"role": "assistant", "content": "Agent chat is disabled (no LLM backend configured)."}
-                )
+                history.append({"role": "assistant", "content": "Agent chat is disabled (no LLM backend configured)."})
                 return "", history, gr.update(), gr.update(), gr.update()
             from examples.isaac_gs.agent import extract_text
 
@@ -514,7 +512,9 @@ def build_ui(app: IsaacGsApp, agent: "object | None" = None):
         wave_btn.click(on_wave, inputs=[camera_dd], outputs=[preview, status])
         apply_bg_btn.click(on_apply_bg, inputs=[bg_dd, ply_upload], outputs=[status])
         # Point the live MJPEG <img> at the newly selected camera.
-        camera_dd.change(lambda cam: (_live_img_html(cam), app.set_camera(cam))[0], inputs=[camera_dd], outputs=[live_view])
+        camera_dd.change(
+            lambda cam: (_live_img_html(cam), app.set_camera(cam))[0], inputs=[camera_dd], outputs=[live_view]
+        )
         chat_io = dict(inputs=[msg_box, chatbot], outputs=[msg_box, chatbot, preview, live_view, camera_dd])
         send_btn.click(on_chat, **chat_io)
         msg_box.submit(on_chat, **chat_io)
