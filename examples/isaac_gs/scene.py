@@ -77,12 +77,13 @@ def _add_lighting(sim: "object") -> None:
         return
 
     key = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/KeyLight"))
-    key.CreateIntensityAttr(3000.0)
+    key.CreateIntensityAttr(1500.0)
     key.CreateAngleAttr(1.0)
+    key.CreateColorAttr(Gf.Vec3f(1.0, 0.96, 0.9))  # slightly warm, kitchen-ish
     UsdGeom.Xformable(key.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-50.0, 10.0, 0.0))
 
     dome = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
-    dome.CreateIntensityAttr(800.0)
+    dome.CreateIntensityAttr(450.0)
     logger.info("Added key + dome lights (ground-plane lighting unavailable with ground_plane=False)")
 
 
