@@ -20,7 +20,7 @@ joint targets and the executor/collector speak the `SimEngine` surface, so the
 | Scripted joint-space pick-and-place planner | ✅ works now (demonstrative motion; grasps not guaranteed) |
 | CPU/CI smoke (state+action, no GL) | ✅ `smoke_test.py` |
 | Strands agent + Gradio UI | ✅ works now (buttons always; chat needs an LLM backend) |
-| **cuRobo** collision-aware planning | ✅ **installs + drives the full pick-place on driver 550 (validated, #67 T3/T4/T5)**; `--planner curobo`. Uses **position-only** IK (the 5-DOF SO-101 can't hit arbitrary 6-DOF poses), producing a collision-free reach→grasp→lift→place→release the arm executes. Physical-grasp success (cube actually transported) needs approach-orientation tuning — see T5 note. |
+| **cuRobo** collision-aware planning | ✅ **installs + drives the SO-101 to the cube on driver 550 (validated, #67 T3/T4/T5)**; `--planner curobo --curobo-urdf <so101.urdf>`. Loads the **same URDF** into MuJoCo + cuRobo (aligned joint conventions + EE frame), position-only IK (5-DOF), kinematic execution. Reaches the grasp pose exactly; **physical grasp/transport (success>0) still needs contact tuning** — see T5 note. |
 | **Isaac Sim** backend (`--backend isaac`) | ⛔ falls back to MuJoCo until the runtime + `create_simulation("isaac")` (T1) are present |
 
 Missing cuRobo / Isaac / lerobot / LLM each disable only their own feature with
@@ -89,30 +89,38 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
   `CuroboMotionPlanner` builds the SO-101 model from a URDF via the new
   `RobotBuilder` (T4, auto-derives the 5-DOF arm chain to `gripper_frame_link`)
   and chains `MotionPlanner.plan_pose` segments into the full pick-place (T5,
-  validated end-to-end: a 414-waypoint collision-free reach→grasp→lift→place→
+  validated end-to-end: a 434-waypoint collision-free reach→grasp→lift→place→
   release the MuJoCo arm executes, recorded as a LeRobot episode).
   **5-DOF handling:** the SO-101 has only 5 arm DOF, so a fully-constrained
   6-DOF pose goal is usually infeasible. The planner uses **position-only**
   tracking (`ToolPoseCriteria.track_position`, `position_only=True`), leaving
   orientation free so tabletop targets are reachable; the bin
   (`scene.DEFAULT_PLACE_POSITION`) is set within the arm's reach.
-  **Remaining tuning:** because orientation is free, the gripper reaches the
-  cube but isn't guaranteed aligned to physically grip it (so the per-episode
-  *grasp-success* label is often False). Constraining the approach axis
-  (top-down, roll free) via `ToolPoseCriteria.track_orientation` + a tuned grasp
-  is the next refinement; the collision-free motion + labeled data generation
-  already work. If a segment is unreachable the planner logs and falls back to
-  the scripted planner so an episode is still recorded.
+  **Matched model (key):** cuRobo (URDF) and a MuJoCo `data_config` SO-101 use
+  different joint conventions/zero-poses/EE frames, so cuRobo's plan executes
+  *wrongly* on the data_config arm. The fix: when `--planner curobo` + a URDF
+  are set, the sim loads the arm from the **same URDF** (`add_robot(urdf_path=...)`),
+  so cuRobo's plan executes exactly (FK matches to mm). That URDF loads without
+  position actuators, so the collector drives it **kinematically**
+  (`set_joint_positions`, `kinematic=True`); the cube responds via stepped
+  contact. Validated: the gripper reaches the cube pose precisely.
+  **Remaining tuning:** the kinematic gripper doesn't yet reliably *clamp and
+  carry* the cube (so the per-episode grasp-success label is still False) — that
+  needs contact/gripper-geometry tuning (jaw clamp force, descend depth, cube
+  size/friction) and likely a top-down approach orientation. The collision-free
+  motion + labeled data generation already work; unreachable targets fall back
+  to the scripted planner. Set the URDF so its meshes resolve for MuJoCo (e.g.
+  the URDF next to its `assets/` dir); `SO101_ASSET` points cuRobo at the meshes.
 
 ## Issue #67 task mapping
 
 | Task | Where | State |
 |---|---|---|
 | T1 backend registration | `scene.make_sim("isaac")` | stub + clear error |
-| T2 faithful SO-101 asset | `add_robot(usd_path=...)` hook | MuJoCo SO-101 used now |
+| T2 faithful SO-101 asset | `add_robot(urdf_path=...)` (sim + cuRobo share the URDF) | ✅ for cuRobo path (same URDF both sides) |
 | T3 cuRobo install validation | `planner.CUROBO_INSTALL_HINT` | ✅ validated on driver 550 (recipe above) |
 | T4 cuRobo SO-101 config | `CuroboMotionPlanner._ensure` (`RobotBuilder`) | ✅ builds the 5-DOF model from URDF |
-| T5 `CuroboMotionPlanner` | `planner.py` | ✅ drives the full pick-place (position-only IK, validated MuJoCo execute + record); grasp-orientation tuning for success>0 pending |
+| T5 `CuroboMotionPlanner` | `planner.py` | ✅ drives the SO-101 to the cube (matched URDF, position-only IK, kinematic exec, validated); physical grasp/transport (success>0) pending contact tuning |
 | T6 executor + gripper | `collector._execute_and_record` | ✅ |
 | T7 `LeRobotDataCollector` | `collector.py` | ✅ (multi-episode, success check) |
 | T8 domain randomization | `record_dataset(randomize=True)` → `sim.randomize` | ✅ basic |

@@ -80,6 +80,7 @@ class LeRobotDataCollector:
         place_radius: float = 0.10,
         move_threshold: float = 0.03,
         record_images: bool = True,
+        kinematic: bool = False,
     ):
         self.sim = sim
         self.scene = scene_info
@@ -92,6 +93,11 @@ class LeRobotDataCollector:
         # When False, record state+action only (no camera frames) -> no GL/EGL
         # needed. Used by the CI smoke path on CPU-only boxes.
         self.record_images = record_images
+        # When True, drive the arm kinematically (set_joint_positions + step)
+        # instead of send_action. Required for the cuRobo/URDF-matched arm,
+        # which loads without position actuators (send_action wouldn't move it);
+        # also makes the arm follow a planned trajectory exactly.
+        self.kinematic = kinematic
 
     # --- recording lifecycle ------------------------------------------------
 
@@ -138,7 +144,11 @@ class LeRobotDataCollector:
         robot = self.scene.robot_name
         frames = 0
         for wp in trajectory.waypoints:
-            self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
+            if self.kinematic:
+                self.sim.set_joint_positions(wp, robot_name=robot)
+                self.sim.step(max(1, n_substeps))
+            else:
+                self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
             obs = self.sim.get_observation(robot, skip_images=not self.record_images)
             recorder.add_frame(observation=obs, action=wp, task=task)
             frames += 1

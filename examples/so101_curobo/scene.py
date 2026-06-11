@@ -165,10 +165,14 @@ def build_pick_place_scene(
     add_bin: bool = True,
     camera_size: tuple[int, int] = (320, 240),
     backend: str = "mujoco",
+    robot_urdf: Optional[str] = None,
 ) -> SceneInfo:
     """Populate ``sim`` with the SO-101 pick-and-place world. Returns a SceneInfo.
 
-    Assumes a fresh ``sim`` (``create_world`` is called here).
+    Assumes a fresh ``sim`` (``create_world`` is called here). If ``robot_urdf``
+    is given, the arm is loaded from that URDF so the sim shares the EXACT model
+    cuRobo plans with (identical joint conventions + EE frame -> the plan
+    executes correctly); otherwise a MuJoCo ``data_config`` SO-101 is used.
     """
     cube_position = list(cube_position or DEFAULT_CUBE_POSITION)
     place_position = list(place_position or DEFAULT_PLACE_POSITION)
@@ -179,7 +183,13 @@ def build_pick_place_scene(
     if _status(cw_res) != "success":
         raise RuntimeError(f"create_world failed: {cw_res}")
 
-    robot_config = _add_robot_with_fallback(sim, name="arm", candidates=candidates)
+    if robot_urdf:
+        rr = sim.add_robot(name="arm", urdf_path=robot_urdf, position=[0.0, 0.0, 0.0])
+        if _status(rr) != "success":
+            raise RuntimeError(f"add_robot(urdf_path={robot_urdf!r}) failed: {rr}")
+        robot_config = "so101 (URDF, cuRobo-matched)"
+    else:
+        robot_config = _add_robot_with_fallback(sim, name="arm", candidates=candidates)
 
     sim.add_object(
         name="cube",

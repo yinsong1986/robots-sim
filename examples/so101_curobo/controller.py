@@ -110,9 +110,19 @@ class SO101CuroboDemo:
                 else:
                     raise
             self.backend = backend
-            self.scene = build_pick_place_scene(self.sim, camera_size=self.camera_size, backend=backend)
+            # Build the planner first so we know whether cuRobo will drive the
+            # arm; if so, load the sim arm from the SAME URDF cuRobo plans with
+            # (identical joint conventions + EE frame -> plans execute correctly).
             self.planner = _FallbackPlanner(
                 make_planner(prefer=self.prefer_planner, robot_cfg="so101", **self.planner_kwargs)
+            )
+            robot_urdf = None
+            if getattr(self.planner.primary, "name", "") == "curobo":
+                import os
+
+                robot_urdf = self.planner_kwargs.get("urdf_path") or os.environ.get("SO101_URDF")
+            self.scene = build_pick_place_scene(
+                self.sim, camera_size=self.camera_size, backend=backend, robot_urdf=robot_urdf
             )
             self.collector = LeRobotDataCollector(
                 self.sim,
@@ -122,6 +132,7 @@ class SO101CuroboDemo:
                 root=self.root,
                 cameras=self.scene.cameras,
                 record_images=self.record_images,
+                kinematic=bool(robot_urdf),  # URDF arm has no actuators -> kinematic
             )
             if self.scene.cameras:
                 self.current_camera = self.scene.cameras[0]
