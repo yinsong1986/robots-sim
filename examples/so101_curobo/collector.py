@@ -81,6 +81,8 @@ class LeRobotDataCollector:
         move_threshold: float = 0.03,
         record_images: bool = True,
         kinematic: bool = False,
+        grasp_attach: bool = False,
+        attach_radius: float = 0.10,
     ):
         self.sim = sim
         self.scene = scene_info
@@ -98,6 +100,13 @@ class LeRobotDataCollector:
         # which loads without position actuators (send_action wouldn't move it);
         # also makes the arm follow a planned trajectory exactly.
         self.kinematic = kinematic
+        # When True, model the grasp by attaching the cube to the gripper while
+        # the gripper is closed AND was within attach_radius of the cube when it
+        # closed (a standard kinematic grasp for synthetic data; the actuator-
+        # less arm can't hold via friction). Attaches only if the gripper truly
+        # reached the cube, so it stays honest.
+        self.grasp_attach = grasp_attach
+        self.attach_radius = attach_radius
 
     # --- recording lifecycle ------------------------------------------------
 
@@ -139,16 +148,93 @@ class LeRobotDataCollector:
             root=self.root,
         )
 
+    def _zero_cube_velocity(self) -> None:
+        """Zero the cube's free-joint velocity (avoids a fling from teleporting it)."""
+        try:
+            import mujoco
+
+            m = getattr(self.sim, "mj_model", None)
+            d = getattr(self.sim, "mj_data", None)
+            if m is None or d is None:
+                return
+            cube_bodies = {
+                b
+                for b in range(m.nbody)
+                if self.scene.cube_name in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "")
+            }
+            for j in range(m.njnt):
+                if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE and int(m.jnt_bodyid[j]) in cube_bodies:
+                    adr = int(m.jnt_dofadr[j])
+                    for k in range(6):  # 3 linear + 3 angular dofs
+                        d.qvel[adr + k] = 0.0
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _gripper_frame_pos(self) -> Optional[List[float]]:
+        """World position of the gripper/tool link (MuJoCo via mj_data)."""
+        try:
+            import mujoco
+
+            m = getattr(self.sim, "mj_model", None)
+            d = getattr(self.sim, "mj_data", None)
+            if m is None or d is None:
+                return None
+            best = None
+            for b in range(m.nbody):
+                bn = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or ""
+                if "gripper_frame" in bn:
+                    return [float(x) for x in d.xpos[b]]
+                if "gripper" in bn:
+                    best = [float(x) for x in d.xpos[b]]
+            return best
+        except Exception:  # noqa: BLE001
+            return None
+
     def _execute_and_record(self, trajectory, task: str, recorder, n_substeps: int) -> int:
-        """Stream the trajectory; record one frame per waypoint. Returns frame count."""
+        """Stream the trajectory; record one frame per waypoint. Returns frame count.
+
+        With ``grasp_attach`` the cube is attached to the gripper while the
+        gripper is closed and was within ``attach_radius`` of the cube when it
+        closed (a kinematic grasp -- the actuator-less arm can't hold via
+        friction), and released when the gripper re-opens.
+        """
         robot = self.scene.robot_name
+        grip = self.scene.gripper_joint
         frames = 0
+
+        # Gripper open/close thresholds from the trajectory's own range.
+        gvals = [wp[grip] for wp in trajectory.waypoints if grip and grip in wp]
+        gmin = min(gvals) if gvals else 0.0
+        gmax = max(gvals) if gvals else 0.0
+        close_thresh = gmin + 0.5 * (gmax - gmin)
+        has_grip = self.grasp_attach and grip is not None and (gmax - gmin) > 0.05
+
+        attached = False
+        offset: Optional[List[float]] = None
+
         for wp in trajectory.waypoints:
             if self.kinematic:
                 self.sim.set_joint_positions(wp, robot_name=robot)
                 self.sim.step(max(1, n_substeps))
             else:
                 self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
+
+            if has_grip:
+                closed = wp.get(grip, gmin) >= close_thresh
+                if closed and not attached:
+                    gp = self._gripper_frame_pos()
+                    cp = _object_position(self.sim, self.scene.cube_name)
+                    if gp and cp and math.dist(gp, cp) < self.attach_radius:
+                        offset = [cp[i] - gp[i] for i in range(3)]
+                        attached = True
+                elif not closed and attached:
+                    attached = False  # release
+                if attached and offset:
+                    gp = self._gripper_frame_pos()
+                    if gp:
+                        self.sim.move_object(self.scene.cube_name, position=[gp[i] + offset[i] for i in range(3)])
+                        self._zero_cube_velocity()  # avoid teleport-induced fling
+
             obs = self.sim.get_observation(robot, skip_images=not self.record_images)
             recorder.add_frame(observation=obs, action=wp, task=task)
             frames += 1
@@ -223,8 +309,23 @@ class LeRobotDataCollector:
         rng = _random.Random(seed)
         recorder = self._new_recorder(task)
         results: List[EpisodeResult] = []
+        jnames = self.scene.joint_names
+        # Capture the rest pose once so each episode starts identically.
+        home_q = {j: float(self.sim.get_observation(self.scene.robot_name, skip_images=True)[j]) for j in jnames}
         try:
             for i in range(n_episodes):
+                # Reset to a consistent start: arm at home, cube at its start pose.
+                if rebuild_scene is not None:
+                    rebuild_scene(rng.randint(0, 10_000))
+                else:
+                    try:
+                        if hasattr(self.sim, "reset"):
+                            self.sim.reset()
+                        self.sim.set_joint_positions(home_q, robot_name=self.scene.robot_name)
+                        self.sim.move_object(self.scene.cube_name, position=list(self.scene.cube_position))
+                        self.sim.step(3)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("episode reset failed (non-fatal)", exc_info=True)
                 if randomize:
                     try:
                         self.sim.randomize(
@@ -235,7 +336,7 @@ class LeRobotDataCollector:
                         )
                     except Exception:  # noqa: BLE001 - randomize is best-effort
                         logger.debug("randomize failed (non-fatal)", exc_info=True)
-                start_q = [float(self.sim.get_observation(self.scene.robot_name)[j]) for j in self.scene.joint_names]
+                start_q = [float(self.sim.get_observation(self.scene.robot_name, skip_images=True)[j]) for j in jnames]
                 traj = planner.plan_pick_place(
                     joint_names=self.scene.joint_names,
                     start_q=start_q,

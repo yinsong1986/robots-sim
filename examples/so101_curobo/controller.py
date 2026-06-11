@@ -133,6 +133,7 @@ class SO101CuroboDemo:
                 cameras=self.scene.cameras,
                 record_images=self.record_images,
                 kinematic=bool(robot_urdf),  # URDF arm has no actuators -> kinematic
+                grasp_attach=bool(robot_urdf),  # kinematic grasp for the cuRobo path
             )
             if self.scene.cameras:
                 self.current_camera = self.scene.cameras[0]
