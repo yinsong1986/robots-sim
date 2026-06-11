@@ -92,10 +92,22 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
   validated end-to-end: a 434-waypoint collision-free reach→grasp→lift→place→
   release the MuJoCo arm executes, recorded as a LeRobot episode).
   **5-DOF handling:** the SO-101 has only 5 arm DOF, so a fully-constrained
-  6-DOF pose goal is usually infeasible. The planner uses **position-only**
+  6-DOF pose goal is infeasible. The planner uses **position-only**
   tracking (`ToolPoseCriteria.track_position`, `position_only=True`), leaving
   orientation free so tabletop targets are reachable; the bin
   (`scene.DEFAULT_PLACE_POSITION`) is set within the arm's reach.
+  **Top-down grasp (`top_down_grasp=True`, default):** strict vertical is
+  infeasible on 5 DOF, so the pick segments (`reach`/`grasp`/`lift`) add a
+  *soft* downward orientation bias (`ToolPoseCriteria.track_position_and_orientation`,
+  `rpy` weight `top_down_weight≈0.05`) plus a relaxed success tolerance
+  (`orientation_tolerance≈1.6 rad`) and keep the most-vertical of
+  `top_down_attempts` solves (cuRobo is nondeterministic; best-of-N tames the
+  variance). Validated through the planner (cube `[0.2,0.2]`, bin `[0.0,0.25]`):
+  `reach 2.0°`, `grasp 10.9°`, `lift 6.2°` from straight-down vs ~84° (sideways)
+  with free orientation. The `place` segments stay **position-only** (the bin
+  pose is not vertical-reachable and a top-down drop is unnecessary). Any
+  unreachable oriented solve falls back to position-only, so this never
+  regresses below the position-only path.
   **Matched model (key):** cuRobo (URDF) and a MuJoCo `data_config` SO-101 use
   different joint conventions/zero-poses/EE frames, so cuRobo's plan executes
   *wrongly* on the data_config arm. The fix: when `--planner curobo` + a URDF
@@ -110,13 +122,12 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
   cube to the gripper (zeroing its velocity to avoid teleport flings), carries
   it, and releases over the bin. This transports the cube and yields a real
   per-episode success label — **success_rate ≈ 0.3-0.4** (cuRobo drives the motion; the residual
-  variance is plan nondeterminism + the free-orientation approach -- misses
-  land just outside the bin radius). It's a
-  standard kinematic grasp for synthetic data; a fully *dynamic* grasp would
-  need an actuated model + contact/gripper-geometry + a top-down approach
-  orientation (the further-tuning path). Unreachable targets fall back to the
-  scripted planner. Set the URDF so its meshes resolve for MuJoCo (e.g. the URDF
-  next to its `assets/` dir); `SO101_ASSET` points cuRobo at the meshes.
+  variance is plan nondeterminism -- misses land just outside the bin radius).
+  It's a standard kinematic grasp for synthetic data; a fully *dynamic* grasp
+  would need an actuated model + contact/gripper-geometry. Unreachable targets
+  fall back to the scripted planner. Set the URDF so its meshes resolve for
+  MuJoCo (e.g. the URDF next to its `assets/` dir); `SO101_ASSET` points cuRobo
+  at the meshes.
 
 ## Issue #67 task mapping
 

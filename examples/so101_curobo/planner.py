@@ -55,6 +55,24 @@ def curobo_available() -> bool:
 CUROBO_AVAILABLE = curobo_available()
 
 
+def _approach_angle_deg(quat_wxyz: Sequence[float]) -> float:
+    """Angle in degrees between the tool approach axis and straight down (-Z).
+
+    The SO-101 ``gripper_frame_link`` local +x axis is the grasp approach
+    direction (FK-verified: at the home config the home quaternion
+    [0.707, 0, 0.707, 0] maps local +x to world -Z). For a unit quaternion
+    (w, x, y, z) the world z-component of local +x is the rotation-matrix entry
+    R[2, 0] = 2 (x z - w y); since local +x is a unit vector, its angle from the
+    straight-down axis (0, 0, -1) is ``acos(-R[2, 0])``. Returns 0 for a perfect
+    top-down approach, 90 for a horizontal (sideways) approach.
+    """
+    w, x, y, z = quat_wxyz
+    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    lx_z = 2.0 * (x * z - w * y)
+    return math.degrees(math.acos(max(-1.0, min(1.0, -lx_z))))
+
+
 @dataclass
 class JointTrajectory:
     """A planned joint-space trajectory: dense ``{joint_name: target}`` waypoints."""
@@ -205,6 +223,10 @@ class CuroboMotionPlanner:
         device: str = "cuda",
         grasp_quaternion: Optional[Sequence[float]] = None,
         position_only: bool = True,
+        top_down_grasp: bool = True,
+        top_down_weight: float = 0.05,
+        orientation_tolerance: float = 1.6,
+        top_down_attempts: int = 6,
         gripper_open: float = 0.0,
         gripper_close: float = 0.9,
         **_ignored,
@@ -222,6 +244,23 @@ class CuroboMotionPlanner:
         # Default to POSITION-ONLY tracking (orientation is left free) so the
         # arm can actually reach tabletop pick/place positions.
         self.position_only = position_only
+        # Top-down grasp (issue #67 T5 "further-tuning path"): a *soft* downward
+        # orientation bias on the pick/approach/lift segments so the gripper
+        # descends onto the cube near-vertically instead of grazing it sideways.
+        # Strict vertical is infeasible for this 5-DOF arm and a high weight
+        # makes IK finicky; calibration on the SO-101 URDF (driver 550 / L4)
+        # found rpy weight ~0.05 + a relaxed orientation success tolerance
+        # (~1.6 rad) + best-of-N attempts yields a consistently near-vertical
+        # (<= ~13 deg from straight down) grasp at 8/8 cube targets, vs ~84 deg
+        # (horizontal, high-variance) with free orientation. The place segments
+        # stay position-only (the bin pose is not vertical-reachable, and a
+        # top-down drop into a bin is not required). Unreachable oriented solves
+        # fall back to position-only, so this never regresses below the
+        # position-only path.
+        self.top_down_grasp = top_down_grasp
+        self.top_down_weight = float(top_down_weight)
+        self.orientation_tolerance = float(orientation_tolerance)
+        self.top_down_attempts = max(1, int(top_down_attempts))
         self.gripper_open = gripper_open
         self.gripper_close = gripper_close
         self._planner = None
@@ -255,21 +294,37 @@ class CuroboMotionPlanner:
         tmp_yml = os.path.join(tempfile.mkdtemp(prefix="curobo_so101_"), "so101_curobo.yml")
         builder.save(builder.build(), tmp_yml, include_cspace=True)
         robot = yaml.safe_load(open(tmp_yml))
+        # When top-down grasping is on, relax the *success* orientation tolerance
+        # so the solver accepts the most-vertical pose the 5-DOF arm can reach
+        # (strict vertical is infeasible). Position-only segments set the
+        # orientation weight to 0, so this relaxation does not affect them
+        # (verified: free-orientation reach is identical at tol 0.05 vs 1.6).
+        ori_tol = self.orientation_tolerance if self.top_down_grasp else 0.05
         self._planner = MotionPlanner(
-            MotionPlannerCfg.create(robot=robot, self_collision_check=self.self_collision, use_cuda_graph=False)
+            MotionPlannerCfg.create(
+                robot=robot,
+                self_collision_check=self.self_collision,
+                use_cuda_graph=False,
+                orientation_tolerance=ori_tol,
+            )
         )
         self._arm_joint_names = list(self._planner.joint_names)
-        # 5-DOF arm: track POSITION ONLY so tabletop targets are reachable
-        # (orientation is left free; a fully-constrained 6-DOF goal is infeasible).
-        if self.position_only:
+        # 5-DOF arm: default to POSITION-ONLY tracking so tabletop targets are
+        # reachable (orientation free; a fully-constrained 6-DOF goal is
+        # infeasible). This is also the per-segment fallback and the criteria
+        # used for the place segments; the pick/approach/lift segments override
+        # it with a soft top-down orientation bias in :meth:`_plan_segment`.
+        if self.position_only or self.top_down_grasp:
             from curobo.types import ToolPoseCriteria
 
             self._planner.update_tool_pose_criteria(
                 {self.tool_frame: ToolPoseCriteria.track_position(xyz=[1.0, 1.0, 1.0])}
             )
-        # Capture the home EE orientation as the default (guaranteed-achievable)
-        # goal orientation when no grasp_quaternion is supplied. A true top-down
-        # grasp orientation can be passed via grasp_quaternion once calibrated.
+        # Capture the home EE orientation as the default goal orientation. On the
+        # SO-101 the home quaternion is [0.707, 0, 0.707, 0] (wxyz) -> the tool's
+        # local +x axis (the grasp approach axis) points along world -Z (straight
+        # down), so it doubles as the top-down grasp orientation. Override via
+        # grasp_quaternion if a different approach is wanted.
         q0 = self._planner.default_joint_state.position
         q0 = q0.unsqueeze(0) if q0.dim() == 1 else q0
         st = self._planner.compute_kinematics(JointState.from_position(q0, joint_names=self._arm_joint_names))
@@ -279,9 +334,9 @@ class CuroboMotionPlanner:
         self._default_quat = [float(x) for x in tp.quaternion.reshape(-1, 4)[0].detach().cpu().tolist()]
         logger.info("cuRobo SO-101 planner ready: arm joints=%s", self._arm_joint_names)
 
-    def _plan_segment(self, start_arm_q, goal_xyz, goal_quat) -> List[List[float]]:
+    def _plan_segment(self, start_arm_q, goal_xyz, goal_quat, orient: bool = False) -> List[List[float]]:
         import torch
-        from curobo.types import GoalToolPose, JointState
+        from curobo.types import GoalToolPose, JointState, ToolPoseCriteria
 
         jn = self._arm_joint_names
         start = JointState.from_position(
@@ -290,10 +345,71 @@ class CuroboMotionPlanner:
         pos = torch.tensor(goal_xyz, dtype=torch.float32, device=self.device).reshape(1, 1, 1, 1, 3)
         quat = torch.tensor(goal_quat, dtype=torch.float32, device=self.device).reshape(1, 1, 1, 1, 4)
         goal = GoalToolPose(tool_frames=[self.tool_frame], position=pos, quaternion=quat)
-        res = self._planner.plan_pose(goal, start)
-        if res is None or not bool(res.success.any()):
+
+        def _solve():
+            res = self._planner.plan_pose(goal, start)
+            if res is None or not bool(res.success.any()):
+                return None
+            return res.get_interpolated_plan().position.reshape(-1, len(jn)).detach().cpu().tolist()
+
+        # Top-down segments: bias orientation toward the (downward) goal quat with
+        # a soft weight, and keep the most-vertical of N attempts (a single solve
+        # varies ~10-86 deg from vertical due to cuRobo nondeterminism; best-of-N
+        # reliably lands <= ~13 deg). Restore position-only afterwards so the
+        # place segments and any fallback are unconstrained in orientation.
+        if orient and self.top_down_grasp:
+            w = self.top_down_weight
+            self._planner.update_tool_pose_criteria(
+                {self.tool_frame: ToolPoseCriteria.track_position_and_orientation(xyz=[1.0, 1.0, 1.0], rpy=[w, w, w])}
+            )
+            best_traj, best_err = None, None
+            try:
+                for _ in range(self.top_down_attempts):
+                    traj = _solve()
+                    if traj is None:
+                        continue
+                    err = self._approach_deg(traj[-1])
+                    if best_err is None or err < best_err:
+                        best_traj, best_err = traj, err
+            finally:
+                self._planner.update_tool_pose_criteria(
+                    {self.tool_frame: ToolPoseCriteria.track_position(xyz=[1.0, 1.0, 1.0])}
+                )
+            if best_traj is not None:
+                logger.info(
+                    "cuRobo top-down reach %s: %.1f deg from vertical (best of %d)",
+                    [round(float(x), 3) for x in goal_xyz],
+                    best_err,
+                    self.top_down_attempts,
+                )
+                return best_traj
+            logger.info(
+                "cuRobo top-down unreachable at %s; falling back to position-only",
+                [round(float(x), 3) for x in goal_xyz],
+            )
+
+        traj = _solve()
+        if traj is None:
             raise RuntimeError(f"cuRobo could not reach {[round(float(x), 3) for x in goal_xyz]}")
-        return res.get_interpolated_plan().position.reshape(-1, len(jn)).detach().cpu().tolist()
+        return traj
+
+    def _approach_deg(self, arm_q) -> float:
+        """Angle (deg) of the tool approach axis from straight down (world -Z).
+
+        The SO-101 ``gripper_frame_link`` local +x is the grasp approach axis
+        (FK-verified: at home it maps to world -Z). 0 deg == perfectly top-down,
+        90 deg == horizontal.
+        """
+        import torch
+        from curobo.types import JointState
+
+        q = torch.tensor([arm_q], dtype=torch.float32, device=self.device)
+        st = self._planner.compute_kinematics(JointState.from_position(q, joint_names=self._arm_joint_names))
+        tp = st.tool_poses
+        if isinstance(tp, dict):
+            tp = tp.get(self.tool_frame, list(tp.values())[0])
+        quat = [float(v) for v in tp.quaternion.reshape(-1, 4)[0].detach().cpu().tolist()]
+        return _approach_angle_deg(quat)
 
     def plan_pick_place(
         self,
@@ -342,22 +458,25 @@ class CuroboMotionPlanner:
             waypoints.append(wp)
             phases.append(phase)
 
-        # (phase, goal_xyz | None for an in-place gripper event, gripper value)
+        # (phase, goal_xyz | None for an in-place gripper event, gripper value,
+        #  orient): pick/approach/lift descend onto the cube near-vertically
+        #  (top-down); the place segments stay position-only (the bin pose is not
+        #  vertical-reachable and a top-down drop is unnecessary).
         segments = [
-            ("reach", [cx, cy, table_z + approach], OPEN),
-            ("grasp", [cx, cy, table_z + grasp_z], OPEN),
-            ("close", None, CLOSE),
-            ("lift", [cx, cy, table_z + approach], CLOSE),
-            ("place", [px, py, table_z + approach], CLOSE),
-            ("place_down", [px, py, table_z + grasp_z + 0.02], CLOSE),
-            ("release", None, OPEN),
+            ("reach", [cx, cy, table_z + approach], OPEN, True),
+            ("grasp", [cx, cy, table_z + grasp_z], OPEN, True),
+            ("close", None, CLOSE, False),
+            ("lift", [cx, cy, table_z + approach], CLOSE, True),
+            ("place", [px, py, table_z + approach], CLOSE, False),
+            ("place_down", [px, py, table_z + grasp_z + 0.02], CLOSE, False),
+            ("release", None, OPEN, False),
         ]
-        for phase, xyz, gripval in segments:
+        for phase, xyz, gripval, orient in segments:
             if xyz is None:
                 for _ in range(hold_steps):
                     emit(cur_arm, gripval, phase)
                 continue
-            seg = self._plan_segment(cur_arm, xyz, quat)
+            seg = self._plan_segment(cur_arm, xyz, quat, orient=orient)
             for arm_q in seg:
                 emit(arm_q, gripval, phase)
             cur_arm = seg[-1]
@@ -385,6 +504,10 @@ _CUROBO_KEYS = (
     "self_collision",
     "device",
     "grasp_quaternion",
+    "top_down_grasp",
+    "top_down_weight",
+    "orientation_tolerance",
+    "top_down_attempts",
     "gripper_open",
     "gripper_close",
 )
