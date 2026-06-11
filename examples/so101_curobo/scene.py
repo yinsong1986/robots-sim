@@ -31,7 +31,7 @@ ROBOT_CONFIG_CANDIDATES = ["so101", "so100", "so_arm100", "panda"]
 DEFAULT_CUBE_POSITION = [0.20, 0.20, 0.025]
 DEFAULT_CUBE_HALF = [0.022, 0.022, 0.022]
 DEFAULT_CUBE_COLOR = [0.85, 0.10, 0.10, 1.0]
-DEFAULT_PLACE_POSITION = [-0.20, 0.22, 0.0]  # the "bin" drop target
+DEFAULT_PLACE_POSITION = [0.0, 0.25, 0.0]  # "bin" drop target (within SO-101 reach)
 DEFAULT_BIN_HALF = [0.05, 0.05, 0.012]
 DEFAULT_BIN_COLOR = [0.15, 0.55, 0.20, 1.0]
 

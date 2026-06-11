@@ -204,6 +204,7 @@ class CuroboMotionPlanner:
         self_collision: bool = False,
         device: str = "cuda",
         grasp_quaternion: Optional[Sequence[float]] = None,
+        position_only: bool = True,
         gripper_open: float = 0.0,
         gripper_close: float = 0.9,
         **_ignored,
@@ -216,6 +217,11 @@ class CuroboMotionPlanner:
         self.self_collision = self_collision
         self.device = device
         self.grasp_quaternion = list(grasp_quaternion) if grasp_quaternion else None
+        # The SO-101 is a 5-DOF arm and cannot achieve arbitrary 6-DOF
+        # orientations, so a fully-constrained pose goal is usually infeasible.
+        # Default to POSITION-ONLY tracking (orientation is left free) so the
+        # arm can actually reach tabletop pick/place positions.
+        self.position_only = position_only
         self.gripper_open = gripper_open
         self.gripper_close = gripper_close
         self._planner = None
@@ -253,6 +259,14 @@ class CuroboMotionPlanner:
             MotionPlannerCfg.create(robot=robot, self_collision_check=self.self_collision, use_cuda_graph=False)
         )
         self._arm_joint_names = list(self._planner.joint_names)
+        # 5-DOF arm: track POSITION ONLY so tabletop targets are reachable
+        # (orientation is left free; a fully-constrained 6-DOF goal is infeasible).
+        if self.position_only:
+            from curobo.types import ToolPoseCriteria
+
+            self._planner.update_tool_pose_criteria(
+                {self.tool_frame: ToolPoseCriteria.track_position(xyz=[1.0, 1.0, 1.0])}
+            )
         # Capture the home EE orientation as the default (guaranteed-achievable)
         # goal orientation when no grasp_quaternion is supplied. A true top-down
         # grasp orientation can be passed via grasp_quaternion once calibrated.
@@ -289,8 +303,8 @@ class CuroboMotionPlanner:
         cube_xy: Optional[Sequence[float]] = None,
         place_xy: Optional[Sequence[float]] = None,
         table_z: float = 0.0,
-        approach: float = 0.10,
-        grasp_z: float = 0.03,
+        approach: float = 0.12,
+        grasp_z: float = 0.05,
         hold_steps: int = 5,
         **_ignored,
     ) -> JointTrajectory:
