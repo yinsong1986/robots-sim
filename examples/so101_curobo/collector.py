@@ -148,6 +148,31 @@ class LeRobotDataCollector:
             root=self.root,
         )
 
+    def _snapshot_state(self):
+        """Snapshot full MuJoCo physics state (qpos, qvel) for a deterministic reset."""
+        try:
+            d = getattr(self.sim, "mj_data", None)
+            return (d.qpos.copy(), d.qvel.copy()) if d is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _restore_state(self, snap) -> None:
+        """Restore a snapshot so every episode starts from the identical state."""
+        if snap is None:
+            return
+        try:
+            import mujoco
+
+            m = getattr(self.sim, "mj_model", None)
+            d = getattr(self.sim, "mj_data", None)
+            if m is None or d is None:
+                return
+            d.qpos[:] = snap[0]
+            d.qvel[:] = snap[1]
+            mujoco.mj_forward(m, d)
+        except Exception:  # noqa: BLE001
+            logger.debug("state restore failed (non-fatal)", exc_info=True)
+
     def _zero_cube_velocity(self) -> None:
         """Zero the cube's free-joint velocity (avoids a fling from teleporting it)."""
         try:
@@ -210,9 +235,11 @@ class LeRobotDataCollector:
         has_grip = self.grasp_attach and grip is not None and (gmax - gmin) > 0.05
 
         attached = False
+        has_closed = False
         offset: Optional[List[float]] = None
+        grasp_phases = {"grasp", "close", "lift", "place", "place_down"}
 
-        for wp in trajectory.waypoints:
+        for wp, phase in zip(trajectory.waypoints, trajectory.phases):
             if self.kinematic:
                 self.sim.set_joint_positions(wp, robot_name=robot)
                 self.sim.step(max(1, n_substeps))
@@ -220,14 +247,19 @@ class LeRobotDataCollector:
                 self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
 
             if has_grip:
-                closed = wp.get(grip, gmin) >= close_thresh
-                if closed and not attached:
+                gv = wp.get(grip, gmin)
+                if gv >= close_thresh:
+                    has_closed = True
+                # Attach as soon as the gripper arrives within range during the
+                # grasp (BEFORE the close-knock can push the cube away) and hold
+                # it; release only once the gripper re-opens after having closed.
+                if not attached and phase in grasp_phases:
                     gp = self._gripper_frame_pos()
                     cp = _object_position(self.sim, self.scene.cube_name)
                     if gp and cp and math.dist(gp, cp) < self.attach_radius:
                         offset = [cp[i] - gp[i] for i in range(3)]
                         attached = True
-                elif not closed and attached:
+                elif attached and has_closed and gv < close_thresh:
                     attached = False  # release
                 if attached and offset:
                     gp = self._gripper_frame_pos()
@@ -310,17 +342,19 @@ class LeRobotDataCollector:
         recorder = self._new_recorder(task)
         results: List[EpisodeResult] = []
         jnames = self.scene.joint_names
-        # Capture the rest pose once so each episode starts identically.
+        # Capture the rest pose + full physics state once so each episode starts
+        # identically (deterministic) -> cuRobo plans the same -> consistent grasp.
         home_q = {j: float(self.sim.get_observation(self.scene.robot_name, skip_images=True)[j]) for j in jnames}
+        snapshot = self._snapshot_state()
         try:
             for i in range(n_episodes):
                 # Reset to a consistent start: arm at home, cube at its start pose.
                 if rebuild_scene is not None:
                     rebuild_scene(rng.randint(0, 10_000))
+                elif snapshot is not None:
+                    self._restore_state(snapshot)
                 else:
                     try:
-                        if hasattr(self.sim, "reset"):
-                            self.sim.reset()
                         self.sim.set_joint_positions(home_q, robot_name=self.scene.robot_name)
                         self.sim.move_object(self.scene.cube_name, position=list(self.scene.cube_position))
                         self.sim.step(3)

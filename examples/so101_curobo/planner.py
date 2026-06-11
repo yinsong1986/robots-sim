@@ -349,6 +349,7 @@ class CuroboMotionPlanner:
             ("close", None, CLOSE),
             ("lift", [cx, cy, table_z + approach], CLOSE),
             ("place", [px, py, table_z + approach], CLOSE),
+            ("place_down", [px, py, table_z + grasp_z + 0.02], CLOSE),
             ("release", None, OPEN),
         ]
         for phase, xyz, gripval in segments:

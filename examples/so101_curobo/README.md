@@ -20,7 +20,7 @@ joint targets and the executor/collector speak the `SimEngine` surface, so the
 | Scripted joint-space pick-and-place planner | ✅ works now (demonstrative motion; grasps not guaranteed) |
 | CPU/CI smoke (state+action, no GL) | ✅ `smoke_test.py` |
 | Strands agent + Gradio UI | ✅ works now (buttons always; chat needs an LLM backend) |
-| **cuRobo** collision-aware planning | ✅ **installs + runs the full pick-and-place on driver 550 (validated, #67 T3/T4/T5)**; `--planner curobo --curobo-urdf <so101.urdf>`. Loads the **same URDF** into MuJoCo + cuRobo (aligned joint conventions + EE frame), position-only IK (5-DOF), kinematic execution + a **kinematic grasp-attach** that transports the cube to the bin (validated **success_rate ≈ 0.4** over randomized episodes). |
+| **cuRobo** collision-aware planning | ✅ **installs + runs the full pick-and-place on driver 550 (validated, #67 T3/T4/T5)**; `--planner curobo --curobo-urdf <so101.urdf>`. Loads the **same URDF** into MuJoCo + cuRobo (aligned joint conventions + EE frame), position-only IK (5-DOF), kinematic execution + a **kinematic grasp-attach** that transports the cube to the bin (validated **success_rate ≈ 0.3-0.4** over episodes (varies with cuRobo plan nondeterminism)). |
 | **Isaac Sim** backend (`--backend isaac`) | ⛔ falls back to MuJoCo until the runtime + `create_simulation("isaac")` (T1) are present |
 
 Missing cuRobo / Isaac / lerobot / LLM each disable only their own feature with
@@ -109,8 +109,9 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
   when the gripper closes within `attach_radius` of the cube it attaches the
   cube to the gripper (zeroing its velocity to avoid teleport flings), carries
   it, and releases over the bin. This transports the cube and yields a real
-  per-episode success label — **success_rate ≈ 0.4** over randomized episodes
-  (cuRobo drives the motion; misses land just outside the bin radius). It's a
+  per-episode success label — **success_rate ≈ 0.3-0.4** (cuRobo drives the motion; the residual
+  variance is plan nondeterminism + the free-orientation approach -- misses
+  land just outside the bin radius). It's a
   standard kinematic grasp for synthetic data; a fully *dynamic* grasp would
   need an actuated model + contact/gripper-geometry + a top-down approach
   orientation (the further-tuning path). Unreachable targets fall back to the
@@ -125,7 +126,7 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
 | T2 faithful SO-101 asset | `add_robot(urdf_path=...)` (sim + cuRobo share the URDF) | ✅ for cuRobo path (same URDF both sides) |
 | T3 cuRobo install validation | `planner.CUROBO_INSTALL_HINT` | ✅ validated on driver 550 (recipe above) |
 | T4 cuRobo SO-101 config | `CuroboMotionPlanner._ensure` (`RobotBuilder`) | ✅ builds the 5-DOF model from URDF |
-| T5 `CuroboMotionPlanner` | `planner.py` | ✅ cuRobo drives the pick-and-place + kinematic grasp-attach transports the cube to the bin (validated success_rate ≈ 0.4); dynamic-grasp realism is further tuning |
+| T5 `CuroboMotionPlanner` | `planner.py` | ✅ cuRobo drives the pick-and-place + kinematic grasp-attach transports the cube to the bin (validated success_rate ≈ 0.3-0.4; nondeterminism-limited); dynamic-grasp realism is further tuning |
 | T6 executor + gripper | `collector._execute_and_record` | ✅ |
 | T7 `LeRobotDataCollector` | `collector.py` | ✅ (multi-episode, success check) |
 | T8 domain randomization | `record_dataset(randomize=True)` → `sim.randomize` | ✅ basic |
