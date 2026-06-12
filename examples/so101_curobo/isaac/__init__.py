@@ -10,6 +10,28 @@ the shared library's factory source. ``scene.make_sim("isaac")`` then resolves.
 Use only inside the Isaac Sim Python environment (Python 3.10 venv with
 ``isaacsim`` installed); elsewhere :func:`register` is a no-op so the demo
 degrades to MuJoCo.
+
+Why this lives in the example (not ``strands_robots_sim.isaac``)
+----------------------------------------------------------------
+This is an *example-local* SimEngine adapter, intentionally kept separate
+from the library backend at ``strands_robots_sim/isaac/`` -- it is **tracked
+technical debt**, to be consolidated once the prerequisites land:
+
+* The library backend targets the **Isaac Sim 5.x** ``omni.isaac.kit``
+  namespace and is still a Phase-2 skeleton (the data-plane wiring lands in
+  PRs #61 add_camera / #62 render / #63 USD-load / #64 URDF-load). This
+  adapter targets the **Isaac Sim 4.5** ``isaacsim.*`` namespace -- the only
+  Isaac actually installed on the dev box -- and runs the demo end-to-end
+  today (GPU-validated).
+* The two also differ in surface: the library takes ``IsaacConfig`` +
+  ``add_robot(usd_path=/urdf_path=)``; this adapter implements the
+  ``create_world(timestep=, gravity=, ground_plane=)`` + ``add_robot(
+  urdf_path=)`` shape the example/collector use, plus the main-thread "pump"
+  pattern the Gradio UI needs.
+
+Consolidation into ``strands_robots_sim.isaac`` (abstracting the
+4.5/5.x namespace split behind ``is_available()``/``ensure_app``) is tracked
+as a follow-up to be done **after** PRs #61-64 and #68 merge -- see issue #69.
 """
 
 from __future__ import annotations
