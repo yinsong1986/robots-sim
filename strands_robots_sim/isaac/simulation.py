@@ -1462,44 +1462,284 @@ class IsaacSimulation(SimEngine):
     ) -> dict[str, Any]:
         """Add an RTX camera to the scene.
 
+        Phase 2 wiring (#14): instantiates the underlying USD camera prim
+        via ``omni.isaac.sensor.Camera`` and stores the handle on the
+        ``_CameraState`` for later retrieval by :meth:`render`. In Phase 1
+        this method silently returned ``status: "success"`` without
+        creating any prim; that path is gone -- callers will now see a
+        real camera prim on the stage and a Camera handle in
+        ``self._cameras[name].handle``.
+
+        ``render`` continues to return blank frames in Phase 2 because
+        the actual ``camera.get_rgba()`` / annotator wiring is a separate
+        slice. The Camera prim is the prerequisite, not the full frame
+        path.
+
         Parameters
         ----------
         name : str
-            Camera identifier. Default "default".
+            Camera identifier. Default ``"default"``. Must be unique
+            across the simulation; a duplicate is rejected with a
+            structured error envelope.
         position : list[float], optional
-            Camera position [x, y, z].
+            World-space position ``[x, y, z]`` in meters. Default
+            ``[2.0, 2.0, 2.0]`` (an over-the-shoulder vantage that
+            sees the default ground plane and any objects above it).
         target : list[float], optional
-            Camera look-at target [x, y, z].
+            World-space look-at point ``[x, y, z]``. If provided, the
+            camera is oriented so its forward axis points at ``target``
+            via ``omni.isaac.core.utils.viewports.set_camera_view``.
+            If ``None``, the camera keeps its constructed orientation
+            (identity).
         width : int, optional
-            Image width. Default from config.
+            Image width in pixels. Defaults to ``IsaacConfig.camera_width``.
         height : int, optional
-            Image height. Default from config.
+            Image height in pixels. Defaults to ``IsaacConfig.camera_height``.
         fov : float
-            Field of view in degrees. Default 60.
+            Horizontal field of view in degrees. Default 60.0. Mapped
+            onto ``Camera.set_focal_length`` using the standard pinhole
+            relation ``focal_length = horizontal_aperture / (2 * tan(fov/2))``
+            with the USD-default 24 mm horizontal aperture.
 
         Returns
         -------
         dict
-            Status dict.
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. ``json`` carries the resolved ``prim_path``,
+            ``position``, ``target``, ``resolution``, ``fov``, and the
+            computed ``focal_length`` so an agent can confirm the
+            camera setup without re-querying.
         """
         with self._lock:
             if not self._world_created:
                 return {"status": "error", "content": [{"text": "No world created."}]}
 
-            w = width or self._config.camera_width
-            h = height or self._config.camera_height
-            pos = position or [2.0, 2.0, 2.0]
+            if name in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' already exists."}],
+                }
+
+            w = int(width or self._config.camera_width)
+            h = int(height or self._config.camera_height)
+            pos = list(position) if position is not None else [2.0, 2.0, 2.0]
+            tgt = list(target) if target is not None else None
+            fov_deg = float(fov)
 
             prim_path = f"{self._config.stage_path}/Cameras/{name}"
-            self._prim_registry.append(prim_path)
 
+            try:
+                handle, focal_length_mm = self._create_camera_prim(
+                    name=name,
+                    prim_path=prim_path,
+                    position=pos,
+                    target=tgt,
+                    width=w,
+                    height=h,
+                    fov_deg=fov_deg,
+                )
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                # Cleanup-clause shape mirrors create_world (#52 precedent)
+                # and add_object: the constructor or initialise / look-at
+                # call either succeeds and updates registries, or fails
+                # with a structured envelope and updates neither.
+                logger.error("Failed to add camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to add camera '{name}': {e}"}],
+                }
+
+            self._prim_registry.append(prim_path)
             cam_state = _CameraState(name=name, prim_path=prim_path, width=w, height=h)
+            cam_state.handle = handle
             self._cameras[name] = cam_state
 
+            cam_info = {
+                "name": name,
+                "prim_path": prim_path,
+                "position": pos,
+                "target": tgt,
+                "resolution": [w, h],
+                "fov": fov_deg,
+                "focal_length_mm": focal_length_mm,
+            }
+            logger.info(
+                "Added camera '%s' at pos=%s target=%s res=%dx%d fov=%.1f",
+                name,
+                pos,
+                tgt,
+                w,
+                h,
+                fov_deg,
+            )
             return {
                 "status": "success",
-                "content": [{"text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov}")}],
+                "content": [
+                    {
+                        "text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov_deg}"),
+                        "json": cam_info,
+                    }
+                ],
             }
+
+    def remove_camera(self, name: str) -> dict[str, Any]:
+        """Remove a camera from the scene.
+
+        Phase 2 wiring (#14): paired with :meth:`add_camera`'s prim
+        creation. Deletes the underlying USD camera prim via
+        ``omni.isaac.core.utils.prims.delete_prim`` and prunes the
+        in-Python registries. New method (no Phase 1 stub existed).
+
+        Parameters
+        ----------
+        name : str
+            Camera identifier previously passed to :meth:`add_camera`.
+
+        Returns
+        -------
+        dict
+            Status dict in the standard ``{"status", "content": [{"text"}]}``
+            shape used by mutating methods on this class. Returns ``error``
+            if the camera is unknown to ``_cameras``.
+        """
+        with self._lock:
+            if name not in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' not found."}],
+                }
+
+            prim_path = self._cameras[name].prim_path
+
+            # Cameras aren't added via ``world.scene.add`` (they're
+            # standalone USD prims, not articulations or shape wrappers)
+            # so removal goes via the stage utility rather than
+            # ``world.scene.remove_object``. Wrapped in the same except
+            # tuple as add_camera so a transient stage error returns the
+            # structured envelope and leaves bookkeeping intact for
+            # retry.
+            try:
+                if self._world is not None:
+                    from omni.isaac.core.utils.prims import (  # type: ignore[import-not-found]
+                        delete_prim,
+                    )
+
+                    delete_prim(prim_path)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                logger.error("Failed to remove camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to remove camera '{name}': {e}"}],
+                }
+
+            del self._cameras[name]
+            if prim_path in self._prim_registry:
+                self._prim_registry.remove(prim_path)
+
+            logger.info("Removed camera '%s' (prim=%s)", name, prim_path)
+            return {
+                "status": "success",
+                "content": [{"text": f"Camera '{name}' removed."}],
+            }
+
+    def _create_camera_prim(
+        self,
+        *,
+        name: str,
+        prim_path: str,
+        position: list[float],
+        target: list[float] | None,
+        width: int,
+        height: int,
+        fov_deg: float,
+    ) -> tuple[Any, float]:
+        """Construct the omni.isaac.sensor.Camera prim + apply look-at + FOV.
+
+        Returns the camera handle plus the resolved focal length in mm
+        so :meth:`add_camera` can surface the actually-used focal length
+        in its structured json payload.
+
+        Lazy-imports both ``omni.isaac.sensor.Camera`` and
+        ``omni.isaac.core.utils.viewports.set_camera_view`` so the
+        module loads cleanly without Isaac Sim installed (the call
+        site only runs after :meth:`create_world` has booted
+        ``SimulationApp``).
+        """
+        import math
+
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.sensor import Camera  # type: ignore[import-not-found]
+
+        camera = Camera(
+            prim_path=prim_path,
+            name=name,
+            position=np.asarray(position, dtype=float),
+            resolution=(int(width), int(height)),
+        )
+        # ``initialize`` allocates the RTX render product + annotators.
+        # Some Camera builds defer this to first ``get_rgba()`` call;
+        # call it explicitly so an init-time failure surfaces here
+        # (and gets caught by the cleanup clause in add_camera) rather
+        # than silently on the first render attempt.
+        camera.initialize()
+
+        # Map FOV (deg, horizontal) to focal length (mm) using the
+        # standard pinhole lens relation:
+        #
+        #     focal_length = horizontal_aperture / (2 * tan(fov / 2))
+        #
+        # The horizontal aperture MUST be the camera's actual aperture,
+        # read back from the prim -- assuming a nominal 24 mm is wrong on
+        # Isaac's Camera (its default aperture + unit convention yield
+        # fx≈6348 px at 640 px, i.e. a ~6° telephoto, instead of the
+        # intended 60° / fx≈554). Deriving the focal length from the
+        # read-back aperture makes the resulting pixel intrinsics
+        # fx = width / (2*tan(fov/2)) exactly, independent of the
+        # aperture's absolute value or units.
+        try:
+            horizontal_aperture_mm = float(camera.get_horizontal_aperture())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            horizontal_aperture_mm = 24.0
+        focal_length_mm = horizontal_aperture_mm / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+        camera.set_focal_length(focal_length_mm)
+
+        # Enable the depth annotator on the RTX render product. Isaac
+        # Sim's Camera ships with rgba enabled by default but depth
+        # is opt-in via this method; without it, ``camera.get_depth()``
+        # returns ``None`` with a "Annotator 'distance_to_image_plane'
+        # not found" warning -- which then crashes downstream
+        # ``np.asarray`` calls in ``render()``. Caught during PR #61
+        # GPU validation against the Isaac Sim 4.5 docker image.
+        # ``add_distance_to_image_plane_to_frame`` is idempotent on
+        # repeat calls so this is safe even if the camera has already
+        # been initialized with depth elsewhere.
+        try:
+            camera.add_distance_to_image_plane_to_frame()
+        except (AttributeError, RuntimeError):
+            # Older Isaac Sim builds expose this under a different name
+            # (``add_depth_to_frame``). Try the fallback before giving
+            # up; downstream ``get_depth`` will still return ``None``
+            # but ``render()``'s defensive None-handling (PR #62) will
+            # cover it.
+            try:
+                camera.add_depth_to_frame()
+            except (AttributeError, RuntimeError):
+                logger.debug(
+                    "Camera %s: depth annotator not enabled; ``get_depth()`` will return None",
+                    name,
+                )
+
+        # Apply look-at after focal-length so the camera's forward axis
+        # is correctly oriented at the target. ``set_camera_view`` works
+        # on any USD camera prim by path; no Camera-specific API.
+        if target is not None:
+            from omni.isaac.core.utils.viewports import (  # type: ignore[import-not-found]
+                set_camera_view,
+            )
+
+            set_camera_view(eye=position, target=target, camera_prim_path=prim_path)
+
+        return camera, focal_length_mm
 
     # --- Isaac-specific: Fleet Replication -----------------------------------
 
