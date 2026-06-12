@@ -229,6 +229,33 @@ class _CameraState:
         self.handle: Any = None
 
 
+class _ObjectState:
+    """Internal bookkeeping for an object (shape primitive) in the Isaac simulation.
+
+    ``handle`` is the ``omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,
+    Cylinder,Capsule}`` instance returned by :meth:`IsaacSimulation.add_object`.
+    The handle is what got registered with ``world.scene.add()`` and is the
+    keyhole ``world.scene.remove_object(name)`` later uses for deletion. Held
+    here so :meth:`IsaacSimulation.remove_object` doesn't have to round-trip
+    through ``world.scene.get_object()`` (which can raise on a torn-down
+    stage) just to find the prim.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        prim_path: str,
+        shape: str,
+        is_static: bool,
+        handle: Any = None,
+    ):
+        self.name = name
+        self.prim_path = prim_path
+        self.shape = shape
+        self.is_static = is_static
+        self.handle = handle
+
+
 class IsaacSimulation(SimEngine):
     """GPU-native simulation backend built on NVIDIA Isaac Sim.
 
@@ -289,6 +316,7 @@ class IsaacSimulation(SimEngine):
         # Entity tracking
         self._robots: dict[str, _RobotState] = {}
         self._cameras: dict[str, _CameraState] = {}
+        self._objects: dict[str, _ObjectState] = {}
         self._prim_registry: list[str] = []  # track all created prims for cleanup
 
         # Thread safety
@@ -506,6 +534,7 @@ class IsaacSimulation(SimEngine):
             # window is gone after destroy() returns).
             num_robots_released = len(self._robots)
             num_cameras_released = len(self._cameras)
+            num_objects_released = len(self._objects)
             num_prims_released = len(self._prim_registry)
             num_envs_released = self._num_envs_active
             sim_time_at_destroy = self._sim_time
@@ -526,6 +555,7 @@ class IsaacSimulation(SimEngine):
             # Clear entity tracking
             self._robots.clear()
             self._cameras.clear()
+            self._objects.clear()
             self._prim_registry.clear()
 
             # Reset state
@@ -545,6 +575,7 @@ class IsaacSimulation(SimEngine):
             destroy_info = {
                 "num_robots_released": num_robots_released,
                 "num_cameras_released": num_cameras_released,
+                "num_objects_released": num_objects_released,
                 "num_prims_released": num_prims_released,
                 "num_envs_released": num_envs_released,
                 "sim_time_at_destroy": sim_time_at_destroy,
@@ -658,6 +689,7 @@ class IsaacSimulation(SimEngine):
                 "num_envs": self._num_envs_active,
                 "num_robots": len(self._robots),
                 "num_cameras": len(self._cameras),
+                "num_objects": len(self._objects),
                 "stage_path": self._config.stage_path,
                 "device": self._config.device,
                 "headless": self._config.headless,
@@ -673,7 +705,8 @@ class IsaacSimulation(SimEngine):
                             f"step={self._step_count}, "
                             f"envs={self._num_envs_active}, "
                             f"robots={len(self._robots)}, "
-                            f"cameras={len(self._cameras)}"
+                            f"cameras={len(self._cameras)}, "
+                            f"objects={len(self._objects)}"
                         ),
                         "json": state_data,
                     }
@@ -832,31 +865,64 @@ class IsaacSimulation(SimEngine):
         is_static: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Add an object to the scene.
+        """Add an object (shape primitive) to the scene.
+
+        Phase 2 wiring (#14): instantiates the underlying USD prim via
+        ``omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,
+        Capsule}`` and registers it with ``world.scene.add()``. In Phase 1
+        this method silently returned ``status: "success"`` without
+        creating any prim; that path is gone -- callers that previously
+        relied on the silent-no-op shape will now see a real geometry on
+        the stage and a ``DynamicXxx``/``FixedXxx`` handle in the
+        scene.
 
         Parameters
         ----------
         name : str
-            Object identifier.
+            Object identifier. Must be unique across the simulation; a
+            duplicate is rejected with a structured error envelope rather
+            than silently overwriting the existing prim.
         shape : str
-            Shape type: "box", "sphere", "capsule", "cylinder".
+            Shape type: ``"box"`` (default), ``"sphere"``, ``"capsule"``,
+            ``"cylinder"``. Anything else returns a structured error
+            envelope listing the valid set.
         position : list[float], optional
-            Position [x, y, z].
+            World-space position ``[x, y, z]`` in meters. Default
+            ``[0.0, 0.0, 0.5]`` (50 cm above origin so an object dropped
+            with the default ground plane doesn't intersect it).
         orientation : list[float], optional
-            Quaternion [w, x, y, z].
+            World-space orientation as a quaternion ``[w, x, y, z]``.
+            Default ``[1.0, 0.0, 0.0, 0.0]`` (identity).
         size : list[float], optional
-            Shape dimensions.
+            Shape dimensions in meters. Conventions per shape:
+
+            * ``box``:      ``[width, height, depth]`` (default ``[0.05, 0.05, 0.05]``).
+            * ``sphere``:   ``[radius]`` (default ``[0.05]``).
+            * ``cylinder``: ``[radius, height]`` (default ``[0.05, 0.10]``).
+            * ``capsule``:  ``[radius, height]`` (default ``[0.05, 0.10]``).
+
+            Lists shorter than the convention fall back to defaults for
+            the missing trailing components.
         color : list[float], optional
-            RGB color [r, g, b] in [0, 1].
+            RGB color ``[r, g, b]`` in ``[0, 1]``. RGBA lists (length 4)
+            are accepted; alpha is dropped (Isaac's primitive constructors
+            take RGB only). ``None`` -> default white.
         mass : float
-            Mass in kg. Default 0.1.
+            Mass in kg. Default 0.1. Ignored when ``is_static=True``.
         is_static : bool
-            If True, object is fixed in space. Default False.
+            If ``True``, the prim is constructed via ``Fixed{Cuboid,
+            Sphere, Cylinder, Capsule}`` and stays pinned in space. If
+            ``False`` (default), uses the ``Dynamic*`` counterpart and
+            participates in physics with ``mass``.
 
         Returns
         -------
         dict
-            Status dict.
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. ``json`` carries the resolved ``prim_path``,
+            ``shape``, ``position``, ``orientation``, ``size``,
+            ``mass``, and ``is_static`` so an agent can confirm what
+            actually landed on the stage without re-querying.
         """
         with self._lock:
             if not self._world_created:
@@ -870,15 +936,179 @@ class IsaacSimulation(SimEngine):
                     "content": [{"text": f"Unknown shape: {shape!r}. Valid: {valid_shapes}"}],
                 }
 
-            pos = position or [0.0, 0.0, 0.5]
-            prim_path = f"{self._config.stage_path}/Objects/{name}"
-            self._prim_registry.append(prim_path)
+            if name in self._objects:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Object '{name}' already exists."}],
+                }
 
-            logger.debug("Added object '%s' (shape=%s, pos=%s)", name, shape, pos)
+            pos = list(position) if position is not None else [0.0, 0.0, 0.5]
+            orient = list(orientation) if orientation is not None else [1.0, 0.0, 0.0, 0.0]
+            size_in = list(size) if size is not None else None
+            prim_path = f"{self._config.stage_path}/Objects/{name}"
+
+            try:
+                handle, resolved_size = self._create_shape_prim(
+                    shape=shape,
+                    prim_path=prim_path,
+                    name=name,
+                    position=pos,
+                    orientation=orient,
+                    size=size_in,
+                    color=color,
+                    mass=mass,
+                    is_static=is_static,
+                )
+                # ``world.scene.add`` registers the wrapper so that
+                # ``world.reset()`` re-initialises it on the same
+                # ``post_reset`` callback as the ground plane and
+                # robots. The return value is the (possibly wrapped)
+                # handle Isaac uses internally; we keep our own ref in
+                # ``_objects[name]`` so ``remove_object`` doesn't have
+                # to round-trip through ``scene.get_object`` later.
+                self._world.scene.add(handle)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                # Cleanup-clause shape mirrors create_world (line 467):
+                # RuntimeError (Carb / sim init), ValueError (USD prim
+                # shape mismatches, e.g. negative scale on a Dynamic*),
+                # OSError (USD/Nucleus IO), AttributeError (omni surface
+                # drift), TypeError (signature drift across SDK versions
+                # -- see #52 for the gravity precedent), ImportError
+                # (omni.isaac.core.objects unavailable on a partial
+                # Isaac install). Programming bugs propagate.
+                logger.error(
+                    "Failed to add object '%s' (shape=%s, static=%s): %s",
+                    name,
+                    shape,
+                    is_static,
+                    e,
+                )
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to add object '{name}' ({shape}): {e}"}],
+                }
+
+            self._prim_registry.append(prim_path)
+            self._objects[name] = _ObjectState(
+                name=name,
+                prim_path=prim_path,
+                shape=shape,
+                is_static=is_static,
+                handle=handle,
+            )
+
+            obj_info = {
+                "name": name,
+                "prim_path": prim_path,
+                "shape": shape,
+                "position": pos,
+                "orientation": orient,
+                "size": resolved_size,
+                "mass": float(mass) if not is_static else 0.0,
+                "is_static": bool(is_static),
+            }
+            logger.info(
+                "Added object '%s' (shape=%s, pos=%s, mass=%.3f, static=%s)",
+                name,
+                shape,
+                pos,
+                mass,
+                is_static,
+            )
             return {
                 "status": "success",
-                "content": [{"text": f"Object '{name}' added (shape={shape}, pos={pos})."}],
+                "content": [
+                    {
+                        "text": f"Object '{name}' added (shape={shape}, pos={pos}).",
+                        "json": obj_info,
+                    }
+                ],
             }
+
+    def _create_shape_prim(
+        self,
+        *,
+        shape: str,
+        prim_path: str,
+        name: str,
+        position: list[float],
+        orientation: list[float],
+        size: list[float] | None,
+        color: list[float] | None,
+        mass: float,
+        is_static: bool,
+    ) -> tuple[Any, list[float]]:
+        """Construct the omni.isaac.core.objects shape wrapper.
+
+        Returns the handle plus the resolved ``size`` list (defaults
+        applied per shape) so :meth:`add_object` can surface the
+        actually-used dimensions in its structured json payload.
+
+        Lazy-imports ``omni.isaac.core.objects`` so the module loads
+        cleanly without Isaac Sim installed (the call site only ever
+        runs after :meth:`create_world` has booted ``SimulationApp``).
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.objects import (  # type: ignore[import-not-found]
+            DynamicCapsule,
+            DynamicCuboid,
+            DynamicCylinder,
+            DynamicSphere,
+            FixedCapsule,
+            FixedCuboid,
+            FixedCylinder,
+            FixedSphere,
+        )
+
+        common: dict[str, Any] = {
+            "prim_path": prim_path,
+            "name": name,
+            "position": np.asarray(position, dtype=float),
+            "orientation": np.asarray(orientation, dtype=float),
+        }
+        if color is not None:
+            # RGBA -> RGB: Isaac's primitive constructors take a 3-vector
+            # color; alpha would silently raise a shape mismatch deeper
+            # in USD. Truncate here so RGBA-style examples (e.g. the #15
+            # sketch's ``[1, 0, 0, 1]``) work transparently.
+            rgb = list(color)[:3]
+            common["color"] = np.asarray(rgb, dtype=float)
+        if not is_static:
+            common["mass"] = float(mass)
+
+        if shape == "box":
+            cls = FixedCuboid if is_static else DynamicCuboid
+            # Per-component fallback to honour the docstring contract
+            # ("Lists shorter than the convention fall back to defaults
+            # for the missing trailing components"). Mirrors the
+            # cylinder / capsule pattern below; previously this branch
+            # was all-or-nothing, so e.g. ``size=[0.10]`` silently fell
+            # back to ``[0.05, 0.05, 0.05]`` instead of the documented
+            # ``[0.10, 0.05, 0.05]`` -- caught in PR #60 review.
+            size_list = list(size) if size else []
+            sx = float(size_list[0]) if len(size_list) >= 1 else 0.05
+            sy = float(size_list[1]) if len(size_list) >= 2 else 0.05
+            sz = float(size_list[2]) if len(size_list) >= 3 else 0.05
+            scale = [sx, sy, sz]
+            common["scale"] = np.asarray(scale, dtype=float)
+            return cls(**common), scale
+        if shape == "sphere":
+            cls = FixedSphere if is_static else DynamicSphere
+            radius = float(size[0]) if size and len(size) >= 1 else 0.05
+            return cls(radius=radius, **common), [radius]
+        if shape == "cylinder":
+            cls = FixedCylinder if is_static else DynamicCylinder
+            radius = float(size[0]) if size and len(size) >= 1 else 0.05
+            height = float(size[1]) if size and len(size) >= 2 else 0.10
+            return cls(radius=radius, height=height, **common), [radius, height]
+        if shape == "capsule":
+            cls = FixedCapsule if is_static else DynamicCapsule
+            radius = float(size[0]) if size and len(size) >= 1 else 0.05
+            height = float(size[1]) if size and len(size) >= 2 else 0.10
+            return cls(radius=radius, height=height, **common), [radius, height]
+        # Unreachable: shape was validated by add_object before this call;
+        # raise loudly if a future caller bypasses that guard.
+        raise ValueError(f"Unknown shape: {shape!r}")
 
     # --- SimEngine: Introspection / Removal ---------------------------------
 
@@ -951,9 +1181,12 @@ class IsaacSimulation(SimEngine):
     def remove_object(self, name: str) -> dict[str, Any]:
         """Remove an object from the scene.
 
-        Mirror of :meth:`add_object`'s prim-path convention
-        (``{stage_path}/Objects/{name}``). Only updates the in-Python
-        registry; USD prim deletion is handled at world teardown.
+        Phase 2 wiring (#14): paired with :meth:`add_object`'s prim
+        creation. Calls ``world.scene.remove_object(name)`` to actually
+        delete the USD prim, then prunes the in-Python registries
+        (``_objects`` + ``_prim_registry``). In Phase 1 this method only
+        updated the in-Python registry; that is no longer the case --
+        the prim is gone from the stage when this returns.
 
         Parameters
         ----------
@@ -964,16 +1197,42 @@ class IsaacSimulation(SimEngine):
         -------
         dict
             Status dict in the standard ``{"status", "content": [{"text"}]}``
-            shape used by mutating methods on this class.
+            shape used by mutating methods on this class. Returns ``error``
+            if the object is unknown to ``_objects``; this is the only
+            authoritative source -- ``_prim_registry`` is cleanup-time
+            bookkeeping that does not distinguish robots from objects.
         """
         with self._lock:
-            prim_path = f"{self._config.stage_path}/Objects/{name}"
-            if prim_path not in self._prim_registry:
+            if name not in self._objects:
                 return {
                     "status": "error",
                     "content": [{"text": f"Object '{name}' not found."}],
                 }
-            self._prim_registry.remove(prim_path)
+
+            prim_path = self._objects[name].prim_path
+
+            # Delete the prim from the world's scene. Wrapped in the same
+            # cleanup-clause shape as add_object since the failure modes
+            # mirror it: scene.remove_object can RuntimeError on a torn-
+            # down stage, AttributeError on omni surface drift, etc.
+            try:
+                if self._world is not None:
+                    self._world.scene.remove_object(name)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError) as e:
+                logger.error("Failed to remove object '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to remove object '{name}': {e}"}],
+                }
+
+            # Now drop our bookkeeping. The order matters: we only want
+            # to forget the object after the scene call succeeded so a
+            # transient ``RuntimeError`` from ``scene.remove_object``
+            # leaves a retry-friendly state.
+            del self._objects[name]
+            if prim_path in self._prim_registry:
+                self._prim_registry.remove(prim_path)
+
             logger.info("Removed object '%s' (prim=%s)", name, prim_path)
             return {
                 "status": "success",
@@ -1203,44 +1462,284 @@ class IsaacSimulation(SimEngine):
     ) -> dict[str, Any]:
         """Add an RTX camera to the scene.
 
+        Phase 2 wiring (#14): instantiates the underlying USD camera prim
+        via ``omni.isaac.sensor.Camera`` and stores the handle on the
+        ``_CameraState`` for later retrieval by :meth:`render`. In Phase 1
+        this method silently returned ``status: "success"`` without
+        creating any prim; that path is gone -- callers will now see a
+        real camera prim on the stage and a Camera handle in
+        ``self._cameras[name].handle``.
+
+        ``render`` continues to return blank frames in Phase 2 because
+        the actual ``camera.get_rgba()`` / annotator wiring is a separate
+        slice. The Camera prim is the prerequisite, not the full frame
+        path.
+
         Parameters
         ----------
         name : str
-            Camera identifier. Default "default".
+            Camera identifier. Default ``"default"``. Must be unique
+            across the simulation; a duplicate is rejected with a
+            structured error envelope.
         position : list[float], optional
-            Camera position [x, y, z].
+            World-space position ``[x, y, z]`` in meters. Default
+            ``[2.0, 2.0, 2.0]`` (an over-the-shoulder vantage that
+            sees the default ground plane and any objects above it).
         target : list[float], optional
-            Camera look-at target [x, y, z].
+            World-space look-at point ``[x, y, z]``. If provided, the
+            camera is oriented so its forward axis points at ``target``
+            via ``omni.isaac.core.utils.viewports.set_camera_view``.
+            If ``None``, the camera keeps its constructed orientation
+            (identity).
         width : int, optional
-            Image width. Default from config.
+            Image width in pixels. Defaults to ``IsaacConfig.camera_width``.
         height : int, optional
-            Image height. Default from config.
+            Image height in pixels. Defaults to ``IsaacConfig.camera_height``.
         fov : float
-            Field of view in degrees. Default 60.
+            Horizontal field of view in degrees. Default 60.0. Mapped
+            onto ``Camera.set_focal_length`` using the standard pinhole
+            relation ``focal_length = horizontal_aperture / (2 * tan(fov/2))``
+            with the USD-default 24 mm horizontal aperture.
 
         Returns
         -------
         dict
-            Status dict.
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. ``json`` carries the resolved ``prim_path``,
+            ``position``, ``target``, ``resolution``, ``fov``, and the
+            computed ``focal_length`` so an agent can confirm the
+            camera setup without re-querying.
         """
         with self._lock:
             if not self._world_created:
                 return {"status": "error", "content": [{"text": "No world created."}]}
 
-            w = width or self._config.camera_width
-            h = height or self._config.camera_height
-            pos = position or [2.0, 2.0, 2.0]
+            if name in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' already exists."}],
+                }
+
+            w = int(width or self._config.camera_width)
+            h = int(height or self._config.camera_height)
+            pos = list(position) if position is not None else [2.0, 2.0, 2.0]
+            tgt = list(target) if target is not None else None
+            fov_deg = float(fov)
 
             prim_path = f"{self._config.stage_path}/Cameras/{name}"
-            self._prim_registry.append(prim_path)
 
+            try:
+                handle, focal_length_mm = self._create_camera_prim(
+                    name=name,
+                    prim_path=prim_path,
+                    position=pos,
+                    target=tgt,
+                    width=w,
+                    height=h,
+                    fov_deg=fov_deg,
+                )
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                # Cleanup-clause shape mirrors create_world (#52 precedent)
+                # and add_object: the constructor or initialise / look-at
+                # call either succeeds and updates registries, or fails
+                # with a structured envelope and updates neither.
+                logger.error("Failed to add camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to add camera '{name}': {e}"}],
+                }
+
+            self._prim_registry.append(prim_path)
             cam_state = _CameraState(name=name, prim_path=prim_path, width=w, height=h)
+            cam_state.handle = handle
             self._cameras[name] = cam_state
 
+            cam_info = {
+                "name": name,
+                "prim_path": prim_path,
+                "position": pos,
+                "target": tgt,
+                "resolution": [w, h],
+                "fov": fov_deg,
+                "focal_length_mm": focal_length_mm,
+            }
+            logger.info(
+                "Added camera '%s' at pos=%s target=%s res=%dx%d fov=%.1f",
+                name,
+                pos,
+                tgt,
+                w,
+                h,
+                fov_deg,
+            )
             return {
                 "status": "success",
-                "content": [{"text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov}")}],
+                "content": [
+                    {
+                        "text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov_deg}"),
+                        "json": cam_info,
+                    }
+                ],
             }
+
+    def remove_camera(self, name: str) -> dict[str, Any]:
+        """Remove a camera from the scene.
+
+        Phase 2 wiring (#14): paired with :meth:`add_camera`'s prim
+        creation. Deletes the underlying USD camera prim via
+        ``omni.isaac.core.utils.prims.delete_prim`` and prunes the
+        in-Python registries. New method (no Phase 1 stub existed).
+
+        Parameters
+        ----------
+        name : str
+            Camera identifier previously passed to :meth:`add_camera`.
+
+        Returns
+        -------
+        dict
+            Status dict in the standard ``{"status", "content": [{"text"}]}``
+            shape used by mutating methods on this class. Returns ``error``
+            if the camera is unknown to ``_cameras``.
+        """
+        with self._lock:
+            if name not in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' not found."}],
+                }
+
+            prim_path = self._cameras[name].prim_path
+
+            # Cameras aren't added via ``world.scene.add`` (they're
+            # standalone USD prims, not articulations or shape wrappers)
+            # so removal goes via the stage utility rather than
+            # ``world.scene.remove_object``. Wrapped in the same except
+            # tuple as add_camera so a transient stage error returns the
+            # structured envelope and leaves bookkeeping intact for
+            # retry.
+            try:
+                if self._world is not None:
+                    from omni.isaac.core.utils.prims import (  # type: ignore[import-not-found]
+                        delete_prim,
+                    )
+
+                    delete_prim(prim_path)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                logger.error("Failed to remove camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to remove camera '{name}': {e}"}],
+                }
+
+            del self._cameras[name]
+            if prim_path in self._prim_registry:
+                self._prim_registry.remove(prim_path)
+
+            logger.info("Removed camera '%s' (prim=%s)", name, prim_path)
+            return {
+                "status": "success",
+                "content": [{"text": f"Camera '{name}' removed."}],
+            }
+
+    def _create_camera_prim(
+        self,
+        *,
+        name: str,
+        prim_path: str,
+        position: list[float],
+        target: list[float] | None,
+        width: int,
+        height: int,
+        fov_deg: float,
+    ) -> tuple[Any, float]:
+        """Construct the omni.isaac.sensor.Camera prim + apply look-at + FOV.
+
+        Returns the camera handle plus the resolved focal length in mm
+        so :meth:`add_camera` can surface the actually-used focal length
+        in its structured json payload.
+
+        Lazy-imports both ``omni.isaac.sensor.Camera`` and
+        ``omni.isaac.core.utils.viewports.set_camera_view`` so the
+        module loads cleanly without Isaac Sim installed (the call
+        site only runs after :meth:`create_world` has booted
+        ``SimulationApp``).
+        """
+        import math
+
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.sensor import Camera  # type: ignore[import-not-found]
+
+        camera = Camera(
+            prim_path=prim_path,
+            name=name,
+            position=np.asarray(position, dtype=float),
+            resolution=(int(width), int(height)),
+        )
+        # ``initialize`` allocates the RTX render product + annotators.
+        # Some Camera builds defer this to first ``get_rgba()`` call;
+        # call it explicitly so an init-time failure surfaces here
+        # (and gets caught by the cleanup clause in add_camera) rather
+        # than silently on the first render attempt.
+        camera.initialize()
+
+        # Map FOV (deg, horizontal) to focal length (mm) using the
+        # standard pinhole lens relation:
+        #
+        #     focal_length = horizontal_aperture / (2 * tan(fov / 2))
+        #
+        # The horizontal aperture MUST be the camera's actual aperture,
+        # read back from the prim -- assuming a nominal 24 mm is wrong on
+        # Isaac's Camera (its default aperture + unit convention yield
+        # fx≈6348 px at 640 px, i.e. a ~6° telephoto, instead of the
+        # intended 60° / fx≈554). Deriving the focal length from the
+        # read-back aperture makes the resulting pixel intrinsics
+        # fx = width / (2*tan(fov/2)) exactly, independent of the
+        # aperture's absolute value or units.
+        try:
+            horizontal_aperture_mm = float(camera.get_horizontal_aperture())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            horizontal_aperture_mm = 24.0
+        focal_length_mm = horizontal_aperture_mm / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+        camera.set_focal_length(focal_length_mm)
+
+        # Enable the depth annotator on the RTX render product. Isaac
+        # Sim's Camera ships with rgba enabled by default but depth
+        # is opt-in via this method; without it, ``camera.get_depth()``
+        # returns ``None`` with a "Annotator 'distance_to_image_plane'
+        # not found" warning -- which then crashes downstream
+        # ``np.asarray`` calls in ``render()``. Caught during PR #61
+        # GPU validation against the Isaac Sim 4.5 docker image.
+        # ``add_distance_to_image_plane_to_frame`` is idempotent on
+        # repeat calls so this is safe even if the camera has already
+        # been initialized with depth elsewhere.
+        try:
+            camera.add_distance_to_image_plane_to_frame()
+        except (AttributeError, RuntimeError):
+            # Older Isaac Sim builds expose this under a different name
+            # (``add_depth_to_frame``). Try the fallback before giving
+            # up; downstream ``get_depth`` will still return ``None``
+            # but ``render()``'s defensive None-handling (PR #62) will
+            # cover it.
+            try:
+                camera.add_depth_to_frame()
+            except (AttributeError, RuntimeError):
+                logger.debug(
+                    "Camera %s: depth annotator not enabled; ``get_depth()`` will return None",
+                    name,
+                )
+
+        # Apply look-at after focal-length so the camera's forward axis
+        # is correctly oriented at the target. ``set_camera_view`` works
+        # on any USD camera prim by path; no Camera-specific API.
+        if target is not None:
+            from omni.isaac.core.utils.viewports import (  # type: ignore[import-not-found]
+                set_camera_view,
+            )
+
+            set_camera_view(eye=position, target=target, camera_prim_path=prim_path)
+
+        return camera, focal_length_mm
 
     # --- Isaac-specific: Fleet Replication -----------------------------------
 

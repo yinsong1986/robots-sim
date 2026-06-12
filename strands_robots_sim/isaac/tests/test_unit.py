@@ -696,3 +696,764 @@ class TestCreateWorldGravityScalarApi:
             f"TypeError here means surface drift surfaces as a structured "
             f"error envelope rather than an unhandled exception."
         )
+
+
+def _patched_isaac_objects_module() -> MagicMock:
+    """Build a MagicMock that stands in for ``omni.isaac.core.objects``.
+
+    Each constructor (``DynamicCuboid`` etc.) is itself a ``MagicMock``
+    that returns a unique handle; tests can assert on which class was
+    invoked, with what kwargs, by inspecting ``module.<ClassName>``
+    after the call.
+    """
+    mod = MagicMock()
+    for cls_name in (
+        "DynamicCuboid",
+        "DynamicSphere",
+        "DynamicCylinder",
+        "DynamicCapsule",
+        "FixedCuboid",
+        "FixedSphere",
+        "FixedCylinder",
+        "FixedCapsule",
+    ):
+        # A new MagicMock per attribute so .return_value / .call_args
+        # are isolated per shape.
+        getattr(mod, cls_name).return_value = MagicMock(name=f"{cls_name}_handle")
+    return mod
+
+
+def _make_simulation_with_world() -> "tuple[object, MagicMock]":
+    """Build an ``IsaacSimulation`` with ``_world_created=True`` and a
+    mocked ``_world.scene`` so ``add_object`` / ``remove_object`` can
+    exercise their full Phase 2 wiring without booting Isaac Sim.
+
+    Returns the simulation plus the mock scene so tests can assert on
+    ``scene.add`` / ``scene.remove_object`` call shapes.
+    """
+    from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+    sim = IsaacSimulation()
+    sim._world_created = True
+    sim._world = MagicMock()
+    sim._world.scene = MagicMock()
+    return sim, sim._world.scene
+
+
+class TestAddObjectPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.add_object``.
+
+    Pins the eight (shape, is_static) combinations onto their respective
+    ``omni.isaac.core.objects`` constructors plus the structured success
+    envelope (json payload, prim path, registry side-effects).
+    """
+
+    def test_returns_error_without_world(self) -> None:
+        """Pre-create_world() call must return a structured error -- no
+        prim creation, no scene call, no registry side-effects.
+        """
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.add_object("test")
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_returns_error_on_unknown_shape(self) -> None:
+        """Unknown shape returns the structured error envelope and does
+        not call into the omni.isaac.core.objects module.
+        """
+        sim, scene = _make_simulation_with_world()
+        result = sim.add_object("test", shape="dodecahedron")
+        assert result["status"] == "error"
+        assert "dodecahedron" in result["content"][0]["text"]
+        assert "box" in result["content"][0]["text"]  # valid shapes listed
+        scene.add.assert_not_called()
+
+    def test_returns_error_on_duplicate_name(self) -> None:
+        """Re-adding a previously-added object must return error rather
+        than silently overwriting the existing prim.
+        """
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            r1 = sim.add_object("cube", shape="box")
+            r2 = sim.add_object("cube", shape="box")
+        assert r1["status"] == "success"
+        assert r2["status"] == "error"
+        assert "already exists" in r2["content"][0]["text"]
+        # Only one scene.add call landed; the duplicate is rejected before
+        # any prim work.
+        assert scene.add.call_count == 1
+
+    def test_box_default_calls_dynamic_cuboid(self) -> None:
+        """``shape="box"`` (default ``is_static=False``) constructs a
+        ``DynamicCuboid`` and registers it with ``world.scene.add``.
+        """
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("cube", shape="box", position=[1, 2, 3])
+        assert result["status"] == "success"
+        fake_objects.DynamicCuboid.assert_called_once()
+        fake_objects.FixedCuboid.assert_not_called()
+        scene.add.assert_called_once_with(fake_objects.DynamicCuboid.return_value)
+
+    def test_box_static_calls_fixed_cuboid_without_mass(self) -> None:
+        """``is_static=True`` selects ``FixedCuboid`` and **does not** pass
+        ``mass`` (Fixed* constructors don't take it).
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("anchor", shape="box", is_static=True, mass=5.0)
+        fake_objects.FixedCuboid.assert_called_once()
+        fake_objects.DynamicCuboid.assert_not_called()
+        kwargs = fake_objects.FixedCuboid.call_args.kwargs
+        assert "mass" not in kwargs, "Fixed* constructors must not receive mass kwarg"
+
+    def test_box_size_per_component_fallback(self) -> None:
+        """``box`` honours the docstring's per-component fallback contract.
+
+        Pin: lists shorter than 3 entries fall back to defaults for the
+        missing trailing components -- they don't reset the whole scale
+        to defaults. Mirrors the cylinder / capsule pattern.
+
+        Pre-fix behaviour was all-or-nothing: ``size=[0.10]`` silently
+        yielded ``[0.05, 0.05, 0.05]`` (default cube), contradicting
+        the documented contract. PR #60 review caught this; this test
+        locks the fixed shape so it can't drift back.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            r1 = sim.add_object("a", shape="box", size=[0.10])
+            r2 = sim.add_object("b", shape="box", size=[0.10, 0.20])
+            r3 = sim.add_object("c", shape="box", size=[0.10, 0.20, 0.30])
+            r4 = sim.add_object("d", shape="box")  # default
+        # 1-vec: x supplied, y/z default
+        assert r1["content"][0]["json"]["size"] == [0.10, 0.05, 0.05]
+        # 2-vec: x, y supplied; z default
+        assert r2["content"][0]["json"]["size"] == [0.10, 0.20, 0.05]
+        # 3-vec: all supplied
+        assert r3["content"][0]["json"]["size"] == [0.10, 0.20, 0.30]
+        # No size: all defaults
+        assert r4["content"][0]["json"]["size"] == [0.05, 0.05, 0.05]
+        # The same scale flows to the underlying DynamicCuboid call.
+        kwargs_1 = fake_objects.DynamicCuboid.call_args_list[0].kwargs
+        assert list(kwargs_1["scale"]) == [0.10, 0.05, 0.05]
+
+    def test_sphere_passes_radius_not_scale(self) -> None:
+        """``shape="sphere"`` uses the ``radius=`` kwarg, not ``scale=``."""
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("ball", shape="sphere", size=[0.07])
+        fake_objects.DynamicSphere.assert_called_once()
+        kwargs = fake_objects.DynamicSphere.call_args.kwargs
+        assert kwargs["radius"] == 0.07
+        assert "scale" not in kwargs
+
+    def test_cylinder_passes_radius_and_height(self) -> None:
+        """``shape="cylinder"`` uses ``radius=`` + ``height=`` kwargs.
+
+        Defaults to the documented (0.05, 0.10) when ``size`` is shorter
+        than 2 entries.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("can_a", shape="cylinder", size=[0.04, 0.20])
+            sim.add_object("can_b", shape="cylinder")  # default size
+        kwargs_a = fake_objects.DynamicCylinder.call_args_list[0].kwargs
+        kwargs_b = fake_objects.DynamicCylinder.call_args_list[1].kwargs
+        assert kwargs_a["radius"] == 0.04
+        assert kwargs_a["height"] == 0.20
+        assert kwargs_b["radius"] == 0.05
+        assert kwargs_b["height"] == 0.10
+
+    def test_capsule_passes_radius_and_height(self) -> None:
+        """``shape="capsule"`` uses the same (radius, height) shape as cylinder."""
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("pill", shape="capsule", size=[0.03, 0.08])
+        kwargs = fake_objects.DynamicCapsule.call_args.kwargs
+        assert kwargs["radius"] == 0.03
+        assert kwargs["height"] == 0.08
+
+    def test_rgba_color_truncates_to_rgb(self) -> None:
+        """A 4-vector ``[r, g, b, a]`` color is truncated to ``[r, g, b]``.
+
+        Mirrors the #15 sketch's ``color=[1, 0, 0, 1]`` -- Isaac's primitive
+        constructors take a 3-vector color and would otherwise raise on
+        the alpha component.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("red_cube", shape="box", color=[1.0, 0.0, 0.0, 0.5])
+        kwargs = fake_objects.DynamicCuboid.call_args.kwargs
+        # numpy array, length 3, alpha dropped.
+        assert len(kwargs["color"]) == 3
+        assert list(kwargs["color"]) == [1.0, 0.0, 0.0]
+
+    def test_default_position_is_above_ground_plane(self) -> None:
+        """Default position is ``[0, 0, 0.5]`` so the object doesn't
+        intersect the default ground plane on spawn.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("dropped", shape="box")
+        assert result["content"][0]["json"]["position"] == [0.0, 0.0, 0.5]
+        kwargs = fake_objects.DynamicCuboid.call_args.kwargs
+        assert list(kwargs["position"]) == [0.0, 0.0, 0.5]
+
+    def test_default_orientation_is_identity_quaternion(self) -> None:
+        """Default orientation is ``[1, 0, 0, 0]`` (identity quaternion, w-first)."""
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("aligned", shape="box")
+        assert result["content"][0]["json"]["orientation"] == [1.0, 0.0, 0.0, 0.0]
+
+    def test_success_envelope_carries_structured_json(self) -> None:
+        """Success envelope's ``content[0].json`` carries name / prim_path /
+        shape / position / orientation / size / mass / is_static.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object(
+                "cube",
+                shape="box",
+                position=[1, 2, 3],
+                size=[0.1, 0.2, 0.3],
+                mass=0.5,
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "cube"
+        assert info["prim_path"] == "/World/Objects/cube"
+        assert info["shape"] == "box"
+        assert info["position"] == [1, 2, 3]
+        assert info["size"] == [0.1, 0.2, 0.3]
+        assert info["mass"] == 0.5
+        assert info["is_static"] is False
+
+    def test_static_object_reports_zero_mass_in_json(self) -> None:
+        """Static objects surface ``mass=0.0`` in the json payload (the
+        ``mass=`` kwarg is not passed to ``Fixed*`` constructors, so the
+        envelope reports the dynamics-effective value, which is zero).
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("anchor", shape="box", is_static=True, mass=5.0)
+        info = result["content"][0]["json"]
+        assert info["mass"] == 0.0
+        assert info["is_static"] is True
+
+    def test_failure_in_constructor_returns_error_no_registry_pollution(self) -> None:
+        """If the omni constructor raises, no registry / scene state is
+        recorded -- the caller can retry under the same name.
+        """
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        fake_objects.DynamicCuboid.side_effect = RuntimeError("USD prim collision")
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("cube", shape="box")
+        assert result["status"] == "error"
+        assert "USD prim collision" in result["content"][0]["text"]
+        scene.add.assert_not_called()
+        assert "cube" not in sim._objects
+        assert "/World/Objects/cube" not in sim._prim_registry
+
+    def test_failure_in_scene_add_returns_error_no_registry_pollution(self) -> None:
+        """If ``world.scene.add`` raises, registries are not updated."""
+        sim, scene = _make_simulation_with_world()
+        scene.add.side_effect = RuntimeError("scene already replicated")
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("cube", shape="box")
+        assert result["status"] == "error"
+        assert "scene already replicated" in result["content"][0]["text"]
+        assert "cube" not in sim._objects
+        assert "/World/Objects/cube" not in sim._prim_registry
+
+    def test_prim_registry_and_objects_dict_are_updated_on_success(self) -> None:
+        """A successful add_object updates both ``_prim_registry`` and
+        ``_objects[name]``. Pinned because :meth:`destroy` and
+        :meth:`get_state` rely on the dual-bookkeeping invariant.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("cube", shape="box")
+        assert "cube" in sim._objects
+        assert sim._objects["cube"].prim_path == "/World/Objects/cube"
+        assert sim._objects["cube"].shape == "box"
+        assert sim._objects["cube"].is_static is False
+        assert "/World/Objects/cube" in sim._prim_registry
+
+
+class TestRemoveObjectPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.remove_object``.
+
+    Paired with :class:`TestAddObjectPhase2`; pins that
+    ``world.scene.remove_object`` is invoked, registries are pruned, and
+    the operation is retry-friendly on transient scene failures.
+    """
+
+    def _add_a_cube(self) -> "tuple[object, MagicMock]":
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("cube", shape="box")
+        scene.reset_mock()  # so subsequent assertions see only remove activity
+        return sim, scene
+
+    def test_returns_error_for_unknown_name(self) -> None:
+        """Removing an object that was never added returns error and
+        does not call into ``world.scene``.
+        """
+        sim, scene = _make_simulation_with_world()
+        result = sim.remove_object("ghost")
+        assert result["status"] == "error"
+        assert "not found" in result["content"][0]["text"]
+        scene.remove_object.assert_not_called()
+
+    def test_calls_world_scene_remove_object_with_name(self) -> None:
+        """Successful remove_object delegates to ``world.scene.remove_object(name)``."""
+        sim, scene = self._add_a_cube()
+        result = sim.remove_object("cube")
+        assert result["status"] == "success"
+        scene.remove_object.assert_called_once_with("cube")
+
+    def test_prunes_objects_dict_and_prim_registry_on_success(self) -> None:
+        """Both ``_objects`` and ``_prim_registry`` are pruned by
+        a successful remove_object.
+        """
+        sim, _ = self._add_a_cube()
+        sim.remove_object("cube")
+        assert "cube" not in sim._objects
+        assert "/World/Objects/cube" not in sim._prim_registry
+
+    def test_scene_remove_failure_keeps_bookkeeping_for_retry(self) -> None:
+        """If ``world.scene.remove_object`` raises a ``RuntimeError``,
+        the in-Python registries are **not** pruned -- the caller can
+        retry under the same name (e.g. after a stage refresh).
+        """
+        sim, scene = self._add_a_cube()
+        scene.remove_object.side_effect = RuntimeError("stage closed")
+        result = sim.remove_object("cube")
+        assert result["status"] == "error"
+        assert "stage closed" in result["content"][0]["text"]
+        # Bookkeeping retained for retry.
+        assert "cube" in sim._objects
+        assert "/World/Objects/cube" in sim._prim_registry
+
+    def test_remove_after_world_torn_down_still_succeeds(self) -> None:
+        """If ``self._world`` was set to ``None`` (post-destroy), remove
+        still cleans up the in-Python bookkeeping rather than crashing
+        on the ``world.scene`` lookup.
+        """
+        sim, _ = self._add_a_cube()
+        sim._world = None
+        result = sim.remove_object("cube")
+        assert result["status"] == "success"
+        assert "cube" not in sim._objects
+
+
+class TestDestroyAndGetStateSurfaceObjects:
+    """Pin: ``destroy()`` and ``get_state()`` surface ``num_objects``
+    in their structured json payloads, mirroring ``num_robots`` /
+    ``num_cameras``. Required so an agent inspecting either method
+    sees the Phase 2 entity surface without re-querying.
+    """
+
+    def test_get_state_includes_num_objects(self) -> None:
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("a", shape="box")
+            sim.add_object("b", shape="sphere")
+        result = sim.get_state()
+        assert result["status"] == "success"
+        info = result["content"][0]["json"]
+        assert info["num_objects"] == 2
+        assert "objects=2" in result["content"][0]["text"]
+
+    def test_destroy_releases_objects_and_reports_count(self) -> None:
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("a", shape="box")
+            sim.add_object("b", shape="cylinder")
+        result = sim.destroy()
+        assert result["status"] == "success"
+        info = result["content"][0]["json"]
+        assert info["num_objects_released"] == 2
+        # Post-destroy the dict is empty.
+        assert sim._objects == {}
+
+
+def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported camera modules.
+
+    Returns
+    -------
+    sensor_mod, viewports_mod, stage_mod, camera_handle
+        ``sensor_mod`` stands in for ``omni.isaac.sensor`` (its
+        ``.Camera`` attribute returns a fresh handle MagicMock).
+        ``viewports_mod`` stands in for
+        ``omni.isaac.core.utils.viewports`` (``.set_camera_view``).
+        ``stage_mod`` stands in for ``omni.isaac.core.utils.prims``
+        (``.delete_prim``). ``camera_handle`` is the MagicMock the
+        ``Camera()`` constructor returns -- tests can assert on
+        ``.initialize`` / ``.set_focal_length`` calls on it.
+    """
+    sensor_mod = MagicMock()
+    viewports_mod = MagicMock()
+    stage_mod = MagicMock()
+    camera_handle = MagicMock(name="Camera_handle")
+    # add_camera derives focal length from the camera's *actual* horizontal
+    # aperture (read back via get_horizontal_aperture), so the mock must report
+    # a real number -- otherwise float(MagicMock()) defaults to 1.0. USD's
+    # nominal 24 mm keeps the pinhole relation assertions below meaningful.
+    camera_handle.get_horizontal_aperture.return_value = 24.0
+    sensor_mod.Camera.return_value = camera_handle
+    return sensor_mod, viewports_mod, stage_mod, camera_handle
+
+
+def _make_simulation_with_world_for_camera() -> object:
+    """Build an ``IsaacSimulation`` with ``_world_created=True`` and a
+    mocked ``_world`` so ``add_camera`` / ``remove_camera`` can exercise
+    their full Phase 2 wiring without booting Isaac Sim.
+    """
+    from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+    sim = IsaacSimulation()
+    sim._world_created = True
+    sim._world = MagicMock()
+    return sim
+
+
+class TestAddCameraPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.add_camera``.
+
+    Pins the underlying ``omni.isaac.sensor.Camera`` constructor + FOV /
+    look-at wiring + the structured success envelope.
+    """
+
+    def test_returns_error_without_world(self) -> None:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.add_camera()
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_returns_error_on_duplicate_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r1 = sim.add_camera("front")
+            r2 = sim.add_camera("front")
+        assert r1["status"] == "success"
+        assert r2["status"] == "error"
+        assert "already exists" in r2["content"][0]["text"]
+        # Only one Camera() construction landed; duplicate rejected
+        # before any prim work.
+        assert sensor.Camera.call_count == 1
+
+    def test_calls_omni_camera_constructor_with_resolved_kwargs(self) -> None:
+        """``Camera()`` is called with ``prim_path``, ``name``, ``position``,
+        and ``resolution`` kwargs derived from the add_camera args.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("cam0", position=[1, 2, 3], width=320, height=240)
+        kwargs = sensor.Camera.call_args.kwargs
+        assert kwargs["name"] == "cam0"
+        assert kwargs["prim_path"] == "/World/Cameras/cam0"
+        assert kwargs["resolution"] == (320, 240)
+        assert list(kwargs["position"]) == [1, 2, 3]
+        # The handle's initialize() must be called so RTX render product
+        # allocation failures surface on add_camera, not on first render.
+        handle.initialize.assert_called_once()
+
+    def test_focal_length_matches_pinhole_relation_for_default_fov(self) -> None:
+        """``fov=60`` (default, horizontal) on a 24 mm horizontal aperture
+        yields focal_length ~ 20.78 mm via the standard pinhole relation
+        ``focal = aperture / (2 * tan(fov/2))``.
+        """
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("cam_default", fov=60.0)
+        expected_focal = 24.0 / (2.0 * math.tan(math.radians(30.0)))
+        # set_focal_length called with the right value.
+        handle.set_focal_length.assert_called_once()
+        actual_focal = handle.set_focal_length.call_args.args[0]
+        assert math.isclose(actual_focal, expected_focal, rel_tol=1e-9)
+        # Same value surfaces in the json payload.
+        assert math.isclose(
+            result["content"][0]["json"]["focal_length_mm"],
+            expected_focal,
+            rel_tol=1e-9,
+        )
+
+    def test_focal_length_scales_with_fov(self) -> None:
+        """Wider FOV -> shorter focal length (basic monotonicity sanity)."""
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        captured: dict[str, float] = {}
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r45 = sim.add_camera("narrow", fov=45.0)
+            r90 = sim.add_camera("wide", fov=90.0)
+        captured["fov45"] = r45["content"][0]["json"]["focal_length_mm"]
+        captured["fov90"] = r90["content"][0]["json"]["focal_length_mm"]
+        # FOV 45 -> tan(22.5deg)=0.414 -> 24/(2*0.414)=29.0 mm
+        # FOV 90 -> tan(45deg)=1.0    -> 24/(2*1.0)  =12.0 mm
+        assert math.isclose(captured["fov45"], 24.0 / (2 * math.tan(math.radians(22.5))), rel_tol=1e-9)
+        assert math.isclose(captured["fov90"], 12.0, rel_tol=1e-9)
+        assert captured["fov45"] > captured["fov90"]
+
+    def test_target_triggers_set_camera_view(self) -> None:
+        """When ``target`` is given, ``set_camera_view`` is called with
+        ``eye=position, target=target, camera_prim_path=prim_path``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera(
+                "front",
+                position=[2, 0, 1],
+                target=[0, 0, 0.5],
+            )
+        viewports.set_camera_view.assert_called_once()
+        kwargs = viewports.set_camera_view.call_args.kwargs
+        assert kwargs["eye"] == [2, 0, 1]
+        assert kwargs["target"] == [0, 0, 0.5]
+        assert kwargs["camera_prim_path"] == "/World/Cameras/front"
+
+    def test_no_target_leaves_camera_view_unset(self) -> None:
+        """With ``target=None`` (default), ``set_camera_view`` is NOT
+        called -- the camera keeps its constructed orientation.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("free")
+        viewports.set_camera_view.assert_not_called()
+
+    def test_default_position_and_resolution(self) -> None:
+        """Default position is ``[2.0, 2.0, 2.0]`` (over-the-shoulder
+        vantage) and resolution defaults from ``IsaacConfig``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("default")
+        info = result["content"][0]["json"]
+        assert info["position"] == [2.0, 2.0, 2.0]
+        # Resolution follows the IsaacConfig defaults; pin the shape
+        # rather than the exact values (config defaults could change
+        # without breaking this contract).
+        assert isinstance(info["resolution"], list) and len(info["resolution"]) == 2
+        assert all(isinstance(d, int) and d > 0 for d in info["resolution"])
+
+    def test_failure_in_camera_constructor_returns_error_no_registry_pollution(self) -> None:
+        """If ``Camera(...)`` raises, neither ``_cameras`` nor
+        ``_prim_registry`` are updated.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        sensor.Camera.side_effect = RuntimeError("RTX render product alloc failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("broken")
+        assert result["status"] == "error"
+        assert "RTX render product alloc failed" in result["content"][0]["text"]
+        assert "broken" not in sim._cameras
+        assert "/World/Cameras/broken" not in sim._prim_registry
+
+    def test_failure_in_initialize_returns_error_no_registry_pollution(self) -> None:
+        """``Camera.initialize()`` failure (not just constructor failure)
+        also prevents registry updates -- pinned because some Isaac Sim
+        builds defer RTX work to ``initialize`` rather than the
+        constructor itself.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        handle.initialize.side_effect = RuntimeError("annotator allocation failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("late_fail")
+        assert result["status"] == "error"
+        assert "annotator allocation failed" in result["content"][0]["text"]
+        assert "late_fail" not in sim._cameras
+
+    def test_handle_stored_on_camera_state_for_later_render(self) -> None:
+        """The Camera handle is stored on ``_cameras[name].handle`` so a
+        future Phase-2.5 render-frame slice can call methods on it
+        (e.g. ``handle.get_rgba()``) without re-importing.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front")
+        assert sim._cameras["front"].handle is handle
+
+    def test_registries_updated_on_success(self) -> None:
+        """Both ``_cameras`` and ``_prim_registry`` are updated by
+        a successful add_camera.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front", width=160, height=120)
+        assert "front" in sim._cameras
+        cs = sim._cameras["front"]
+        assert cs.prim_path == "/World/Cameras/front"
+        assert cs.width == 160 and cs.height == 120
+        assert "/World/Cameras/front" in sim._prim_registry
+
+
+class TestRemoveCameraPhase2:
+    """Phase 2 (#14): new ``IsaacSimulation.remove_camera`` method.
+
+    No Phase 1 stub existed; this test class pins the new contract.
+    """
+
+    def _add_a_camera(self) -> "tuple[object, MagicMock]":
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, stage, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+                "omni.isaac.core.utils.prims": stage,
+            },
+        ):
+            sim.add_camera("front")
+        return sim, stage
+
+    def test_returns_error_for_unknown_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        result = sim.remove_camera("ghost")
+        assert result["status"] == "error"
+        assert "not found" in result["content"][0]["text"]
+
+    def test_calls_delete_prim_with_prim_path(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        stage.delete_prim.assert_called_once_with("/World/Cameras/front")
+
+    def test_prunes_cameras_dict_and_prim_registry_on_success(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            sim.remove_camera("front")
+        assert "front" not in sim._cameras
+        assert "/World/Cameras/front" not in sim._prim_registry
+
+    def test_delete_prim_failure_keeps_bookkeeping_for_retry(self) -> None:
+        """If ``delete_prim`` raises, registries are not pruned -- the
+        caller can retry under the same name (e.g. after a stage refresh).
+        """
+        sim, stage = self._add_a_camera()
+        stage.delete_prim.side_effect = RuntimeError("stage closed")
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "error"
+        assert "stage closed" in result["content"][0]["text"]
+        assert "front" in sim._cameras
+        assert "/World/Cameras/front" in sim._prim_registry
+
+    def test_remove_after_world_torn_down_still_succeeds(self) -> None:
+        """Post-destroy (``self._world is None``) still cleans the
+        in-Python bookkeeping rather than crashing on the lazy import.
+        """
+        sim, stage = self._add_a_camera()
+        sim._world = None
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        assert "front" not in sim._cameras
+        # delete_prim is NOT called when world is None (we skip the
+        # stage-touching path entirely; the in-Python registries are
+        # the only thing left to clean).
+        stage.delete_prim.assert_not_called()
