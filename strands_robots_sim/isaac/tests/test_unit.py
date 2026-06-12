@@ -1445,3 +1445,364 @@ class TestAddRobotUrdfBranchPhase2:
         assert result["status"] == "error"
         assert "articulation root not in URDF" in result["content"][0]["text"]
         assert "bad" not in sim._robots
+
+
+def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported camera modules.
+
+    Returns
+    -------
+    sensor_mod, viewports_mod, stage_mod, camera_handle
+        ``sensor_mod`` stands in for ``omni.isaac.sensor`` (its
+        ``.Camera`` attribute returns a fresh handle MagicMock).
+        ``viewports_mod`` stands in for
+        ``omni.isaac.core.utils.viewports`` (``.set_camera_view``).
+        ``stage_mod`` stands in for ``omni.isaac.core.utils.prims``
+        (``.delete_prim``). ``camera_handle`` is the MagicMock the
+        ``Camera()`` constructor returns -- tests can assert on
+        ``.initialize`` / ``.set_focal_length`` calls on it.
+    """
+    sensor_mod = MagicMock()
+    viewports_mod = MagicMock()
+    stage_mod = MagicMock()
+    camera_handle = MagicMock(name="Camera_handle")
+    # add_camera derives focal length from the camera's *actual* horizontal
+    # aperture (read back via get_horizontal_aperture), so the mock must report
+    # a real number -- otherwise float(MagicMock()) defaults to 1.0. USD's
+    # nominal 24 mm keeps the pinhole relation assertions below meaningful.
+    camera_handle.get_horizontal_aperture.return_value = 24.0
+    sensor_mod.Camera.return_value = camera_handle
+    return sensor_mod, viewports_mod, stage_mod, camera_handle
+
+
+def _make_simulation_with_world_for_camera() -> object:
+    """Build an ``IsaacSimulation`` with ``_world_created=True`` and a
+    mocked ``_world`` so ``add_camera`` / ``remove_camera`` can exercise
+    their full Phase 2 wiring without booting Isaac Sim.
+    """
+    from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+    sim = IsaacSimulation()
+    sim._world_created = True
+    sim._world = MagicMock()
+    return sim
+
+
+class TestAddCameraPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.add_camera``.
+
+    Pins the underlying ``omni.isaac.sensor.Camera`` constructor + FOV /
+    look-at wiring + the structured success envelope.
+    """
+
+    def test_returns_error_without_world(self) -> None:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.add_camera()
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_returns_error_on_duplicate_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r1 = sim.add_camera("front")
+            r2 = sim.add_camera("front")
+        assert r1["status"] == "success"
+        assert r2["status"] == "error"
+        assert "already exists" in r2["content"][0]["text"]
+        # Only one Camera() construction landed; duplicate rejected
+        # before any prim work.
+        assert sensor.Camera.call_count == 1
+
+    def test_calls_omni_camera_constructor_with_resolved_kwargs(self) -> None:
+        """``Camera()`` is called with ``prim_path``, ``name``, ``position``,
+        and ``resolution`` kwargs derived from the add_camera args.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("cam0", position=[1, 2, 3], width=320, height=240)
+        kwargs = sensor.Camera.call_args.kwargs
+        assert kwargs["name"] == "cam0"
+        assert kwargs["prim_path"] == "/World/Cameras/cam0"
+        assert kwargs["resolution"] == (320, 240)
+        assert list(kwargs["position"]) == [1, 2, 3]
+        # The handle's initialize() must be called so RTX render product
+        # allocation failures surface on add_camera, not on first render.
+        handle.initialize.assert_called_once()
+
+    def test_focal_length_matches_pinhole_relation_for_default_fov(self) -> None:
+        """``fov=60`` (default, horizontal) on a 24 mm horizontal aperture
+        yields focal_length ~ 20.78 mm via the standard pinhole relation
+        ``focal = aperture / (2 * tan(fov/2))``.
+        """
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("cam_default", fov=60.0)
+        expected_focal = 24.0 / (2.0 * math.tan(math.radians(30.0)))
+        # set_focal_length called with the right value.
+        handle.set_focal_length.assert_called_once()
+        actual_focal = handle.set_focal_length.call_args.args[0]
+        assert math.isclose(actual_focal, expected_focal, rel_tol=1e-9)
+        # Same value surfaces in the json payload.
+        assert math.isclose(
+            result["content"][0]["json"]["focal_length_mm"],
+            expected_focal,
+            rel_tol=1e-9,
+        )
+
+    def test_focal_length_scales_with_fov(self) -> None:
+        """Wider FOV -> shorter focal length (basic monotonicity sanity)."""
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        captured: dict[str, float] = {}
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r45 = sim.add_camera("narrow", fov=45.0)
+            r90 = sim.add_camera("wide", fov=90.0)
+        captured["fov45"] = r45["content"][0]["json"]["focal_length_mm"]
+        captured["fov90"] = r90["content"][0]["json"]["focal_length_mm"]
+        # FOV 45 -> tan(22.5deg)=0.414 -> 24/(2*0.414)=29.0 mm
+        # FOV 90 -> tan(45deg)=1.0    -> 24/(2*1.0)  =12.0 mm
+        assert math.isclose(captured["fov45"], 24.0 / (2 * math.tan(math.radians(22.5))), rel_tol=1e-9)
+        assert math.isclose(captured["fov90"], 12.0, rel_tol=1e-9)
+        assert captured["fov45"] > captured["fov90"]
+
+    def test_target_triggers_set_camera_view(self) -> None:
+        """When ``target`` is given, ``set_camera_view`` is called with
+        ``eye=position, target=target, camera_prim_path=prim_path``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera(
+                "front",
+                position=[2, 0, 1],
+                target=[0, 0, 0.5],
+            )
+        viewports.set_camera_view.assert_called_once()
+        kwargs = viewports.set_camera_view.call_args.kwargs
+        assert kwargs["eye"] == [2, 0, 1]
+        assert kwargs["target"] == [0, 0, 0.5]
+        assert kwargs["camera_prim_path"] == "/World/Cameras/front"
+
+    def test_no_target_leaves_camera_view_unset(self) -> None:
+        """With ``target=None`` (default), ``set_camera_view`` is NOT
+        called -- the camera keeps its constructed orientation.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("free")
+        viewports.set_camera_view.assert_not_called()
+
+    def test_default_position_and_resolution(self) -> None:
+        """Default position is ``[2.0, 2.0, 2.0]`` (over-the-shoulder
+        vantage) and resolution defaults from ``IsaacConfig``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("default")
+        info = result["content"][0]["json"]
+        assert info["position"] == [2.0, 2.0, 2.0]
+        # Resolution follows the IsaacConfig defaults; pin the shape
+        # rather than the exact values (config defaults could change
+        # without breaking this contract).
+        assert isinstance(info["resolution"], list) and len(info["resolution"]) == 2
+        assert all(isinstance(d, int) and d > 0 for d in info["resolution"])
+
+    def test_failure_in_camera_constructor_returns_error_no_registry_pollution(self) -> None:
+        """If ``Camera(...)`` raises, neither ``_cameras`` nor
+        ``_prim_registry`` are updated.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        sensor.Camera.side_effect = RuntimeError("RTX render product alloc failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("broken")
+        assert result["status"] == "error"
+        assert "RTX render product alloc failed" in result["content"][0]["text"]
+        assert "broken" not in sim._cameras
+        assert "/World/Cameras/broken" not in sim._prim_registry
+
+    def test_failure_in_initialize_returns_error_no_registry_pollution(self) -> None:
+        """``Camera.initialize()`` failure (not just constructor failure)
+        also prevents registry updates -- pinned because some Isaac Sim
+        builds defer RTX work to ``initialize`` rather than the
+        constructor itself.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        handle.initialize.side_effect = RuntimeError("annotator allocation failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("late_fail")
+        assert result["status"] == "error"
+        assert "annotator allocation failed" in result["content"][0]["text"]
+        assert "late_fail" not in sim._cameras
+
+    def test_handle_stored_on_camera_state_for_later_render(self) -> None:
+        """The Camera handle is stored on ``_cameras[name].handle`` so a
+        future Phase-2.5 render-frame slice can call methods on it
+        (e.g. ``handle.get_rgba()``) without re-importing.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front")
+        assert sim._cameras["front"].handle is handle
+
+    def test_registries_updated_on_success(self) -> None:
+        """Both ``_cameras`` and ``_prim_registry`` are updated by
+        a successful add_camera.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front", width=160, height=120)
+        assert "front" in sim._cameras
+        cs = sim._cameras["front"]
+        assert cs.prim_path == "/World/Cameras/front"
+        assert cs.width == 160 and cs.height == 120
+        assert "/World/Cameras/front" in sim._prim_registry
+
+
+class TestRemoveCameraPhase2:
+    """Phase 2 (#14): new ``IsaacSimulation.remove_camera`` method.
+
+    No Phase 1 stub existed; this test class pins the new contract.
+    """
+
+    def _add_a_camera(self) -> "tuple[object, MagicMock]":
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, stage, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+                "omni.isaac.core.utils.prims": stage,
+            },
+        ):
+            sim.add_camera("front")
+        return sim, stage
+
+    def test_returns_error_for_unknown_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        result = sim.remove_camera("ghost")
+        assert result["status"] == "error"
+        assert "not found" in result["content"][0]["text"]
+
+    def test_calls_delete_prim_with_prim_path(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        stage.delete_prim.assert_called_once_with("/World/Cameras/front")
+
+    def test_prunes_cameras_dict_and_prim_registry_on_success(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            sim.remove_camera("front")
+        assert "front" not in sim._cameras
+        assert "/World/Cameras/front" not in sim._prim_registry
+
+    def test_delete_prim_failure_keeps_bookkeeping_for_retry(self) -> None:
+        """If ``delete_prim`` raises, registries are not pruned -- the
+        caller can retry under the same name (e.g. after a stage refresh).
+        """
+        sim, stage = self._add_a_camera()
+        stage.delete_prim.side_effect = RuntimeError("stage closed")
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "error"
+        assert "stage closed" in result["content"][0]["text"]
+        assert "front" in sim._cameras
+        assert "/World/Cameras/front" in sim._prim_registry
+
+    def test_remove_after_world_torn_down_still_succeeds(self) -> None:
+        """Post-destroy (``self._world is None``) still cleans the
+        in-Python bookkeeping rather than crashing on the lazy import.
+        """
+        sim, stage = self._add_a_camera()
+        sim._world = None
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        assert "front" not in sim._cameras
+        # delete_prim is NOT called when world is None (we skip the
+        # stage-touching path entirely; the in-Python registries are
+        # the only thing left to clean).
+        stage.delete_prim.assert_not_called()
