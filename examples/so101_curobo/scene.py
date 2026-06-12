@@ -75,6 +75,14 @@ def make_sim(backend: str = "mujoco", **isaac_kwargs: Any):
         return Simulation(tool_name="sim", mesh=False)
 
     if backend in ("isaac", "isaacsim", "isaac_sim"):
+        # Register the example's Isaac backend (issue #67 T1) so
+        # create_simulation("isaac") resolves. No-op when Isaac isn't installed.
+        try:
+            from .isaac import register as _register_isaac
+
+            _register_isaac()
+        except Exception:  # noqa: BLE001 - registration is best-effort
+            logger.debug("Isaac backend registration skipped", exc_info=True)
         try:
             from strands_robots.simulation import create_simulation
         except Exception as exc:  # noqa: BLE001
@@ -86,16 +94,15 @@ def make_sim(backend: str = "mujoco", **isaac_kwargs: Any):
         try:
             return create_simulation(
                 "isaac",
-                render_mode=isaac_kwargs.pop("render_mode", "rtx_realtime"),
                 headless=isaac_kwargs.pop("headless", True),
                 **isaac_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - runtime missing / not wired
             raise RuntimeError(
                 f"Could not create the Isaac Sim backend ({type(exc).__name__}: {exc}). "
-                "The Isaac Sim runtime (~30 GB: Omniverse / nvcr.io/nvidia/isaac-sim) "
-                "and backend registration (#67 T1) are required. Falling back to "
-                "MuJoCo is recommended on boxes without it."
+                "The Isaac Sim runtime (Python 3.10 venv with `isaacsim`) is required; "
+                "see examples/so101_curobo/isaac for the validated install recipe. "
+                "Falling back to MuJoCo is recommended on boxes without it."
             ) from exc
 
     raise ValueError(f"Unknown backend {backend!r}. Use 'mujoco' or 'isaac'.")
@@ -213,10 +220,19 @@ def build_pick_place_scene(
             logger.info("bin marker not added (non-fatal): %s", r)
 
     cams = []
+    # Camera rig (Isaac framing). Scene of interest spans x[-0.05,0.40]
+    # y[-0.06,0.25] z[0,0.27] at the default pose (arm base at origin, arm
+    # reaches along +X; red cube at [0.2,0.2], green bin at [0.0,0.25]).
+    #
+    # The arm is THIN in Y, so a *low* front camera looking along +Y sees it
+    # edge-on AND backlit against the bright sky (dark silhouette, top clipped).
+    # Fix: raise the front camera (z=0.62) so it looks DOWN at the arm against
+    # the floor -- the arm is then top-lit (reads yellow, not a silhouette) and
+    # fully in frame. The oblique corner view already reads the arm well.
     for name, pos, tgt, fov in (
-        ("front", [0.05, -0.95, 0.45], [0.05, 0.05, 0.18], 58.0),
-        ("topdown", [0.05, 0.05, 1.25], [0.05, 0.05, 0.0], 62.0),
-        ("oblique", [0.75, -0.7, 0.55], [0.05, 0.05, 0.18], 55.0),
+        ("front", [0.10, -0.95, 0.62], [0.12, 0.05, 0.22], 50.0),
+        ("topdown", [0.10, 0.08, 1.25], [0.10, 0.08, 0.0], 48.0),
+        ("oblique", [0.75, -0.70, 0.52], [0.10, 0.08, 0.18], 42.0),
     ):
         if _status(sim.add_camera(name=name, position=pos, target=tgt, fov=fov, width=cw, height=ch)) == "success":
             cams.append(name)

@@ -46,6 +46,7 @@ def build_ui(demo, agent: "object | None" = None):
                     n_eps = gr.Number(value=5, precision=0, label="Episodes", minimum=1, maximum=100, scale=1)
                     gen_btn = gr.Button("Generate N episodes", variant="primary", scale=2)
                 status = gr.Textbox(label="status", interactive=False, value=demo.describe())
+                video = gr.Video(label="Recorded episode (selected camera)", height=360, autoplay=True)
             with gr.Column(scale=2):
                 disabled = agent is None
                 chat_label = "Agent" + (" (disabled — no LLM backend)" if disabled else "")
@@ -70,17 +71,21 @@ def build_ui(demo, agent: "object | None" = None):
 
         def on_run(cam):
             text = demo.plan_and_execute(task=DEFAULT_TASK)
-            return demo.render(cam), text
+            return demo.render(cam), text, demo.latest_video(cam)
 
         def on_generate(cam, n):
             summary = demo.record_dataset(n_episodes=int(n or 1))
             if summary.get("status") != "success":
-                return demo.render(cam), f"Could not record: {summary.get('message', summary)}"
+                return demo.render(cam), f"Could not record: {summary.get('message', summary)}", None
             text = (
                 f"Recorded {summary['episodes']} episodes ({summary['total_frames']} frames, "
                 f"planner={summary['planner']}, success_rate={summary['success_rate']:.0%}) -> {summary['repo_id']}"
             )
-            return demo.render(cam), text
+            return demo.render(cam), text, demo.latest_video(cam)
+
+        def on_show_video(cam):
+            # Re-fetch the recorded video for the selected camera (no re-run).
+            return demo.latest_video(cam)
 
         def on_chat(message, history):
             history = list(history or [])
@@ -101,8 +106,9 @@ def build_ui(demo, agent: "object | None" = None):
 
         refresh_btn.click(on_refresh, inputs=[cam_dd], outputs=[preview])
         cam_dd.change(on_refresh, inputs=[cam_dd], outputs=[preview])
-        run_btn.click(on_run, inputs=[cam_dd], outputs=[preview, status])
-        gen_btn.click(on_generate, inputs=[cam_dd, n_eps], outputs=[preview, status])
+        cam_dd.change(on_show_video, inputs=[cam_dd], outputs=[video])
+        run_btn.click(on_run, inputs=[cam_dd], outputs=[preview, status, video])
+        gen_btn.click(on_generate, inputs=[cam_dd, n_eps], outputs=[preview, status, video])
         chat_io = dict(inputs=[msg, chatbot], outputs=[msg, chatbot, preview])
         send_btn.click(on_chat, **chat_io)
         msg.submit(on_chat, **chat_io)
@@ -168,6 +174,27 @@ def main(argv: "list[str] | None" = None) -> None:
 
     ui = build_ui(demo, agent=agent)
     print(f"[so101_curobo] UI at http://{args.server_name}:{args.server_port} — Ctrl-C to stop", flush=True)
+
+    # Isaac Sim's renderer/physics may only be driven from the thread that
+    # created SimulationApp (the main thread); Gradio serves callbacks on worker
+    # threads where that deadlocks. So for the Isaac backend we launch Gradio in
+    # a daemon thread and run the sim's pump() loop on the main thread (it
+    # applies queued actions, steps, and caches camera frames the UI reads).
+    sim = getattr(demo, "sim", None)
+    if args.backend in ("isaac", "isaacsim", "isaac_sim") and hasattr(sim, "run_pump_forever"):
+        import threading
+
+        threading.Thread(
+            target=ui.launch,
+            kwargs=dict(server_name=args.server_name, server_port=args.server_port, share=args.share),
+            daemon=True,
+        ).start()
+        try:
+            sim.run_pump_forever()
+        except KeyboardInterrupt:
+            print("[so101_curobo] stopping...", flush=True)
+        return
+
     ui.launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
 
 

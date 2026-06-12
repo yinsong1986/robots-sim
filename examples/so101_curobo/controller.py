@@ -116,10 +116,20 @@ class SO101CuroboDemo:
             self.planner = _FallbackPlanner(
                 make_planner(prefer=self.prefer_planner, robot_cfg="so101", **self.planner_kwargs)
             )
-            robot_urdf = None
-            if getattr(self.planner.primary, "name", "") == "curobo":
-                import os
+            # Resolve a URDF for the sim arm when needed: the cuRobo planner
+            # needs the sim to load the SAME URDF it plans with (identical joint
+            # conventions + EE frame), and the Isaac backend has no data_config
+            # path at all -- it requires a URDF. In both cases load the arm from
+            # that URDF so plans execute correctly / the backend can build it.
+            import os
 
+            needs_urdf = getattr(self.planner.primary, "name", "") == "curobo" or self.backend in (
+                "isaac",
+                "isaacsim",
+                "isaac_sim",
+            )
+            robot_urdf = None
+            if needs_urdf:
                 robot_urdf = self.planner_kwargs.get("urdf_path") or os.environ.get("SO101_URDF")
             self.scene = build_pick_place_scene(
                 self.sim, camera_size=self.camera_size, backend=backend, robot_urdf=robot_urdf
@@ -222,6 +232,58 @@ class SO101CuroboDemo:
                 self.current_camera = camera
                 return f"Camera set to {camera}."
             return f"Unknown camera {camera!r}. Options: {self.scene.cameras if self.scene else []}."
+
+    def latest_video(self, camera: Optional[str] = None) -> Optional[str]:
+        """Path to a browser-playable MP4 of the most recent recording for ``camera``.
+
+        The collector writes a LeRobot v2.1 dataset under ``root`` with one video
+        per camera at ``videos/observation.images.<camera>/chunk-*/file-*.mp4``.
+        LeRobot encodes those as **AV1**, which browsers/``gr.Video`` generally
+        cannot play, so we transcode the newest match to **H.264** in a temp file
+        (cached by source mtime). Returns the H.264 path, or ``None`` if nothing
+        has been recorded yet.
+        """
+        import glob
+        import os
+
+        cam = camera or self.current_camera
+        root = getattr(self.collector, "root", None) or self.root
+        if not root or not cam:
+            return None
+        pattern = os.path.join(root, "videos", f"observation.images.{cam}", "**", "*.mp4")
+        matches = glob.glob(pattern, recursive=True)
+        if not matches:
+            return None
+        src = max(matches, key=os.path.getmtime)
+        return self._h264(src, cam)
+
+    def _h264(self, src: str, cam: str) -> Optional[str]:
+        """Transcode ``src`` (LeRobot AV1) to a cached H.264 mp4 for browser playback."""
+        import os
+        import subprocess
+        import tempfile
+
+        try:
+            import imageio_ffmpeg
+
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001 - no ffmpeg -> hand back the source as-is
+            return src
+        mtime = int(os.path.getmtime(src))
+        out = os.path.join(tempfile.gettempdir(), f"so101_{cam}_{mtime}.mp4")
+        if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+            return out
+        try:
+            subprocess.run(
+                [ffmpeg, "-y", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            return out
+        except Exception:  # noqa: BLE001 - transcode failed -> source path (may not play)
+            logger.debug("h264 transcode failed for %s", src, exc_info=True)
+            return src
 
     def describe(self) -> str:
         bits: List[str] = []
