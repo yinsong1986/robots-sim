@@ -161,6 +161,30 @@ def _suite_for_task(task: str) -> str:
     return f"libero_{parts[1]}"
 
 
+def _resolve_hf_token() -> str:
+    """Resolve a HuggingFace token for the gated GR00T checkpoint download.
+
+    Prefers the ``HF_TOKEN`` (or ``HUGGING_FACE_HUB_TOKEN``) environment
+    variable -- CI / container environments typically inject the token that
+    way and don't have the ``~/.cache/huggingface/token`` file that
+    ``huggingface-cli login`` writes. Falls back to that file for interactive
+    dev boxes. Raises if neither is present.
+    """
+    from pathlib import Path
+
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env_token and env_token.strip():
+        return env_token.strip()
+    hf_token_path = Path("~/.cache/huggingface/token").expanduser()
+    if hf_token_path.is_file():
+        return hf_token_path.read_text().strip()
+    raise RuntimeError(
+        "--policy groot needs an HF token (Cosmos-Reason2-2B is gated). "
+        "Set the HF_TOKEN env var (preferred for CI), or run "
+        "`huggingface-cli login` to write ~/.cache/huggingface/token, then retry."
+    )
+
+
 def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
     """Start the GR00T inference container and block until model loads.
 
@@ -173,15 +197,9 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
         return None
 
     import subprocess
-    from pathlib import Path
     from time import monotonic, sleep
 
-    hf_token_path = Path("~/.cache/huggingface/token").expanduser()
-    if not hf_token_path.is_file():
-        raise RuntimeError(
-            "--policy groot needs an HF token (Cosmos-Reason2-2B is gated). "
-            "Run `huggingface-cli login` first, then retry."
-        )
+    hf_token = _resolve_hf_token()
     result = gr00t_inference(
         action="lifecycle",
         lifecycle="full",
@@ -190,7 +208,7 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
         hf_subfolder=suite,
         hf_local_dir=args.checkpoint_dir,
         container_name=args.container,
-        hf_token=hf_token_path.read_text().strip(),
+        hf_token=hf_token,
         checkpoint_path=f"/data/checkpoints/{suite}",
         embodiment_tag="libero_sim",
         protocol="n1.7",
@@ -450,7 +468,11 @@ def main() -> None:
             raise RuntimeError(f"add_camera failed: {result}")
 
         # Resolve the LIBERO task. Same default-aspirational fallback
-        # as run_mujoco_agent.py / run_isaac.py.
+        # as run_mujoco_agent.py / run_isaac.py. Keep the CLI-requested
+        # task distinct from the resolved one so the [agent-eval] line
+        # below echoes what the caller passed (replayable) while the
+        # actual eval / filename use what really ran.
+        requested_task = args.task
         registered = load_libero_suite(suite)
         if not registered:
             raise RuntimeError(
@@ -470,6 +492,7 @@ def main() -> None:
                 raise RuntimeError(
                     f"--task {args.task!r} is not in the {suite} suite. Available: {sorted(registered)[:3]}…"
                 )
+        resolved_task = args.task
 
         # NB: no `start_cameras_recording` here -- the Isaac-side
         # recorder integration is a separate slice. Once that lands,
@@ -487,7 +510,7 @@ def main() -> None:
         t0 = time.time()
         result = agent(
             f"Make exactly one tool call: invoke `evaluate_isaac_benchmark` "
-            f"with `benchmark_name='{args.task}'`, "
+            f"with `benchmark_name='{resolved_task}'`, "
             f"`n_episodes={args.n_episodes}`, `seed={args.seed}`, "
             f"{policy_phrase}. Do not call any other action -- the world, "
             f"robot, and camera have already been set up. When the call "
@@ -500,14 +523,18 @@ def main() -> None:
 
         ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         rec_name = (
-            f"{ts}--task={args.task}--n_eps={args.n_episodes}"
+            f"{ts}--task={resolved_task}--n_eps={args.n_episodes}"
             f"--seed={args.seed}--policy={args.policy}--backend=isaac--agent"
         )
         # Placeholder until the Isaac recorder integration lands; the
         # filename's still useful for matrix-driver bookkeeping even
         # when no MP4 is produced.
         video_path = os.path.join(_date_dir(), f"{rec_name}__image.mp4.placeholder")
-        print(f"[agent-eval] policy={args.policy} task={args.task} wall_time={wall_time:.1f}s videos={video_path}")
+        # Echo the CLI-requested task (replayable) plus the resolved one.
+        print(
+            f"[agent-eval] policy={args.policy} task={requested_task} "
+            f"resolved_task={resolved_task} wall_time={wall_time:.1f}s videos={video_path}"
+        )
     finally:
         try:
             if _sim is not None:

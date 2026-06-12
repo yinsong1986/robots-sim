@@ -200,6 +200,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve_hf_token() -> str:
+    """Resolve a HuggingFace token for the gated GR00T checkpoint download.
+
+    Prefers the ``HF_TOKEN`` (or ``HUGGING_FACE_HUB_TOKEN``) environment
+    variable -- CI / container environments typically inject the token that
+    way and don't have the ``~/.cache/huggingface/token`` file that
+    ``huggingface-cli login`` writes. Falls back to that file for interactive
+    dev boxes. Raises if neither is present.
+    """
+    from pathlib import Path
+
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if env_token and env_token.strip():
+        return env_token.strip()
+    hf_token_path = Path("~/.cache/huggingface/token").expanduser()
+    if hf_token_path.is_file():
+        return hf_token_path.read_text().strip()
+    raise RuntimeError(
+        "--policy groot needs an HF token (Cosmos-Reason2-2B is gated). "
+        "Set the HF_TOKEN env var (preferred for CI), or run "
+        "`huggingface-cli login` to write ~/.cache/huggingface/token, then retry."
+    )
+
+
 def _orchestrate_groot_server(args: argparse.Namespace, suite: str) -> dict | None:
     """Bring up the GR00T inference container if ``--policy=groot``.
 
@@ -216,16 +240,9 @@ def _orchestrate_groot_server(args: argparse.Namespace, suite: str) -> dict | No
     if args.policy != "groot" or not args.auto_server:
         return None
 
-    from pathlib import Path
-
     from strands_robots.tools import gr00t_inference
 
-    hf_token_path = Path("~/.cache/huggingface/token").expanduser()
-    if not hf_token_path.is_file():
-        raise RuntimeError(
-            "--policy groot needs an HF token (Cosmos-Reason2-2B is gated). "
-            "Run `huggingface-cli login` first, then retry."
-        )
+    hf_token = _resolve_hf_token()
     result = gr00t_inference(
         action="lifecycle",
         lifecycle="full",
@@ -234,7 +251,7 @@ def _orchestrate_groot_server(args: argparse.Namespace, suite: str) -> dict | No
         hf_subfolder=suite,
         hf_local_dir=args.checkpoint_dir,
         container_name=args.container,
-        hf_token=hf_token_path.read_text().strip(),
+        hf_token=hf_token,
         checkpoint_path=f"/data/checkpoints/{suite}",
         embodiment_tag="libero_sim",
         protocol="n1.7",
@@ -439,14 +456,23 @@ def main() -> None:
         if result.get("status") != "success":
             raise RuntimeError(f"add_camera failed: {result}")
 
-        args.task = _resolve_task(suite, args.task)
+        # Keep the CLI-requested task distinct from the resolved one. The
+        # default placeholder transparently falls back to the first registered
+        # task, but the grep-stable line below must echo what the caller passed
+        # (``requested_task``) so the R15 matrix driver can replay a run from
+        # its recorded output -- re-running with the *resolved* value would
+        # change behaviour (the fallback wouldn't fire). ``resolved_task`` is
+        # what actually executes and what the filename / benchmark call use.
+        requested_task = args.task
+        resolved_task = _resolve_task(suite, args.task)
+        args.task = resolved_task
 
         # Filename convention matches run_mujoco.py so the matrix
         # driver's video discovery glob (`rollouts/*/*--task=*.mp4`)
         # picks up Isaac and MuJoCo runs uniformly.
         ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         rec_name = (
-            f"{ts}--task={args.task}--n_eps={args.n_episodes}"
+            f"{ts}--task={resolved_task}--n_eps={args.n_episodes}"
             f"--seed={args.seed}--policy={args.policy}--backend=isaac"
         )
         video_dir = _date_dir()
@@ -460,7 +486,7 @@ def main() -> None:
 
         t0 = time.time()
         result = sim.evaluate_benchmark(
-            benchmark_name=args.task,
+            benchmark_name=resolved_task,
             # robot_name omitted for the same reason run_mujoco.py
             # omits it: the benchmark's on_episode_start may rename /
             # reload the robot; ``evaluate_benchmark`` auto-picks the
@@ -480,10 +506,14 @@ def main() -> None:
         # Two grep-stable lines for the R15 matrix script -- exact
         # same format as run_mujoco.py's so subprocess-and-parse
         # consumers don't have to special-case the Isaac backend.
-        # ``backend=isaac`` is the discriminator on the second line.
-        print(f"benchmark_name={args.task}")
+        # ``task=`` echoes the CLI-REQUESTED task so the run is replayable
+        # from this line; ``resolved_task=`` records what actually ran when
+        # the aspirational-placeholder fallback rewrote it (identical to
+        # ``task=`` in the common case). ``backend=isaac`` is the discriminator.
+        print(f"benchmark_name={requested_task}")
         print(
-            f"policy={args.policy}  task={args.task}  "
+            f"policy={args.policy}  task={requested_task}  "
+            f"resolved_task={resolved_task}  "
             f"success_rate={success_rate:.2f}  "
             f"wall_time={wall_time:.1f}s  videos={video_path}  backend=isaac"
         )
