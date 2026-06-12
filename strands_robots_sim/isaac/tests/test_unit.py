@@ -1291,7 +1291,6 @@ class TestRenderFramePathPhase2:
         assert "annotator not bound" in result["content"][0]["text"]
 
 
-
 def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":
     """Build MagicMocks for the three lazy-imported camera modules.
 
