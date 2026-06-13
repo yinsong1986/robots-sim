@@ -56,7 +56,15 @@ class _FallbackPlanner:
                 "%s planning failed (%s); using scripted fallback.", getattr(self.primary, "name", "?"), str(exc)[:140]
             )
             self.name = f"scripted(fallback from {getattr(self.primary, 'name', '?')})"
-            scripted_keys = ("joint_names", "start_q", "gripper_joint", "cube_xy", "place_xy", "steps_per_phase")
+            scripted_keys = (
+                "joint_names",
+                "start_q",
+                "gripper_joint",
+                "cube_xy",
+                "place_xy",
+                "steps_per_phase",
+                "base_sign",
+            )
             return self._scripted.plan_pick_place(**{k: v for k, v in kwargs.items() if k in scripted_keys})
 
 
@@ -144,6 +152,7 @@ class SO101CuroboDemo:
                 record_images=self.record_images,
                 kinematic=bool(robot_urdf),  # URDF arm has no actuators -> kinematic
                 grasp_attach=bool(robot_urdf),  # kinematic grasp for the cuRobo path
+                base_sign=(-1.0 if self.backend in ("isaac", "isaacsim", "isaac_sim", "nvidia") else 1.0),
             )
             if self.scene.cameras:
                 self.current_camera = self.scene.cameras[0]
@@ -161,12 +170,20 @@ class SO101CuroboDemo:
         start_q = [
             float(self.sim.get_observation(self.scene.robot_name, skip_images=True)[j]) for j in self.scene.joint_names
         ]
+        # The SO-101 URDF (Isaac backend) has an inverted shoulder_pan sign vs
+        # world Y: commanding +pan swings the arm toward -Y, so a +Y target
+        # (the cube/bin) needs a negated base angle. MuJoCo's model uses the
+        # default (+1) convention. Pass base_sign=-1 for Isaac so the scripted
+        # planner actually aims the gripper AT the cube (otherwise it sweeps to
+        # the opposite side and never reaches -> success_rate stays 0).
+        base_sign = -1.0 if self.backend in ("isaac", "isaacsim", "isaac_sim", "nvidia") else 1.0
         return self.planner.plan_pick_place(
             joint_names=self.scene.joint_names,
             start_q=start_q,
             gripper_joint=self.scene.gripper_joint,
             cube_xy=self.scene.cube_position[:2],
             place_xy=self.scene.place_position[:2],
+            base_sign=base_sign,
         )
 
     def plan_and_execute(self, task: str = "pick up the red cube and place it in the bin", n_substeps: int = 5) -> str:

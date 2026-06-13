@@ -575,6 +575,68 @@ class IsaacSimulation:
         except Exception:  # noqa: BLE001
             return None
 
+    def gripper_frame_pos(self, robot_name: Optional[str] = None) -> Optional[List[float]]:
+        """World position of the robot's gripper/tool link, read from the USD stage.
+
+        The collector's kinematic grasp-attach needs the end-effector world
+        position to decide when the gripper is close enough to the cube to
+        attach it. MuJoCo exposes this via ``mj_data``; on Isaac we read the
+        link prim's world transform. Prefers a ``gripper_frame``/``tool`` link,
+        then any ``gripper``/``moving_jaw`` link, under the robot's prim.
+        """
+        if robot_name is None:
+            robot_name = next(iter(self._robots), None)
+        r = self._robots.get(robot_name) if robot_name else None
+        if r is None:
+            return None
+        import os as _os
+
+        _dbg = bool(_os.environ.get("SO101_GRASP_DBG"))
+        try:
+            import omni.usd
+            from pxr import Usd, UsdGeom
+
+            stage = omni.usd.get_context().get_stage()
+            # r.prim_path is the articulation-root prim, which for the SO-101
+            # URDF is a leaf joint (e.g. /so101_new_calib/root_joint) -- its
+            # subtree has no link prims. Walk up to the top-level robot prim
+            # (the first path component under the pseudo-root) and search its
+            # whole subtree for the gripper/tool link.
+            from pxr import Sdf
+
+            sdf_path = Sdf.Path(r.prim_path)
+            top = sdf_path
+            while top.GetParentPath() != Sdf.Path.absoluteRootPath and top.GetParentPath() != Sdf.Path.emptyPath:
+                top = top.GetParentPath()
+            root = stage.GetPrimAtPath(top)
+            if not root or not root.IsValid():
+                if _dbg:
+                    logger.info("[grasp-dbg] gripper_frame_pos: root invalid for top=%r (from %r)", top, r.prim_path)
+                return None
+            preferred = None
+            fallback = None
+            for p in Usd.PrimRange(root):
+                if not p.IsA(UsdGeom.Xformable):
+                    continue
+                ln = p.GetName().lower()
+                if "gripper_frame" in ln or "tool" in ln:
+                    preferred = p
+                    break
+                if "moving_jaw" in ln or "gripper" in ln:
+                    fallback = fallback or p
+            prim = preferred or fallback
+            if prim is None:
+                if _dbg:
+                    logger.info("[grasp-dbg] gripper_frame_pos: no EE link under %r", r.prim_path)
+                return None
+            t = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+            return [float(t[0]), float(t[1]), float(t[2])]
+        except Exception as exc:  # noqa: BLE001
+            if _dbg:
+                logger.info("[grasp-dbg] gripper_frame_pos EXC: %s: %s", type(exc).__name__, exc)
+            logger.debug("gripper_frame_pos failed", exc_info=True)
+            return None
+
     # --- cameras ------------------------------------------------------------
 
     def add_camera(

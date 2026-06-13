@@ -18,10 +18,15 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger("so101_curobo.collector")
+
+# Temporary grasp-attach debug (env-gated): logs gripper<->cube distance and
+# attach/release transitions so the kinematic grasp can be diagnosed.
+_GRASP_DBG = bool(os.environ.get("SO101_GRASP_DBG"))
 
 LEROBOT_INSTALL_HINT = (
     "LeRobot dataset writing requires the lerobot extra: "
@@ -50,7 +55,21 @@ class EpisodeResult:
 
 
 def _object_position(sim, name: str) -> Optional[List[float]]:
-    """Best-effort world position of object ``name`` (MuJoCo via mj_data; else None)."""
+    """Best-effort world position of object ``name``.
+
+    Prefers a backend-native ``sim._object_position(name)`` (the Isaac backend
+    exposes one via ``get_world_pose`` on the registered prim); falls back to
+    MuJoCo's ``mj_data`` lookup; else None.
+    """
+    # Backend-native (Isaac): the sim tracks the prim and can read its pose.
+    native = getattr(sim, "_object_position", None)
+    if callable(native):
+        try:
+            pos = native(name)
+            if pos is not None:
+                return [float(x) for x in pos]
+        except Exception:  # noqa: BLE001
+            logger.debug("sim._object_position failed for %s", name, exc_info=True)
     try:
         import mujoco
 
@@ -83,6 +102,7 @@ class LeRobotDataCollector:
         kinematic: bool = False,
         grasp_attach: bool = False,
         attach_radius: float = 0.10,
+        base_sign: float = 1.0,
     ):
         self.sim = sim
         self.scene = scene_info
@@ -92,6 +112,11 @@ class LeRobotDataCollector:
         self.cameras = list(cameras) if cameras else list(scene_info.cameras)
         self.place_radius = place_radius
         self.move_threshold = move_threshold
+        # Base-pan sign passed to the scripted planner. The SO-101 URDF (Isaac)
+        # has an inverted shoulder_pan vs world Y, so the controller sets this to
+        # -1 for Isaac; MuJoCo keeps +1. Without it the planner aims the gripper
+        # at the wrong side and never reaches the cube (success_rate stays 0).
+        self.base_sign = base_sign
         # When False, record state+action only (no camera frames) -> no GL/EGL
         # needed. Used by the CI smoke path on CPU-only boxes.
         self.record_images = record_images
@@ -196,7 +221,20 @@ class LeRobotDataCollector:
             pass
 
     def _gripper_frame_pos(self) -> Optional[List[float]]:
-        """World position of the gripper/tool link (MuJoCo via mj_data)."""
+        """World position of the gripper/tool link.
+
+        Prefers a backend-native ``sim.gripper_frame_pos(robot_name)`` (the
+        Isaac backend reads the link prim's world transform off the USD stage);
+        falls back to MuJoCo's ``mj_data`` body lookup.
+        """
+        native = getattr(self.sim, "gripper_frame_pos", None)
+        if callable(native):
+            try:
+                pos = native(self.scene.robot_name)
+                if pos is not None:
+                    return [float(x) for x in pos]
+            except Exception:  # noqa: BLE001
+                logger.debug("sim.gripper_frame_pos failed", exc_info=True)
         try:
             import mujoco
 
@@ -238,6 +276,16 @@ class LeRobotDataCollector:
         has_closed = False
         offset: Optional[List[float]] = None
         grasp_phases = {"grasp", "close", "lift", "place", "place_down"}
+        if _GRASP_DBG:
+            logger.info(
+                "[grasp-dbg] has_grip=%s grip=%r close@%.2f kinematic=%s grasp_attach=%s base_sign=%s",
+                has_grip,
+                grip,
+                close_thresh,
+                self.kinematic,
+                self.grasp_attach,
+                self.base_sign,
+            )
 
         for wp, phase in zip(trajectory.waypoints, trajectory.phases):
             if self.kinematic:
@@ -259,8 +307,18 @@ class LeRobotDataCollector:
                     if gp and cp and math.dist(gp, cp) < self.attach_radius:
                         offset = [cp[i] - gp[i] for i in range(3)]
                         attached = True
+                        if _GRASP_DBG:
+                            logger.info(
+                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f",
+                                phase,
+                                [round(x, 3) for x in gp],
+                                [round(x, 3) for x in cp],
+                                math.dist(gp, cp),
+                            )
                 elif attached and has_closed and gv < close_thresh:
                     attached = False  # release
+                    if _GRASP_DBG:
+                        logger.info("[grasp-dbg] RELEASED at phase=%s", phase)
                 if attached and offset:
                     gp = self._gripper_frame_pos()
                     if gp:
@@ -377,6 +435,7 @@ class LeRobotDataCollector:
                     gripper_joint=self.scene.gripper_joint,
                     cube_xy=self.scene.cube_position[:2],
                     place_xy=self.scene.place_position[:2],
+                    base_sign=self.base_sign,
                 )
                 res = self.record_episode(traj, task=task, n_substeps=n_substeps, recorder=recorder)
                 results.append(res)

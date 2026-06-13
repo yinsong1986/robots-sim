@@ -123,6 +123,7 @@ class ScriptedPlanner:
         cube_xy: Optional[Sequence[float]] = None,
         place_xy: Optional[Sequence[float]] = None,
         steps_per_phase: Optional[int] = None,
+        base_sign: float = 1.0,
     ) -> JointTrajectory:
         jn = list(joint_names)
         n = len(jn)
@@ -138,9 +139,14 @@ class ScriptedPlanner:
         OPEN, CLOSE = self.gripper_open, self.gripper_close
 
         def aim(xy) -> float:
+            # Base-pan angle to face a world XY target. ``base_sign`` flips the
+            # joint sign for robots whose shoulder_pan rotates opposite to world
+            # +Z (the SO-101 URDF on Isaac: commanding +pan swings the arm to
+            # -Y, so a +Y target needs a negative pan). MuJoCo's model uses the
+            # default +1 convention. See controller._plan.
             if not (base and xy):
                 return home.get(base, 0.0) if base else 0.0
-            return float(math.atan2(xy[1], xy[0]))
+            return float(base_sign * math.atan2(xy[1], xy[0]))
 
         reach = dict(home)
         if base:
