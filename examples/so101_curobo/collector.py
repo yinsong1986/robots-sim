@@ -174,7 +174,12 @@ class LeRobotDataCollector:
         )
 
     def _snapshot_state(self):
-        """Snapshot full MuJoCo physics state (qpos, qvel) for a deterministic reset."""
+        """Snapshot full MuJoCo physics state (qpos, qvel) for a deterministic reset.
+
+        MuJoCo-only. On other backends (Isaac) this returns None so the
+        :meth:`record_dataset` loop uses the explicit home+cube reset path
+        (:meth:`_reset_episode`), which is deterministic per-backend.
+        """
         try:
             d = getattr(self.sim, "mj_data", None)
             return (d.qpos.copy(), d.qvel.copy()) if d is not None else None
@@ -182,7 +187,7 @@ class LeRobotDataCollector:
             return None
 
     def _restore_state(self, snap) -> None:
-        """Restore a snapshot so every episode starts from the identical state."""
+        """Restore a MuJoCo snapshot so every episode starts from the identical state."""
         if snap is None:
             return
         try:
@@ -197,6 +202,22 @@ class LeRobotDataCollector:
             mujoco.mj_forward(m, d)
         except Exception:  # noqa: BLE001
             logger.debug("state restore failed (non-fatal)", exc_info=True)
+
+    def _reset_episode(self, home_q: Dict[str, float]) -> None:
+        """Explicit deterministic reset: arm -> ``home_q``, cube -> its start pose.
+
+        Used when no MuJoCo snapshot is available (e.g. the Isaac backend, whose
+        articulation/object state isn't captured by the qpos snapshot).
+        Re-asserting the exact home joints + the exact cube start pose (and
+        settling) makes every episode start identically, so a multi-episode
+        dataset run produces consistent grasps instead of drifting.
+        """
+        try:
+            self.sim.set_joint_positions(home_q, robot_name=self.scene.robot_name)
+            self.sim.move_object(self.scene.cube_name, position=list(self.scene.cube_position))
+            self.sim.step(5)
+        except Exception:  # noqa: BLE001
+            logger.debug("episode reset failed (non-fatal)", exc_info=True)
 
     def _zero_cube_velocity(self) -> None:
         """Zero the cube's free-joint velocity (avoids a fling from teleporting it)."""
@@ -412,12 +433,7 @@ class LeRobotDataCollector:
                 elif snapshot is not None:
                     self._restore_state(snapshot)
                 else:
-                    try:
-                        self.sim.set_joint_positions(home_q, robot_name=self.scene.robot_name)
-                        self.sim.move_object(self.scene.cube_name, position=list(self.scene.cube_position))
-                        self.sim.step(3)
-                    except Exception:  # noqa: BLE001
-                        logger.debug("episode reset failed (non-fatal)", exc_info=True)
+                    self._reset_episode(home_q)
                 if randomize:
                     try:
                         self.sim.randomize(
