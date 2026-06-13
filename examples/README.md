@@ -72,7 +72,7 @@ the table for reference.
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
 | [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client)[^1] | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
-| `libero/run_isaac.py` | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced |
+| [`libero/run_isaac.py`](libero/run_isaac.py) | Isaac Sim | 1 | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ | RTX path-traced; loads a real Franka USD via `add_robot(usd_path=...)`. Number pending the nightly GPU runner ([#17](https://github.com/strands-labs/robots-sim/issues/17) / [#59](https://github.com/strands-labs/robots-sim/pull/59)) |
 | `libero/run_isaac_fleet.py` | Isaac Sim | 4096 | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ | IsaacLab-style fleet RL |
 | `libero/run_newton.py` | Newton / Warp | 1 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | CUDA only |
 | `libero/run_newton_fleet.py` | Newton / Warp | 4096 | _TBD ([R12 / #19](https://github.com/strands-labs/robots-sim/issues/19))_ | fleet |
@@ -145,6 +145,73 @@ layout and timestamped name pattern are preserved from the deleted
 > currently on `strands-robots` `main` only and will land in a future
 > PyPI release. Until then, install from git:
 > `pip install 'strands-robots[sim-mujoco,benchmark-libero] @ git+https://github.com/strands-labs/robots.git@main'`.
+
+## Running the Isaac Sim backend
+
+[`libero/run_isaac.py`](libero/run_isaac.py) and
+[`libero/run_isaac_agent.py`](libero/run_isaac_agent.py) are the Isaac
+Sim siblings of the MuJoCo files — same CLI shape, same two grep-stable
+output lines, same `evaluate_benchmark(...)` / agent drivers. They
+differ in three Isaac-specific ways:
+
+- **Real-asset robot.** Instead of a LIBERO MJCF, the script loads a
+  *real* robot via `add_robot(usd_path=...)` — by default Isaac Sim's
+  bundled Franka Panda USD, resolved from the assets root over the
+  public Omniverse CDN (no local Nucleus needed). Override with
+  `--robot-usd PATH` or `--robot-urdf PATH`. (A real asset is required
+  because the procedural builder is a kinematically-approximate
+  stick-figure unusable by a LIBERO manipulation policy.)
+- **Explicit camera.** Isaac doesn't auto-attach a viewport camera the
+  way MuJoCo's `mjData` does, so the script makes an explicit
+  `add_camera(...)` call at the LIBERO `agentview` vantage before the
+  eval.
+- **Isaac-specific container name** (`gr00t-libero-isaac`) so Isaac and
+  MuJoCo `--policy=groot` runs don't clobber each other's containers on
+  the same host.
+
+```bash
+pip install 'strands-robots-sim[isaac]' \
+    'strands-robots[benchmark-libero] @ git+https://github.com/strands-labs/robots.git@main'
+
+# 1) Programmatic smoke test (mock policy). Loads the default Franka USD.
+python examples/libero/run_isaac.py --policy mock --n-episodes 5
+
+# 1b) Bring your own robot asset:
+python examples/libero/run_isaac.py --policy mock --robot-usd /path/to/robot.usd
+python examples/libero/run_isaac.py --policy mock --robot-urdf /path/to/robot.urdf
+
+# 2) Strands-Agent + natural language (needs `strands-agents` + an LLM
+#    provider — Bedrock by default).
+pip install strands-agents
+python examples/libero/run_isaac_agent.py --policy mock
+
+# 3) Real eval against the matching `libero_<suite>/` sub-checkpoint
+#    (auto-orchestrates the GR00T container; `--no-auto-server` reuses one):
+python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
+```
+
+> **Requires Isaac Sim** installed separately on the host (it is **not**
+> pip-installable — Omniverse Launcher / Isaac Lab / NGC Docker image,
+> RTX GPU, CUDA 12+). On a non-Isaac host both scripts exit early with a
+> diagnostic from `IsaacSimulation.is_available()` rather than crashing
+> on the first `omni.*` import.
+
+> **Status (landing):** CLI / control-flow / lint validation and the
+> `is_available()` short-circuit are verified on a CPU-only dev box; the
+> LIBERO suite + helper resolution paths are unit-checked against
+> `strands-robots`. The full RTX eval (the matrix wall-time @
+> success-rate number above) is **not yet run end-to-end** — it is
+> gated on the nightly GPU runner
+> ([#17](https://github.com/strands-labs/robots-sim/issues/17) /
+> [#59](https://github.com/strands-labs/robots-sim/pull/59)) and the
+> Phase-2 data-plane slices it rides on
+> ([#61](https://github.com/strands-labs/robots-sim/pull/61) add_camera,
+> [#62](https://github.com/strands-labs/robots-sim/pull/62) render
+> frame-path, [#63](https://github.com/strands-labs/robots-sim/pull/63)
+> USD-load, [#64](https://github.com/strands-labs/robots-sim/pull/64)
+> URDF-load). `run_isaac_agent.py` is **draft scaffolding**: it runs
+> end-to-end today but reports `success_rate=0.0` until the
+> procedural-articulation + Isaac-recorder slices land.
 
 ## Migration from the legacy 0.1.x API
 
