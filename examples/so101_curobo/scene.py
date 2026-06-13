@@ -220,19 +220,20 @@ def build_pick_place_scene(
             logger.info("bin marker not added (non-fatal): %s", r)
 
     cams = []
-    # Camera rig (Isaac framing). Scene of interest spans x[-0.05,0.40]
-    # y[-0.06,0.25] z[0,0.27] at the default pose (arm base at origin, arm
-    # reaches along +X; red cube at [0.2,0.2], green bin at [0.0,0.25]).
-    #
-    # The arm is THIN in Y, so a *low* front camera looking along +Y sees it
-    # edge-on AND backlit against the bright sky (dark silhouette, top clipped).
-    # Fix: raise the front camera (z=0.62) so it looks DOWN at the arm against
-    # the floor -- the arm is then top-lit (reads yellow, not a silhouette) and
-    # fully in frame. The oblique corner view already reads the arm well.
+    # Camera rig (Isaac framing). The earlier rigs were framed for the arm's
+    # *static* default pose and clipped once the arm swept through the
+    # trajectory. Frame for the full SWEPT WORKSPACE instead: over the scripted
+    # pick-place the arm bbox spans x[-0.03,0.40] y[-0.36,0.08] z[0,0.26] (it
+    # reaches well toward -Y, i.e. toward the front camera), and the cube/bin
+    # sit at +Y up to ~0.25. Scene of interest -> center ~[0.18,-0.05,0.14],
+    # ~0.45 m in X and ~0.6 m in Y. Cameras are pulled back + elevated + widened
+    # (FOV 50) and aimed at that center so the full arm stays in frame, top-lit
+    # (not a backlit silhouette), at every trajectory pose. Verified at
+    # waypoints 0/16/32/48/63 (start / reach / grasp / lift / place).
     for name, pos, tgt, fov in (
-        ("front", [0.10, -0.95, 0.62], [0.12, 0.05, 0.22], 50.0),
-        ("topdown", [0.10, 0.08, 1.25], [0.10, 0.08, 0.0], 48.0),
-        ("oblique", [0.75, -0.70, 0.52], [0.10, 0.08, 0.18], 42.0),
+        ("front", [0.18, -1.40, 0.85], [0.18, -0.05, 0.14], 50.0),
+        ("topdown", [0.18, -0.05, 1.40], [0.18, -0.05, 0.0], 50.0),
+        ("oblique", [1.05, -1.05, 0.95], [0.18, -0.05, 0.14], 50.0),
     ):
         if _status(sim.add_camera(name=name, position=pos, target=tgt, fov=fov, width=cw, height=ch)) == "success":
             cams.append(name)
