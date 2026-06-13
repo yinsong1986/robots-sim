@@ -120,9 +120,16 @@ def build_ui(demo, agent: "object | None" = None):
 def main(argv: "list[str] | None" = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--backend", default="mujoco", choices=["mujoco", "isaac"])
-    p.add_argument("--planner", default="auto", choices=["auto", "scripted", "curobo"])
+    p.add_argument("--planner", default="auto", choices=["auto", "scripted", "curobo", "precomputed"])
     p.add_argument("--curobo-urdf", default=None, help="SO-101 URDF for cuRobo (or env SO101_URDF).")
     p.add_argument("--curobo-asset", default="", help="Mesh root for the SO-101 URDF (or env SO101_ASSET).")
+    p.add_argument(
+        "--curobo-traj",
+        default=None,
+        help="Replay a cuRobo trajectory pre-planned offline (JSON from plan_curobo_offline.py; "
+        "or env SO101_CUROBO_TRAJ). Used on the Isaac backend, where in-kit cuRobo can't run "
+        "(warp version conflict): --planner curobo replays this instead of falling back to scripted.",
+    )
     p.add_argument("--repo-id", default="local/so101_curobo_pickplace")
     p.add_argument("--root", default=None, help="On-disk dataset dir (default: HF cache).")
     p.add_argument("--no-images", action="store_true", help="Record state+action only (no GL/EGL needed).")
@@ -147,6 +154,8 @@ def main(argv: "list[str] | None" = None) -> None:
         planner_kwargs["urdf_path"] = args.curobo_urdf
     if args.curobo_asset:
         planner_kwargs["asset_path"] = args.curobo_asset
+    if args.curobo_traj:
+        planner_kwargs["traj_path"] = args.curobo_traj
 
     demo = SO101CuroboDemo(
         backend=args.backend,

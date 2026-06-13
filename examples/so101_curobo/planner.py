@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -96,6 +97,78 @@ def _merge(base: Dict[str, float], updates: Dict[str, float]) -> Dict[str, float
         if k is not None:
             out[k] = v
     return out
+
+
+class PrecomputedPlanner:
+    """Replay a trajectory planned **offline** (e.g. by cuRobo) from a JSON file.
+
+    cuRobo and Isaac Sim 4.5 can't share a process: cuRobo's collision kernels
+    need ``warp-lang >= 1.14`` (``wp.func(module=)``) while the Isaac kit bundles
+    warp 1.5 which lacks it, so an in-kit ``import curobo`` collision path raises
+    and the demo silently falls back to the scripted planner. To still execute a
+    *real* cuRobo plan on the Isaac backend, plan offline (``plan_curobo_offline.py``
+    in a cuRobo-capable venv), dump the :class:`JointTrajectory` to JSON, and
+    replay it here -- this class imports neither cuRobo nor warp, so it runs
+    inside the kit.
+
+    The file is resolved from ``traj_path`` or the ``SO101_CUROBO_TRAJ`` env var.
+    ``plan_pick_place`` ignores cube/place args (the geometry is baked into the
+    saved plan) but validates them against the plan's recorded ``plan_for`` so a
+    mismatched scene fails loudly instead of replaying a stale trajectory.
+    """
+
+    name = "precomputed"
+
+    def __init__(self, traj_path: Optional[str] = None, **_ignored):
+        self.traj_path = traj_path or os.environ.get("SO101_CUROBO_TRAJ")
+
+    def available(self) -> bool:
+        return bool(self.traj_path and os.path.exists(self.traj_path))
+
+    def plan_pick_place(
+        self,
+        joint_names: Sequence[str],
+        start_q: Sequence[float],
+        gripper_joint: Optional[str] = None,
+        cube_xy: Optional[Sequence[float]] = None,
+        place_xy: Optional[Sequence[float]] = None,
+        **_ignored,
+    ) -> JointTrajectory:
+        import json
+
+        if not self.available():
+            raise RuntimeError(
+                "PrecomputedPlanner needs a saved trajectory JSON. Pass traj_path=... or set "
+                "SO101_CUROBO_TRAJ. Generate one with examples/so101_curobo/plan_curobo_offline.py "
+                "in a cuRobo-capable venv."
+            )
+        with open(self.traj_path) as f:
+            d = json.load(f)
+        wps = [dict(wp) for wp in d["waypoints"]]
+        if not wps:
+            raise RuntimeError(f"Precomputed trajectory {self.traj_path!r} has no waypoints.")
+        # Sanity-check the plan targets the scene we're about to execute (so a
+        # stale file isn't replayed against a moved cube). Tolerate small float
+        # drift; only error on a real mismatch.
+        pf = d.get("plan_for") or {}
+        for label, want, key in (("cube", cube_xy, "cube_xy"), ("place", place_xy, "place_xy")):
+            have = pf.get(key)
+            if want is not None and have is not None:
+                if max(abs(float(a) - float(b)) for a, b in zip(want[:2], have[:2])) > 1e-3:
+                    raise RuntimeError(
+                        f"Precomputed trajectory was planned for {label}_xy={have} but the scene has "
+                        f"{list(want[:2])}. Re-plan with plan_curobo_offline.py for this scene."
+                    )
+        phases = list(d.get("phases") or [""] * len(wps))
+        if len(phases) < len(wps):
+            phases += [phases[-1] if phases else ""] * (len(wps) - len(phases))
+        return JointTrajectory(
+            joint_names=list(d.get("joint_names") or joint_names),
+            waypoints=wps,
+            phases=phases,
+            planner=f"precomputed({d.get('planner', 'curobo')})",
+            meta=dict(d.get("meta") or {}),
+        )
 
 
 class ScriptedPlanner:
@@ -503,6 +576,7 @@ class CuroboMotionPlanner:
 
 
 _SCRIPTED_KEYS = ("gripper_open", "gripper_close", "steps_per_phase")
+_PRECOMPUTED_KEYS = ("traj_path",)
 _CUROBO_KEYS = (
     "urdf_path",
     "asset_path",
@@ -531,18 +605,34 @@ def _curobo_usable(kwargs: dict) -> bool:
 def make_planner(prefer: str = "auto", robot_cfg: str = "so101", **kwargs):
     """Return the best available planner.
 
-    ``prefer``: ``"auto"`` (cuRobo if installed *and* a URDF is resolvable, else
-    scripted), ``"curobo"`` (force cuRobo — raises later if unusable), or
-    ``"scripted"``.
+    ``prefer``: ``"auto"`` (precomputed cuRobo replay if a trajectory file is
+    set, else in-process cuRobo if installed + a URDF is resolvable, else
+    scripted), ``"curobo"`` (force cuRobo -- but if a precomputed trajectory is
+    available, replay that instead, since in-kit cuRobo can't run on the Isaac
+    backend due to the warp conflict), ``"precomputed"`` (force the offline
+    cuRobo replay), or ``"scripted"``.
     """
     prefer = (prefer or "auto").lower()
 
     def _scripted():
         return ScriptedPlanner(**{k: v for k, v in kwargs.items() if k in _SCRIPTED_KEYS})
 
+    def _precomputed():
+        return PrecomputedPlanner(**{k: v for k, v in kwargs.items() if k in _PRECOMPUTED_KEYS})
+
+    def _precomputed_available() -> bool:
+        return PrecomputedPlanner(**{k: v for k, v in kwargs.items() if k in _PRECOMPUTED_KEYS}).available()
+
     if prefer == "scripted":
         return _scripted()
+    if prefer == "precomputed":
+        return _precomputed()
     if prefer == "curobo":
+        # A pre-planned cuRobo trajectory replays even where in-process cuRobo
+        # can't run (Isaac kit's warp 1.5 vs cuRobo's warp 1.14). Prefer it.
+        if _precomputed_available():
+            logger.info("Using precomputed cuRobo trajectory (offline plan replay).")
+            return _precomputed()
         if not CUROBO_AVAILABLE:
             logger.warning(
                 "cuRobo requested but not installed; using ScriptedPlanner. %s", CUROBO_INSTALL_HINT.splitlines()[0]
@@ -550,6 +640,8 @@ def make_planner(prefer: str = "auto", robot_cfg: str = "so101", **kwargs):
             return _scripted()
         return CuroboMotionPlanner(**{k: v for k, v in kwargs.items() if k in _CUROBO_KEYS})
     # auto
+    if _precomputed_available():
+        return _precomputed()
     if _curobo_usable(kwargs):
         return CuroboMotionPlanner(**{k: v for k, v in kwargs.items() if k in _CUROBO_KEYS})
     return _scripted()
