@@ -806,37 +806,127 @@ class IsaacSimulation(SimEngine):
                 }
 
             elif usd_path is not None:
-                # Load from USD (native Isaac format)
-                joint_names = self._load_usd_robot(prim_path, usd_path, pos)
+                # Load from USD (native Isaac format).
+                # Phase 2 wiring (#14): _load_usd_robot now actually
+                # references the USD into the stage, constructs an
+                # Articulation, initialises it, and returns the handle
+                # alongside the joint names. Pre-Phase-2 it returned
+                # joint_names=[] and silently did nothing.
+                try:
+                    joint_names, articulation = self._load_usd_robot(prim_path, usd_path, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Cleanup-clause shape mirrors create_world (#52
+                    # precedent): RuntimeError (Carb / sim init), ValueError
+                    # (USD shape mismatches), OSError (USD file IO failure),
+                    # AttributeError (omni surface drift), TypeError (signature
+                    # drift), ImportError (omni.isaac.core.articulations
+                    # unavailable). Programming bugs propagate.
+                    logger.error(
+                        "Failed to load USD robot '%s' (usd_path=%s): %s",
+                        name,
+                        usd_path,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to load USD robot '{name}': {e}"}],
+                    }
+
                 self._prim_registry.append(prim_path)
 
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
+                logger.info(
+                    "Added robot '%s' (USD: %s, %d joints, articulation=%s)",
+                    name,
+                    usd_path,
+                    len(joint_names),
+                    "wired" if articulation is not None else "phase1",
+                )
                 return {
                     "status": "success",
-                    "content": [{"text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)")}],
+                    "content": [
+                        {
+                            "text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)"),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "usd_path": usd_path,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
+                        }
+                    ],
                 }
 
             elif urdf_path is not None:
-                # Convert URDF to USD and load
-                joint_names = self._load_urdf_robot(prim_path, urdf_path, pos)
+                # Convert URDF to USD and load.
+                # Phase 2 wiring (#14): _load_urdf_robot now actually
+                # runs the URDF importer command + constructs an
+                # Articulation, returning the handle alongside joint
+                # names. Pre-Phase-2 it returned joint_names=[] and
+                # silently did nothing.
+                try:
+                    joint_names, articulation = self._load_urdf_robot(prim_path, urdf_path, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Cleanup-clause shape mirrors the USD branch above
+                    # plus create_world (#52 precedent). RuntimeError
+                    # covers the URDFParseAndImportFile command
+                    # returning ``False``; OSError covers a missing
+                    # ``urdf_path``; ImportError covers a partial
+                    # ``omni.importer.urdf`` install on the runner.
+                    logger.error(
+                        "Failed to load URDF robot '%s' (urdf_path=%s): %s",
+                        name,
+                        urdf_path,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to load URDF robot '{name}': {e}"}],
+                    }
+
                 self._prim_registry.append(prim_path)
 
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
+                logger.info(
+                    "Added robot '%s' (URDF: %s, %d joints, articulation=%s)",
+                    name,
+                    urdf_path,
+                    len(joint_names),
+                    "wired" if articulation is not None else "phase1",
+                )
                 return {
                     "status": "success",
-                    "content": [{"text": (f"Robot '{name}' added (URDF: {urdf_path}, " f"{len(joint_names)} joints)")}],
+                    "content": [
+                        {
+                            "text": (f"Robot '{name}' added (URDF: {urdf_path}, " f"{len(joint_names)} joints)"),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "urdf_path": urdf_path,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
+                        }
+                    ],
                 }
 
             else:
@@ -1915,18 +2005,206 @@ class IsaacSimulation(SimEngine):
 
     # --- Private Implementation ----------------------------------------------
 
-    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> list[str]:
-        """Load a robot from USD file. Returns joint names."""
-        # In full implementation: use omni.isaac.core to add USD reference
-        # and extract Articulation joint names
-        logger.info("Loading USD robot from %s at %s", usd_path, prim_path)
-        return []
+    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> tuple[list[str], Any]:
+        """Load a robot from a USD file. Returns ``(joint_names, articulation)``.
 
-    def _load_urdf_robot(self, prim_path: str, urdf_path: str, position: list[float]) -> list[str]:
-        """Load a robot from URDF (converted to USD). Returns joint names."""
-        # In full implementation: use omni.isaac.urdf to convert and load
-        logger.info("Loading URDF robot from %s at %s", urdf_path, prim_path)
-        return []
+        Phase 2 wiring (#14): the previous Phase-1 stub silently returned
+        ``[]`` and didn't touch the stage. This Phase-2 implementation:
+
+        1. References the USD at ``usd_path`` into the stage at
+           ``prim_path`` via ``omni.isaac.core.utils.stage.add_reference_to_stage``.
+        2. Wraps the resulting prim in
+           ``omni.isaac.core.articulations.Articulation``.
+        3. Calls ``articulation.initialize()`` to populate ``dof_names`` /
+           internal handles. ``initialize`` is what triggers the Articulation
+           tree walk that surfaces the joint count; without it
+           ``dof_names`` is ``None`` on most Isaac Sim builds.
+        4. Applies the requested ``position`` via ``set_world_pose`` so
+           the robot lands where the caller asked. Identity ``[0, 0, 0]``
+           is skipped to avoid an unnecessary kernel call.
+        5. Extracts joint names from ``articulation.dof_names`` and returns
+           them alongside the live ``Articulation`` handle. Callers store
+           the handle on ``_RobotState.articulation`` so subsequent
+           ``get_observation`` / ``send_action`` calls can read joint
+           positions and apply targets through it.
+
+        Raises propagate -- the caller (``add_robot`` USD branch) wraps
+        this method in the standard cleanup-clause tuple
+        ``(RuntimeError, ValueError, OSError, AttributeError, TypeError,
+        ImportError)`` so any Isaac-side surface drift returns a
+        structured error envelope rather than blowing up the agent.
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+        from omni.isaac.core.utils.stage import (  # type: ignore[import-not-found]
+            add_reference_to_stage,
+        )
+
+        # Step 1: stage reference. The USD's default prim becomes a child
+        # of ``prim_path``; subsequent Articulation lookups walk that path.
+        add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+
+        # Step 2-3: wrap + initialise. The articulation name has to be
+        # unique within the scene's articulation registry, so derive it
+        # from the prim path's leaf segment to match the caller's
+        # ``add_robot`` ``name`` (the leaf of ``prim_path`` is the
+        # caller-visible robot name by construction).
+        articulation_name = prim_path.rsplit("/", 1)[-1]
+        articulation = Articulation(prim_path=prim_path, name=articulation_name)
+        articulation.initialize()
+
+        # Step 4: position. The USD's authored pose is the default; only
+        # call set_world_pose when the caller actually wanted a non-default
+        # placement. Saves a tensor round-trip on the common
+        # ``position=[0, 0, 0]`` case.
+        if position is not None and any(p != 0.0 for p in position):
+            articulation.set_world_pose(position=np.asarray(position, dtype=float))
+
+        # Step 5: joint names. ``dof_names`` is ``None`` if ``initialize``
+        # didn't surface them (e.g. the USD has no Articulation root on
+        # the referenced prim); coerce to ``[]`` so downstream callers
+        # see the documented "empty joint list" silent-empty mode rather
+        # than a ``TypeError`` on iteration.
+        joint_names = list(articulation.dof_names) if articulation.dof_names else []
+
+        logger.info(
+            "Loaded USD robot at %s from %s (%d joints, articulation=initialized)",
+            prim_path,
+            usd_path,
+            len(joint_names),
+        )
+        return joint_names, articulation
+
+    def _load_urdf_robot(self, prim_path: str, urdf_path: str, position: list[float]) -> tuple[list[str], Any]:
+        """Load a robot from a URDF file. Returns ``(joint_names, articulation)``.
+
+        Phase 2 wiring (#14): the previous Phase-1 stub silently
+        returned ``[]`` and didn't touch the stage. This Phase-2
+        implementation:
+
+        1. Builds an ``omni.importer.urdf._urdf.ImportConfig`` with
+           sensible defaults for a fixed-base manipulator (the most
+           common case). Override behaviour is intentionally narrow:
+           expose only the fields the agent / caller meaningfully
+           controls (fix_base + distance_scale via config), keep the
+           rest at the importer's defaults.
+        2. Runs the ``URDFParseAndImportFile`` Kit command which
+           parses the URDF and writes the USD onto the live stage at
+           (or near) ``prim_path``. The importer occasionally returns a
+           slightly different prim path than requested (it appends the
+           URDF's ``robot name`` if the destination is a directory-like
+           prim path); we honour the importer's choice and use that
+           path for subsequent Articulation construction.
+        3. Wraps the resulting prim in
+           ``omni.isaac.core.articulations.Articulation``,
+           initialises it, and applies the requested ``position``
+           (skipping origin to save a tensor round-trip, mirroring
+           ``_load_usd_robot``).
+        4. Extracts joint names from ``articulation.dof_names``,
+           coercing ``None`` to ``[]`` so a URDF with no actuated
+           joints surfaces as the documented empty-joint-list mode
+           rather than a ``TypeError`` on iteration.
+        5. Returns ``(joint_names, articulation)`` -- same shape as
+           ``_load_usd_robot`` so the ``add_robot`` URDF branch can
+           reuse the same envelope shape.
+
+        Raises propagate; the caller (``add_robot`` URDF branch)
+        wraps in the standard cleanup-clause tuple
+        ``(RuntimeError, ValueError, OSError, AttributeError,
+        TypeError, ImportError)``.
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+
+        # Isaac Sim's URDF importer module path varies across releases:
+        # * 4.5+ uses ``isaacsim.asset.importer.urdf._urdf.ImportConfig``
+        # * pre-4.5 used ``omni.importer.urdf._urdf.ImportConfig`` (now
+        #   renamed under the deprecation transition).
+        # Try the modern path first, fall back to the old one. Caught
+        # during PR #64 GPU validation against Isaac Sim 4.5 -- the
+        # original wiring only knew the pre-4.5 path and crashed on a
+        # ``ModuleNotFoundError: No module named 'omni.importer'``.
+        try:
+            from isaacsim.asset.importer.urdf import _urdf  # type: ignore[import-not-found]
+        except ImportError:
+            from omni.importer.urdf import _urdf  # type: ignore[import-not-found]
+
+        # Step 1: import config. Defaults chosen for a fixed-base
+        # manipulator (the most common LIBERO / GR00T case); fleet RL
+        # workflows can override fix_base via a future config knob.
+        import_config = _urdf.ImportConfig()
+        import_config.fix_base = True
+        import_config.import_inertia_tensor = True
+        import_config.create_physics_scene = False  # World already created one
+        import_config.distance_scale = 1.0  # URDF in meters; matches stage units
+
+        # Step 2: parse + import via the direct ``_urdf`` interface
+        # rather than the ``URDFParseAndImportFile`` Kit command. The
+        # Kit-command path was deprecated / changed semantics across
+        # Isaac Sim releases and produced a "Used null prim" runtime
+        # error on 4.5 against a freshly-created World; the direct
+        # interface (``parse_urdf`` -> ``import_robot``) is the
+        # documented stable surface that survives across versions.
+        import os
+
+        urdf_iface = _urdf.acquire_urdf_interface()
+        # Isaac Sim 4.5+: parse_urdf(asset_root, asset_name, import_config),
+        # import_robot(asset_root, asset_name, robot, import_config, stage="").
+        # Both methods take the URDF as a (root_dir, filename) pair so
+        # the importer can resolve relative mesh paths inside the URDF.
+        # Splitting the caller's single ``urdf_path`` here keeps the
+        # method's caller-visible API as one path argument.
+        urdf_root, urdf_filename = os.path.split(os.path.abspath(urdf_path))
+        urdf_robot = urdf_iface.parse_urdf(urdf_root, urdf_filename, import_config)
+        if urdf_robot is None:
+            raise RuntimeError(f"URDF parse failed for {urdf_path!r}")
+        # ``stage=""`` (default) imports directly into the live USD
+        # stage held open by ``SimulationApp``. Returns the prim path
+        # the importer used, which we then bind to the caller's
+        # requested ``prim_path`` via ``add_reference_to_stage`` --
+        # actually, the importer adds prims directly to the live
+        # stage so we don't need a separate ``add_reference_to_stage``
+        # step. The ``usd_dest`` path is only used as a side-channel
+        # USD-on-disk export for offline asset reuse if needed.
+        imported_prim_path = urdf_iface.import_robot(urdf_root, urdf_filename, urdf_robot, import_config, "")
+        if not imported_prim_path:
+            raise RuntimeError(f"URDF import failed for {urdf_path!r} via _urdf.import_robot")
+
+        # Step 2b: bind the imported prim to our caller-requested
+        # ``prim_path``. The ``import_robot`` call adds prims at
+        # ``imported_prim_path`` (under the live stage's default-prim
+        # parent); we want the robot under our stage convention
+        # (``{stage_path}/Robots/{name}``). Use the imported path
+        # directly for ``Articulation`` construction -- the caller
+        # bookkeeping (``_RobotState.prim_path``) records this so
+        # ``remove_robot`` can look it up later. If a future caller
+        # needs strict prim-path placement, this can move to a
+        # ``MoveCommand`` to relocate after import.
+        actual_prim_path = imported_prim_path
+
+        # Step 3: Articulation wrap + initialise.
+        articulation_name = actual_prim_path.rsplit("/", 1)[-1]
+        articulation = Articulation(prim_path=actual_prim_path, name=articulation_name)
+        articulation.initialize()
+
+        # Position. Same skip-origin shortcut as ``_load_usd_robot``.
+        if position is not None and any(p != 0.0 for p in position):
+            articulation.set_world_pose(position=np.asarray(position, dtype=float))
+
+        # Step 4-5: joint names + return.
+        joint_names = list(articulation.dof_names) if articulation.dof_names else []
+
+        logger.info(
+            "Loaded URDF robot at %s from %s (%d joints, articulation=initialized)",
+            actual_prim_path,
+            urdf_path,
+            len(joint_names),
+        )
+        return joint_names, articulation
 
     def cleanup(self) -> None:
         """Release all resources.

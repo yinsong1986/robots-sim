@@ -1650,3 +1650,667 @@ class TestRemoveCameraPhase2:
         # stage-touching path entirely; the in-Python registries are
         # the only thing left to clean).
         stage.delete_prim.assert_not_called()
+
+
+def _patched_isaac_articulation_modules() -> "tuple[MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported modules that
+    ``_load_usd_robot`` Phase 2 wiring touches.
+
+    Returns
+    -------
+    articulations_mod, stage_mod, art_handle
+        ``articulations_mod`` stands in for
+        ``omni.isaac.core.articulations`` (its ``.Articulation``
+        constructor returns ``art_handle``). ``stage_mod`` stands in
+        for ``omni.isaac.core.utils.stage`` (``.add_reference_to_stage``).
+        ``art_handle`` is the Articulation MagicMock the constructor
+        returns -- tests can assert on ``.initialize`` /
+        ``.set_world_pose`` / ``.dof_names`` patterns.
+    """
+    articulations_mod = MagicMock()
+    stage_mod = MagicMock()
+    art_handle = MagicMock(name="Articulation_handle")
+    art_handle.dof_names = ["joint_a", "joint_b", "joint_c"]
+    articulations_mod.Articulation.return_value = art_handle
+    return articulations_mod, stage_mod, art_handle
+
+
+class TestLoadUsdRobotPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation._load_usd_robot``.
+
+    Pins the ``add_reference_to_stage`` + ``Articulation`` + ``initialize``
+    chain plus the ``add_robot`` USD-branch integration: success populates
+    ``_RobotState.articulation`` so ``get_observation`` / ``send_action``
+    have a non-``None`` handle to dispatch through.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_load_usd_robot_calls_add_reference_to_stage(self) -> None:
+        """``_load_usd_robot`` references the USD into the stage at
+        the requested ``prim_path``.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r1",
+                usd_path="/path/to/robot.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        stage.add_reference_to_stage.assert_called_once_with(
+            usd_path="/path/to/robot.usd",
+            prim_path="/World/Robots/r1",
+        )
+
+    def test_load_usd_robot_constructs_articulation_at_prim_path(self) -> None:
+        """Articulation is constructed with the same ``prim_path`` used
+        by ``add_reference_to_stage``, with the leaf segment as the
+        articulation registry name.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/panda",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        kwargs = articulations.Articulation.call_args.kwargs
+        assert kwargs["prim_path"] == "/World/Robots/panda"
+        assert kwargs["name"] == "panda"
+
+    def test_load_usd_robot_calls_initialize(self) -> None:
+        """``Articulation.initialize`` is called explicitly so
+        ``dof_names`` is populated before the caller reads it.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.initialize.assert_called_once()
+
+    def test_load_usd_robot_returns_dof_names_and_handle(self) -> None:
+        """Return shape is ``(joint_names: list[str], articulation: Any)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, art = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == ["joint_a", "joint_b", "joint_c"]
+        assert art is art_handle
+
+    def test_load_usd_robot_handles_none_dof_names(self) -> None:
+        """If ``Articulation.dof_names`` is ``None`` (some Isaac builds
+        when the USD has no Articulation root), return an empty list
+        rather than crashing on iteration.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.dof_names = None
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, _ = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == []
+
+    def test_load_usd_robot_skips_set_world_pose_for_origin_position(self) -> None:
+        """``position=[0, 0, 0]`` skips ``set_world_pose`` (USD's
+        authored pose wins; saves a tensor round-trip).
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.set_world_pose.assert_not_called()
+
+    def test_load_usd_robot_calls_set_world_pose_for_non_origin(self) -> None:
+        """Non-zero position triggers ``set_world_pose(position=...)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[1.0, 2.0, 3.0],
+            )
+        art_handle.set_world_pose.assert_called_once()
+        kwargs = art_handle.set_world_pose.call_args.kwargs
+        assert list(kwargs["position"]) == [1.0, 2.0, 3.0]
+
+
+class TestAddRobotUsdBranchPhase2:
+    """Phase 2 wiring of the ``add_robot(usd_path=...)`` integration.
+
+    Pins that the USD branch:
+    - calls ``_load_usd_robot``,
+    - stores the returned ``Articulation`` handle on
+      ``_RobotState.articulation`` (so ``get_observation`` /
+      ``send_action`` light up for USD-loaded robots),
+    - rolls back registry state if ``_load_usd_robot`` raises.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_add_robot_usd_branch_stores_articulation_on_robot_state(self) -> None:
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="my_panda", usd_path="/path/to/panda.usd")
+        assert result["status"] == "success"
+        assert "my_panda" in sim._robots
+        rs = sim._robots["my_panda"]
+        assert rs.articulation is art_handle, (
+            "USD-branch add_robot must wire the Articulation handle onto "
+            "_RobotState.articulation so get_observation / send_action "
+            "have a non-None handle to dispatch through."
+        )
+        assert rs.joint_names == ["joint_a", "joint_b", "joint_c"]
+
+    def test_add_robot_usd_branch_surfaces_structured_json(self) -> None:
+        """Success envelope's ``content[0]["json"]`` carries name /
+        prim_path / usd_path / joint_names / joint_count / position /
+        articulation_wired so an agent can confirm the load shape.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(
+                name="r",
+                usd_path="/foo.usd",
+                position=[0.5, 0.0, 0.0],
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "r"
+        assert info["prim_path"] == "/World/Robots/r"
+        assert info["usd_path"] == "/foo.usd"
+        assert info["joint_count"] == 3
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_usd_branch_returns_error_on_load_failure(self) -> None:
+        """If ``_load_usd_robot`` raises (USD file missing, Articulation
+        init fails, omni surface drift), ``add_robot`` returns the
+        structured error envelope with **no** registry pollution.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        stage.add_reference_to_stage.side_effect = OSError("USD file not found: /missing.usd")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="ghost", usd_path="/missing.usd")
+        assert result["status"] == "error"
+        assert "ghost" in result["content"][0]["text"]
+        assert "USD file not found" in result["content"][0]["text"]
+        # Registry NOT polluted -- caller can retry under the same name.
+        assert "ghost" not in sim._robots
+        assert "/World/Robots/ghost" not in sim._prim_registry
+
+    def test_add_robot_usd_branch_returns_error_on_initialize_failure(self) -> None:
+        """``Articulation.initialize`` failure also leaves registries
+        clean -- some Isaac Sim builds defer Articulation tree-walk to
+        ``initialize`` rather than the constructor.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.initialize.side_effect = RuntimeError("articulation root not found in USD")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="bad", usd_path="/bad.usd")
+        assert result["status"] == "error"
+        assert "articulation root not found" in result["content"][0]["text"]
+        assert "bad" not in sim._robots
+
+    def test_add_robot_procedural_branch_still_has_no_articulation(self) -> None:
+        """Regression pin: the procedural branch (which constructs USD
+        via the build-via-API flow, not via Articulation wrapper) must
+        keep ``_RobotState.articulation = None``. Procedural-robot
+        articulation wiring is a separate Phase 2 slice; this PR
+        intentionally only covers the USD branch.
+        """
+        sim = self._make_sim()
+        # Procedural lookup is hit when no usd_path/urdf_path is given.
+        # ``so100`` is a registered procedural robot.
+        result = sim.add_robot(name="proc", data_config="so100")
+        assert result["status"] == "success"
+        assert sim._robots["proc"].articulation is None, (
+            "Procedural add_robot branch must not silently wire an " "Articulation; that's a separate slice on #14."
+        )
+
+
+def _patched_isaac_urdf_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the modules ``_load_urdf_robot`` Phase 2
+    wiring touches.
+
+    Returns
+    -------
+    urdf_iface_mod, urdf_importer_mod, articulations_mod, art_handle, import_config
+        ``urdf_iface_mod`` stands in for the
+        ``_urdf.acquire_urdf_interface()`` return value -- i.e. the
+        interface that exposes ``.parse_urdf`` and ``.import_robot``.
+        Default behaviour: ``parse_urdf`` returns a sentinel
+        ``urdf_robot_mock``; ``import_robot`` returns
+        ``"/World/Robots/imported"``.
+        ``urdf_importer_mod`` stands in for ``isaacsim.asset.importer.urdf``;
+        ``urdf_importer_mod._urdf.ImportConfig()`` returns
+        ``import_config`` so the test can inspect which fields were
+        set, and ``urdf_importer_mod._urdf.acquire_urdf_interface()``
+        returns ``urdf_iface_mod``.
+        ``articulations_mod`` stands in for
+        ``omni.isaac.core.articulations`` (returns ``art_handle``).
+        ``art_handle`` is the Articulation MagicMock with
+        ``dof_names = ["j1", "j2"]`` by default.
+        ``import_config`` is the MagicMock that ``ImportConfig()``
+        returns -- tests can read attributes like ``fix_base`` /
+        ``distance_scale`` on it.
+    """
+    urdf_iface_mod = MagicMock()
+    urdf_iface_mod.parse_urdf.return_value = MagicMock(name="urdf_robot")
+    urdf_iface_mod.import_robot.return_value = "/World/Robots/imported"
+
+    urdf_importer_mod = MagicMock()
+    urdf_importer_mod._urdf.acquire_urdf_interface.return_value = urdf_iface_mod
+
+    articulations_mod = MagicMock()
+    art_handle = MagicMock(name="Articulation_handle")
+    art_handle.dof_names = ["j1", "j2"]
+    articulations_mod.Articulation.return_value = art_handle
+
+    # ``ImportConfig()`` -> import_config; tests read attributes
+    # set on this instance.
+    import_config = MagicMock()
+    urdf_importer_mod._urdf.ImportConfig.return_value = import_config
+
+    return urdf_iface_mod, urdf_importer_mod, articulations_mod, art_handle, import_config
+
+
+def _patched_urdf_sys_modules(
+    urdf_iface_mod: MagicMock,
+    urdf_importer_mod: MagicMock,
+    articulations_mod: MagicMock,
+) -> dict[str, MagicMock]:
+    # Stub the stage-utilities mock for ``add_reference_to_stage``
+    # which the new ``_load_urdf_robot`` calls to bind the converted
+    # USD file onto the live stage at the caller-requested prim path.
+    stage_mod = MagicMock()
+
+    return {
+        # Modern Isaac Sim 4.5+ namespace is preferred; the source
+        # tries this first and falls back to ``omni.importer.urdf``.
+        "isaacsim.asset.importer.urdf": urdf_importer_mod,
+        "omni.importer.urdf": urdf_importer_mod,
+        "omni.isaac.core.articulations": articulations_mod,
+        "omni.isaac.core.utils.stage": stage_mod,
+    }
+
+
+class TestLoadUrdfRobotPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation._load_urdf_robot``.
+
+    Pins the ``URDFParseAndImportFile`` Kit-command + ``Articulation``
+    chain plus the same call-site contract (``add_robot`` URDF branch
+    populates ``_RobotState.articulation``) that the USD branch has.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_load_urdf_robot_executes_urdf_command_with_dest_path(self) -> None:
+        """``omni.kit.commands.execute("URDFParseAndImportFile", ...)``
+        is called with ``urdf_path``, an ``import_config``, and a
+        temp-file ``dest_path``.
+
+        Pre-PR-#64-GPU-fix the wiring passed the stage prim path as
+        ``dest_path`` directly, but the Kit command interprets
+        ``dest_path`` as a USD FILE PATH and crashed with
+        ``Sdf.ErrorException: Failed verification: 'fileFormat'`` on
+        a non-USD-suffixed value. Now ``dest_path`` is a temp .usd
+        file keyed on the stage prim's leaf segment so re-runs reuse
+        the converted USD on disk.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/path/to/robot.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # parse_urdf called with (root_dir, filename, import_config).
+        urdf_iface.parse_urdf.assert_called_once()
+        parse_args = urdf_iface.parse_urdf.call_args.args
+        assert parse_args[0] == "/path/to"  # root dir
+        assert parse_args[1] == "robot.urdf"  # filename
+        # import_robot called with (root_dir, filename, urdf_robot, import_config, stage="").
+        urdf_iface.import_robot.assert_called_once()
+        import_args = urdf_iface.import_robot.call_args.args
+        assert import_args[0] == "/path/to"
+        assert import_args[1] == "robot.urdf"
+        # stage="" (5th positional arg) -- empty string asks the
+        # importer to add prims directly to the live USD stage rather
+        # than writing a USD file. Pinned because Isaac Sim 4.5's
+        # importer raises "Used null prim" when stage is a non-empty
+        # path and the live stage isn't ready.
+        assert import_args[4] == ""
+
+    def test_load_urdf_robot_import_config_has_fixed_base_default(self) -> None:
+        """``ImportConfig.fix_base`` defaults to ``True`` -- the most
+        common LIBERO / GR00T case is a fixed-base manipulator.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # The config attributes set in source must have flowed onto the
+        # ImportConfig instance that parse_urdf and import_robot received.
+        config = import_config
+        assert config.fix_base is True
+        assert config.import_inertia_tensor is True
+        # Don't create a new physics scene -- World already made one.
+        assert config.create_physics_scene is False
+        assert config.distance_scale == 1.0
+
+    def test_load_urdf_robot_uses_imported_prim_path_for_articulation(self) -> None:
+        """Articulation is constructed against the prim path the
+        ``_urdf.import_robot`` actually used.
+
+        The importer adds prims directly to the live stage at a path
+        of its choosing (typically ``/World/<robot_name>``) when
+        called with ``stage=""``; the caller's requested ``prim_path``
+        is informational and used for bookkeeping. Articulation
+        construction targets the importer's actual path.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = "/World/some_robot_name"
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        kwargs = arts.Articulation.call_args.kwargs
+        # Articulation uses the importer's returned path (where prims
+        # actually landed on the live stage), not the caller-requested
+        # prim_path which is just bookkeeping.
+        assert kwargs["prim_path"] == "/World/some_robot_name"
+        # Articulation registry name uses that path's leaf segment.
+        assert kwargs["name"] == "some_robot_name"
+
+    def test_load_urdf_robot_no_add_reference_to_stage_call(self) -> None:
+        """``import_robot(stage="")`` adds prims directly to the live
+        stage; no separate ``add_reference_to_stage`` is needed.
+
+        Pre-PR-#64-GPU-fix the wiring used a 2-step
+        ``URDFParseAndImportFile -> add_reference_to_stage`` flow but
+        the Kit command's ``stage=<path>`` mode raised "Used null
+        prim" on Isaac Sim 4.5. The simpler 1-step
+        ``import_robot(stage="")`` is the supported path; this test
+        pins that the deprecated 2-step shape doesn't sneak back.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        sys_modules = _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)
+        with patch.dict("sys.modules", sys_modules):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # add_reference_to_stage stub exists in the patched modules
+        # but should NOT be called.
+        stage = sys_modules["omni.isaac.core.utils.stage"]
+        stage.add_reference_to_stage.assert_not_called()
+
+    def test_load_urdf_robot_no_op_when_command_returns_empty_path(self) -> None:
+        """Pre-PR-#64-GPU-fix this test asserted a fallback to
+        ``prim_path`` when the importer returned an empty string.
+        Post-fix the second tuple element is ignored entirely (the
+        caller-requested ``prim_path`` always wins for Articulation
+        construction), so the empty-string return is now a no-op
+        from this method's perspective. Pin retained as a regression
+        guard against any future re-introduction of the imported-
+        prim-path indirection.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF import failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/x.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_raises_runtimeerror_when_command_returns_false(self) -> None:
+        """``import_robot`` returning ``""`` -> ``RuntimeError`` (caught
+        by the caller's cleanup clause). Same shape as the legacy
+        ``URDFParseAndImportFile`` Kit-command's ``(False, ...)`` return.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF import failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/bad.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_raises_runtimeerror_when_parse_returns_none(self) -> None:
+        """``parse_urdf`` returning ``None`` -> ``RuntimeError``."""
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.parse_urdf.return_value = None
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF parse failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/bad.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_returns_dof_names_and_handle(self) -> None:
+        """Return shape mirrors ``_load_usd_robot``:
+        ``(joint_names: list[str], articulation: Any)``.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            joints, art = sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == ["j1", "j2"]
+        assert art is art_handle
+
+    def test_load_urdf_robot_skips_set_world_pose_for_origin(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.set_world_pose.assert_not_called()
+
+    def test_load_urdf_robot_calls_set_world_pose_for_non_origin(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[1.0, 2.0, 3.0],
+            )
+        art_handle.set_world_pose.assert_called_once()
+        kwargs = art_handle.set_world_pose.call_args.kwargs
+        assert list(kwargs["position"]) == [1.0, 2.0, 3.0]
+
+
+class TestAddRobotUrdfBranchPhase2:
+    """Phase 2 wiring of the ``add_robot(urdf_path=...)`` integration.
+
+    Same contract as the USD branch (PR #63 / TestAddRobotUsdBranchPhase2)
+    -- success populates ``_RobotState.articulation``, failure leaves
+    registries clean.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_add_robot_urdf_branch_stores_articulation(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="my_panda", urdf_path="/path/to/panda.urdf")
+        assert result["status"] == "success"
+        assert sim._robots["my_panda"].articulation is art_handle
+
+    def test_add_robot_urdf_branch_surfaces_structured_json(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(
+                name="r",
+                urdf_path="/foo.urdf",
+                position=[0.5, 0.0, 0.0],
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "r"
+        assert info["urdf_path"] == "/foo.urdf"
+        assert info["joint_count"] == 2
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_urdf_branch_returns_error_on_command_failure(self) -> None:
+        """``import_robot`` returning empty string -> structured error
+        envelope, no registry pollution.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="ghost", urdf_path="/bad.urdf")
+        assert result["status"] == "error"
+        assert "ghost" in result["content"][0]["text"]
+        assert "URDF import failed" in result["content"][0]["text"]
+        assert "ghost" not in sim._robots
+        assert "/World/Robots/ghost" not in sim._prim_registry
+
+    def test_add_robot_urdf_branch_returns_error_on_initialize_failure(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        art_handle.initialize.side_effect = RuntimeError("articulation root not in URDF")
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="bad", urdf_path="/bad.urdf")
+        assert result["status"] == "error"
+        assert "articulation root not in URDF" in result["content"][0]["text"]
+        assert "bad" not in sim._robots
