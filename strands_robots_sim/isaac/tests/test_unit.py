@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 
@@ -1096,6 +1097,198 @@ class TestDestroyAndGetStateSurfaceObjects:
         assert info["num_objects_released"] == 2
         # Post-destroy the dict is empty.
         assert sim._objects == {}
+
+
+class TestRenderFramePathPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.render``.
+
+    Pins the four documented render paths (headless / no-camera /
+    Phase-1-handle-None / RTX-real-frames) against the right blank-vs.
+    -real frame return shapes plus the structured envelope text /
+    json. Pairs with the Phase 2 ``add_camera`` slice; the RTX path
+    only lights up when the camera in ``self._cameras`` carries a
+    non-``None`` ``handle``, which Phase 2 ``add_camera`` populates
+    via ``omni.isaac.sensor.Camera``.
+    """
+
+    def _make_sim(self, render_mode: str = "rtx_realtime") -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation(render_mode=render_mode)
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_returns_error_without_world(self) -> None:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.render()
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_headless_returns_blank_frames_with_headless_text(self) -> None:
+        """``render_mode="headless"`` -> blank frames sized to the
+        ``width`` / ``height`` arguments (or config defaults), with
+        ``"headless, no RTX"`` in the success text.
+        """
+        sim = self._make_sim(render_mode="headless")
+        result = sim.render(width=320, height=240)
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (240, 320, 3)
+        assert result["depth"].shape == (240, 320)
+        assert result["rgb"].dtype == np.uint8
+        assert result["depth"].dtype == np.float32
+        assert (result["rgb"] == 0).all()
+        assert "headless, no RTX" in result["content"][0]["text"]
+
+    def test_unknown_camera_returns_blank_with_no_camera_text(self) -> None:
+        """Unknown ``camera_name`` -> blank frames + ``"no camera"`` in text."""
+        sim = self._make_sim()
+        result = sim.render("ghost", width=160, height=120)
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (120, 160, 3)
+        assert "no camera" in result["content"][0]["text"]
+
+    def test_phase1_camera_with_no_handle_returns_blank_frames(self) -> None:
+        """A camera registered without a Phase-2 handle (``handle=None``)
+        falls back to blank frames sized to the camera's registered
+        resolution, with ``"Phase-1 camera, no RTX handle"`` text.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        sim._cameras["legacy"] = _CameraState(
+            name="legacy",
+            prim_path="/World/Cameras/legacy",
+            width=400,
+            height=300,
+        )
+        # handle deliberately left as None.
+        result = sim.render("legacy")
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (300, 400, 3)
+        assert "Phase-1 camera, no RTX handle" in result["content"][0]["text"]
+
+    def test_phase2_camera_with_handle_pulls_real_frames(self) -> None:
+        """A Phase-2 camera (handle set) -> ``handle.get_rgba()`` and
+        ``handle.get_depth()`` are called and their return values flow
+        into the structured envelope.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim(render_mode="rtx_realtime")
+        handle = MagicMock(name="Camera_handle")
+        # Real Isaac get_rgba returns RGBA; pin the slice-to-RGB.
+        handle.get_rgba.return_value = np.full((240, 320, 4), 255, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((240, 320), 1.5, dtype=np.float32)
+
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "success"
+        # rgb is sliced to 3 channels (alpha dropped).
+        assert result["rgb"].shape == (240, 320, 3)
+        assert (result["rgb"] == 255).all()
+        assert result["depth"].shape == (240, 320)
+        assert (result["depth"] == 1.5).all()
+
+        handle.get_rgba.assert_called_once()
+        handle.get_depth.assert_called_once()
+
+        info = result["content"][0]["json"]
+        assert info["rtx"] is True
+        assert info["prim_path"] == "/World/Cameras/front"
+        assert info["resolution"] == [320, 240]
+        assert info["render_mode"] == "rtx_realtime"
+        assert "RTX rtx_realtime" in result["content"][0]["text"]
+
+    def test_phase2_camera_with_rgb_handle_passes_through(self) -> None:
+        """Some Isaac Sim builds return RGB (not RGBA) from get_rgba.
+        Pin that the slice-to-3-channels works against either shape.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.return_value = np.full((100, 200, 3), 128, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((100, 200), 2.0, dtype=np.float32)
+
+        cs = _CameraState(name="rgb", prim_path="/World/Cameras/rgb", width=200, height=100)
+        cs.handle = handle
+        sim._cameras["rgb"] = cs
+
+        result = sim.render("rgb")
+        assert result["rgb"].shape == (100, 200, 3)
+
+    def test_phase2_camera_get_rgba_failure_returns_error_envelope(self) -> None:
+        """If ``handle.get_rgba`` raises, render returns the structured
+        error envelope rather than letting the exception propagate.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.side_effect = RuntimeError("RTX render product not stepped")
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "error"
+        assert "RTX render product not stepped" in result["content"][0]["text"]
+        # Returned envelope must NOT carry rgb/depth keys on failure
+        # so callers can branch on ``status`` alone.
+        assert "rgb" not in result
+        assert "depth" not in result
+
+    def test_phase2_camera_malformed_rgb_returns_error_envelope(self) -> None:
+        """A not-yet-warmed camera whose ``get_rgba`` returns a malformed
+        (1-D / empty) buffer -> structured error envelope, not an
+        unhandled IndexError on ``rgb.shape[1]``.
+
+        Regression pin for the gap found during the isaac_gs example's
+        GPU validation: freshly-added cameras whose RTX render product
+        hasn't accumulated a frame return a 1-D array; the json
+        ``resolution`` build then IndexError'd.
+        """
+        import numpy as np
+
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        # 1-D buffer (e.g. empty / not-yet-rendered render product).
+        handle.get_rgba.return_value = np.zeros((0,), dtype=np.uint8)
+        cs = _CameraState(name="cold", prim_path="/World/Cameras/cold", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["cold"] = cs
+
+        result = sim.render("cold")
+        assert result["status"] == "error"
+        assert "malformed RGB buffer" in result["content"][0]["text"]
+        assert "rgb" not in result
+        assert "depth" not in result
+
+    def test_phase2_camera_get_depth_failure_returns_error_envelope(self) -> None:
+        """Pin failure path also covers ``get_depth`` raising independently
+        of ``get_rgba``.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.return_value = np.zeros((100, 100, 4), dtype=np.uint8)
+        handle.get_depth.side_effect = AttributeError("annotator not bound")
+        cs = _CameraState(name="cam", prim_path="/World/Cameras/cam", width=100, height=100)
+        cs.handle = handle
+        sim._cameras["cam"] = cs
+
+        result = sim.render("cam")
+        assert result["status"] == "error"
+        assert "annotator not bound" in result["content"][0]["text"]
 
 
 def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":

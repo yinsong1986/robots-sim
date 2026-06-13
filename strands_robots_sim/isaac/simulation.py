@@ -1400,19 +1400,56 @@ class IsaacSimulation(SimEngine):
     ) -> dict[str, Any]:
         """Render a camera view using Isaac Sim's RTX pipeline.
 
+        Phase 2 wiring (#14): when a camera registered via
+        :meth:`add_camera` carries a non-``None`` ``handle`` (i.e. the
+        Phase-2 ``omni.isaac.sensor.Camera`` was successfully constructed)
+        and the simulation isn't in ``headless`` render mode, this method
+        pulls real frames via ``handle.get_rgba()`` + ``handle.get_depth()``.
+        Otherwise returns blank frames -- four documented fallback paths,
+        each tagged in the success envelope's text so a caller / agent
+        can tell which path was taken without inspecting array contents:
+
+        * ``Rendered (headless, no RTX)`` -- ``IsaacConfig.render_mode``
+          is ``"headless"``; RTX path-tracing is unavailable. Most CI
+          and GR00T server flows hit this path.
+        * ``Rendered (no camera)`` -- ``camera_name`` is unknown to
+          ``self._cameras``. Caller probably forgot to call ``add_camera``
+          (or typo'd the name).
+        * ``Rendered (Phase-1 camera, no RTX handle)`` -- the camera
+          exists in ``self._cameras`` but its ``handle`` is ``None``.
+          Happens when the camera was added before the
+          ``add_camera`` Phase-2 wiring landed (or when the camera
+          construction failed but bookkeeping was still seeded -- not
+          possible after PR #61, but kept as a defensive fallback).
+        * ``Rendered (RTX <render_mode>)`` -- Phase-2 path: real
+          frames pulled from the Camera handle. ``rgb`` / ``depth``
+          are the actual array shapes returned by Isaac (matching
+          the camera's resolved resolution; not necessarily the
+          ``width`` / ``height`` arguments passed to this method,
+          which are only used to size the blank-frame fallbacks).
+
         Parameters
         ----------
         camera_name : str
-            Camera identifier. Default "default".
+            Camera identifier previously passed to :meth:`add_camera`.
+            Default ``"default"``.
         width : int, optional
-            Frame width. Default from config.
+            Frame width for blank-frame fallbacks. Default from
+            ``IsaacConfig.camera_width``. Ignored on the RTX path
+            (the camera's own resolution wins).
         height : int, optional
-            Frame height. Default from config.
+            Frame height for blank-frame fallbacks. Default from
+            ``IsaacConfig.camera_height``. Ignored on the RTX path.
 
         Returns
         -------
         dict
-            Dict with "rgb", "depth", "seg" arrays and "status".
+            Standard ``{"status", "content": [{"text"}], "rgb", "depth"}``
+            envelope. ``rgb`` is a uint8 ``(H, W, 3)`` array; ``depth``
+            is a float32 ``(H, W)`` array. On the RTX path, ``content``
+            also carries a ``json`` block with the resolved camera
+            ``resolution``, ``prim_path``, and the boolean ``rtx`` flag
+            so an agent can route on the path without parsing text.
         """
         with self._lock:
             if not self._world_created:
@@ -1422,7 +1459,8 @@ class IsaacSimulation(SimEngine):
             h = height or self._config.camera_height
 
             if self._config.render_mode == "headless":
-                # Return blank frames in headless mode
+                # Return blank frames in headless mode. Most CI flows
+                # land here; Isaac's RTX path-tracer is unavailable.
                 return {
                     "status": "success",
                     "rgb": np.zeros((h, w, 3), dtype=np.uint8),
@@ -1430,25 +1468,104 @@ class IsaacSimulation(SimEngine):
                     "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
                 }
 
-            # RTX rendering via camera handle
-            if camera_name in self._cameras:
-                cam = self._cameras[camera_name]
-                # In full implementation, read from RTX camera annotators
-                rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
-                depth = np.zeros((cam.height, cam.width), dtype=np.float32)
+            if camera_name not in self._cameras:
+                # No camera configured — return blank. Caller probably
+                # forgot to call add_camera or typo'd the name.
                 return {
                     "status": "success",
-                    "rgb": rgb,
-                    "depth": depth,
-                    "content": [{"text": f"Rendered (RTX {self._config.render_mode}): {cam.width}x{cam.height}"}],
+                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                    "depth": np.zeros((h, w), dtype=np.float32),
+                    "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
                 }
 
-            # No camera configured — return blank
+            cam = self._cameras[camera_name]
+
+            if cam.handle is None:
+                # Phase-1 camera (no Phase-2 handle was attached).
+                # Defensive fallback: blank frames sized to the camera's
+                # registered resolution rather than the method's
+                # ``width`` / ``height`` arguments, since the camera's
+                # resolution is what the caller asked for at add_camera.
+                return {
+                    "status": "success",
+                    "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
+                    "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
+                    "content": [{"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}],
+                }
+
+            # Phase-2 RTX path: pull real frames from the Camera handle.
+            try:
+                rgba = cam.handle.get_rgba()
+                # ``get_rgba`` returns either ``(H, W, 4)`` or
+                # ``(H, W, 3)`` depending on the Isaac Sim build. Slice
+                # to RGB defensively so the returned shape is stable
+                # for downstream agents.
+                rgb = np.asarray(rgba)[..., :3]
+                # A camera whose RTX render product hasn't accumulated a
+                # frame yet (e.g. added after the last world step, not
+                # warmed up) returns a malformed / empty buffer -- a 1-D
+                # or 0-size array rather than ``(H, W, C)``. Guard so we
+                # raise a structured RuntimeError (caught below) instead
+                # of an unhandled IndexError when building the json
+                # ``resolution`` from ``rgb.shape[1]``. Caught during the
+                # isaac_gs example's GPU validation with multiple
+                # freshly-added cameras.
+                if rgb.ndim < 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0:
+                    raise RuntimeError(
+                        f"camera {camera_name!r} returned a malformed RGB buffer "
+                        f"(shape {np.asarray(rgba).shape}); the RTX render product "
+                        "likely hasn't accumulated a frame yet -- step the world a "
+                        "few times after add_camera before rendering."
+                    )
+                depth_raw = cam.handle.get_depth()
+                if depth_raw is None:
+                    # Camera was constructed without the depth annotator
+                    # (Isaac Sim ships rgba on by default but depth is
+                    # opt-in via ``Camera.add_distance_to_image_plane_to_frame()``;
+                    # PR #61's add_camera enables it post-initialize, but
+                    # an older sim or a manually-attached Phase-1 camera
+                    # state may not). Surface a zero-depth array sized to
+                    # rgb so callers see a stable shape, plus a WARNING
+                    # so misconfigured cameras don't silently produce
+                    # zero-depth telemetry.
+                    logger.warning(
+                        "Camera '%s': get_depth() returned None (depth annotator not enabled). "
+                        "Returning zero-depth array; "
+                        "check add_distance_to_image_plane_to_frame() in add_camera.",
+                        camera_name,
+                    )
+                    depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+                else:
+                    depth = np.asarray(depth_raw)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError) as e:
+                # Cleanup-clause shape mirrors create_world (#52
+                # precedent). The Camera handle's ``get_rgba`` /
+                # ``get_depth`` can raise on a not-yet-stepped world
+                # (RTX render product hasn't accumulated samples) or
+                # surface drift; surface as the structured error
+                # envelope rather than letting the exception propagate.
+                logger.error("Failed to render camera '%s': %s", camera_name, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to render camera '{camera_name}': {e}"}],
+                }
+
+            render_info = {
+                "rtx": True,
+                "prim_path": cam.prim_path,
+                "resolution": [int(rgb.shape[1]), int(rgb.shape[0])],
+                "render_mode": self._config.render_mode,
+            }
             return {
                 "status": "success",
-                "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                "depth": np.zeros((h, w), dtype=np.float32),
-                "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
+                "rgb": rgb,
+                "depth": depth,
+                "content": [
+                    {
+                        "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
+                        "json": render_info,
+                    }
+                ],
             }
 
     def add_camera(
