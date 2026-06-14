@@ -330,32 +330,36 @@ class LeRobotDataCollector:
                 if gv >= close_thresh:
                     has_closed = True
                 # Attach as soon as the gripper arrives within range during the
-                # grasp (BEFORE the close-knock can push the cube away) and hold
-                # it; release only once the gripper re-opens after having closed.
+                # grasp (BEFORE the close-knock can push the cube away). Until the
+                # gripper actually CLOSES, hold the cube at its real position
+                # (preserve the approach offset) so it stays resting on the table
+                # while the gripper descends -- snapping it into the jaws here
+                # would yank the cube up to the still-descending gripper ("cube
+                # bounces up to the arm"). Once closed, seat it in the jaws.
                 if not attached and phase in grasp_phases:
                     gp = self._gripper_frame_pos()
                     cp = _object_position(self.sim, self.scene.cube_name)
                     if gp and cp and math.dist(gp, cp) < self.attach_radius:
-                        # Snap the cube INTO the gripper (small fixed offset below
-                        # the tool frame) rather than preserving the ~9 cm
-                        # approach gap at the moment of attach -- otherwise the
-                        # cube visually floats away from the gripper through the
-                        # whole carry ("picked without touching"). The gripper
-                        # frame is the tool center between the jaws, so a small
-                        # -Z offset seats the cube in the jaws.
-                        offset = list(self.attach_offset)
+                        offset = [cp[i] - gp[i] for i in range(3)]  # keep cube where it rests
                         attached = True
                         if _GRASP_DBG:
                             logger.info(
-                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f offset=%s",
+                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f",
                                 phase,
                                 [round(x, 3) for x in gp],
                                 [round(x, 3) for x in cp],
                                 math.dist(gp, cp),
-                                offset,
                             )
-                elif attached and has_closed and gv < close_thresh:
-                    attached = False  # release
+                # Once the gripper has closed on the cube, seat it in the jaws
+                # (small fixed offset) so it reads as held through the carry
+                # instead of trailing at the approach gap.
+                if attached and has_closed and gv >= close_thresh and offset != list(self.attach_offset):
+                    offset = list(self.attach_offset)
+                    if _GRASP_DBG:
+                        logger.info("[grasp-dbg] SEATED in jaws at phase=%s offset=%s", phase, offset)
+                # Release once the gripper re-opens after having closed.
+                if attached and has_closed and gv < close_thresh:
+                    attached = False
                     if _GRASP_DBG:
                         logger.info("[grasp-dbg] RELEASED at phase=%s", phase)
                 if attached and offset:
