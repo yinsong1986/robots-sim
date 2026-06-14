@@ -198,6 +198,15 @@ def build_pick_place_scene(
     else:
         robot_config = _add_robot_with_fallback(sim, name="arm", candidates=candidates)
 
+    # Cube body type: the URDF/Isaac path drives a KINEMATIC grasp (the actuator-
+    # less arm can't grip via friction, so the collector teleport-follows the cube
+    # to the gripper). A free dynamic cube there only adds liability -- it drifts a
+    # few mm each episode as the arm nudges it and occasionally gets flung, which
+    # breaks multi-episode determinism. A static (FixedCuboid) cube still moves via
+    # set_world_pose (so the kinematic carry works) but never drifts or flings, so
+    # every episode resets to the identical pose. MuJoCo (dynamic actuated grasp)
+    # keeps a dynamic cube.
+    cube_static = bool(robot_urdf)
     sim.add_object(
         name="cube",
         shape="box",
@@ -205,6 +214,7 @@ def build_pick_place_scene(
         size=DEFAULT_CUBE_HALF,
         color=DEFAULT_CUBE_COLOR,
         mass=0.04,
+        is_static=cube_static,
     )
     if add_bin:
         r = sim.add_object(

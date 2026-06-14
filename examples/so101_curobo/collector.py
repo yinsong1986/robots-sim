@@ -207,15 +207,19 @@ class LeRobotDataCollector:
         """Explicit deterministic reset: arm -> ``home_q``, cube -> its start pose.
 
         Used when no MuJoCo snapshot is available (e.g. the Isaac backend, whose
-        articulation/object state isn't captured by the qpos snapshot).
-        Re-asserting the exact home joints + the exact cube start pose (and
-        settling) makes every episode start identically, so a multi-episode
-        dataset run produces consistent grasps instead of drifting.
+        articulation/object state isn't captured by the qpos snapshot). The arm
+        is set to home and the cube teleported to its start pose. On the
+        kinematic-grasp path the cube is a *static* body (see
+        ``build_pick_place_scene``) so this teleport is exact and never drifts --
+        every episode starts identically.
         """
         try:
             self.sim.set_joint_positions(home_q, robot_name=self.scene.robot_name)
             self.sim.move_object(self.scene.cube_name, position=list(self.scene.cube_position))
-            self.sim.step(5)
+            self.sim.step(3)
+            if _GRASP_DBG:
+                cp = _object_position(self.sim, self.scene.cube_name)
+                logger.info("[grasp-dbg] reset cube -> %s", [round(x, 4) for x in cp] if cp else None)
         except Exception:  # noqa: BLE001
             logger.debug("episode reset failed (non-fatal)", exc_info=True)
 
