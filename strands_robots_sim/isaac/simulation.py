@@ -806,37 +806,127 @@ class IsaacSimulation(SimEngine):
                 }
 
             elif usd_path is not None:
-                # Load from USD (native Isaac format)
-                joint_names = self._load_usd_robot(prim_path, usd_path, pos)
+                # Load from USD (native Isaac format).
+                # Phase 2 wiring (#14): _load_usd_robot now actually
+                # references the USD into the stage, constructs an
+                # Articulation, initialises it, and returns the handle
+                # alongside the joint names. Pre-Phase-2 it returned
+                # joint_names=[] and silently did nothing.
+                try:
+                    joint_names, articulation = self._load_usd_robot(prim_path, usd_path, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Cleanup-clause shape mirrors create_world (#52
+                    # precedent): RuntimeError (Carb / sim init), ValueError
+                    # (USD shape mismatches), OSError (USD file IO failure),
+                    # AttributeError (omni surface drift), TypeError (signature
+                    # drift), ImportError (omni.isaac.core.articulations
+                    # unavailable). Programming bugs propagate.
+                    logger.error(
+                        "Failed to load USD robot '%s' (usd_path=%s): %s",
+                        name,
+                        usd_path,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to load USD robot '{name}': {e}"}],
+                    }
+
                 self._prim_registry.append(prim_path)
 
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
+                logger.info(
+                    "Added robot '%s' (USD: %s, %d joints, articulation=%s)",
+                    name,
+                    usd_path,
+                    len(joint_names),
+                    "wired" if articulation is not None else "phase1",
+                )
                 return {
                     "status": "success",
-                    "content": [{"text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)")}],
+                    "content": [
+                        {
+                            "text": (f"Robot '{name}' added (USD: {usd_path}, " f"{len(joint_names)} joints)"),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "usd_path": usd_path,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
+                        }
+                    ],
                 }
 
             elif urdf_path is not None:
-                # Convert URDF to USD and load
-                joint_names = self._load_urdf_robot(prim_path, urdf_path, pos)
+                # Convert URDF to USD and load.
+                # Phase 2 wiring (#14): _load_urdf_robot now actually
+                # runs the URDF importer command + constructs an
+                # Articulation, returning the handle alongside joint
+                # names. Pre-Phase-2 it returned joint_names=[] and
+                # silently did nothing.
+                try:
+                    joint_names, articulation = self._load_urdf_robot(prim_path, urdf_path, pos)
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                    # Cleanup-clause shape mirrors the USD branch above
+                    # plus create_world (#52 precedent). RuntimeError
+                    # covers the URDFParseAndImportFile command
+                    # returning ``False``; OSError covers a missing
+                    # ``urdf_path``; ImportError covers a partial
+                    # ``omni.importer.urdf`` install on the runner.
+                    logger.error(
+                        "Failed to load URDF robot '%s' (urdf_path=%s): %s",
+                        name,
+                        urdf_path,
+                        e,
+                    )
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to load URDF robot '{name}': {e}"}],
+                    }
+
                 self._prim_registry.append(prim_path)
 
                 robot_state = _RobotState(
                     name=name,
                     prim_path=prim_path,
                     joint_names=joint_names,
+                    articulation=articulation,
                 )
                 self._robots[name] = robot_state
 
+                logger.info(
+                    "Added robot '%s' (URDF: %s, %d joints, articulation=%s)",
+                    name,
+                    urdf_path,
+                    len(joint_names),
+                    "wired" if articulation is not None else "phase1",
+                )
                 return {
                     "status": "success",
-                    "content": [{"text": (f"Robot '{name}' added (URDF: {urdf_path}, " f"{len(joint_names)} joints)")}],
+                    "content": [
+                        {
+                            "text": (f"Robot '{name}' added (URDF: {urdf_path}, " f"{len(joint_names)} joints)"),
+                            "json": {
+                                "name": name,
+                                "prim_path": prim_path,
+                                "urdf_path": urdf_path,
+                                "joint_names": joint_names,
+                                "joint_count": len(joint_names),
+                                "position": pos,
+                                "articulation_wired": articulation is not None,
+                            },
+                        }
+                    ],
                 }
 
             else:
@@ -1400,19 +1490,56 @@ class IsaacSimulation(SimEngine):
     ) -> dict[str, Any]:
         """Render a camera view using Isaac Sim's RTX pipeline.
 
+        Phase 2 wiring (#14): when a camera registered via
+        :meth:`add_camera` carries a non-``None`` ``handle`` (i.e. the
+        Phase-2 ``omni.isaac.sensor.Camera`` was successfully constructed)
+        and the simulation isn't in ``headless`` render mode, this method
+        pulls real frames via ``handle.get_rgba()`` + ``handle.get_depth()``.
+        Otherwise returns blank frames -- four documented fallback paths,
+        each tagged in the success envelope's text so a caller / agent
+        can tell which path was taken without inspecting array contents:
+
+        * ``Rendered (headless, no RTX)`` -- ``IsaacConfig.render_mode``
+          is ``"headless"``; RTX path-tracing is unavailable. Most CI
+          and GR00T server flows hit this path.
+        * ``Rendered (no camera)`` -- ``camera_name`` is unknown to
+          ``self._cameras``. Caller probably forgot to call ``add_camera``
+          (or typo'd the name).
+        * ``Rendered (Phase-1 camera, no RTX handle)`` -- the camera
+          exists in ``self._cameras`` but its ``handle`` is ``None``.
+          Happens when the camera was added before the
+          ``add_camera`` Phase-2 wiring landed (or when the camera
+          construction failed but bookkeeping was still seeded -- not
+          possible after PR #61, but kept as a defensive fallback).
+        * ``Rendered (RTX <render_mode>)`` -- Phase-2 path: real
+          frames pulled from the Camera handle. ``rgb`` / ``depth``
+          are the actual array shapes returned by Isaac (matching
+          the camera's resolved resolution; not necessarily the
+          ``width`` / ``height`` arguments passed to this method,
+          which are only used to size the blank-frame fallbacks).
+
         Parameters
         ----------
         camera_name : str
-            Camera identifier. Default "default".
+            Camera identifier previously passed to :meth:`add_camera`.
+            Default ``"default"``.
         width : int, optional
-            Frame width. Default from config.
+            Frame width for blank-frame fallbacks. Default from
+            ``IsaacConfig.camera_width``. Ignored on the RTX path
+            (the camera's own resolution wins).
         height : int, optional
-            Frame height. Default from config.
+            Frame height for blank-frame fallbacks. Default from
+            ``IsaacConfig.camera_height``. Ignored on the RTX path.
 
         Returns
         -------
         dict
-            Dict with "rgb", "depth", "seg" arrays and "status".
+            Standard ``{"status", "content": [{"text"}], "rgb", "depth"}``
+            envelope. ``rgb`` is a uint8 ``(H, W, 3)`` array; ``depth``
+            is a float32 ``(H, W)`` array. On the RTX path, ``content``
+            also carries a ``json`` block with the resolved camera
+            ``resolution``, ``prim_path``, and the boolean ``rtx`` flag
+            so an agent can route on the path without parsing text.
         """
         with self._lock:
             if not self._world_created:
@@ -1422,7 +1549,8 @@ class IsaacSimulation(SimEngine):
             h = height or self._config.camera_height
 
             if self._config.render_mode == "headless":
-                # Return blank frames in headless mode
+                # Return blank frames in headless mode. Most CI flows
+                # land here; Isaac's RTX path-tracer is unavailable.
                 return {
                     "status": "success",
                     "rgb": np.zeros((h, w, 3), dtype=np.uint8),
@@ -1430,25 +1558,104 @@ class IsaacSimulation(SimEngine):
                     "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
                 }
 
-            # RTX rendering via camera handle
-            if camera_name in self._cameras:
-                cam = self._cameras[camera_name]
-                # In full implementation, read from RTX camera annotators
-                rgb = np.zeros((cam.height, cam.width, 3), dtype=np.uint8)
-                depth = np.zeros((cam.height, cam.width), dtype=np.float32)
+            if camera_name not in self._cameras:
+                # No camera configured — return blank. Caller probably
+                # forgot to call add_camera or typo'd the name.
                 return {
                     "status": "success",
-                    "rgb": rgb,
-                    "depth": depth,
-                    "content": [{"text": f"Rendered (RTX {self._config.render_mode}): {cam.width}x{cam.height}"}],
+                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                    "depth": np.zeros((h, w), dtype=np.float32),
+                    "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
                 }
 
-            # No camera configured — return blank
+            cam = self._cameras[camera_name]
+
+            if cam.handle is None:
+                # Phase-1 camera (no Phase-2 handle was attached).
+                # Defensive fallback: blank frames sized to the camera's
+                # registered resolution rather than the method's
+                # ``width`` / ``height`` arguments, since the camera's
+                # resolution is what the caller asked for at add_camera.
+                return {
+                    "status": "success",
+                    "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
+                    "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
+                    "content": [{"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}],
+                }
+
+            # Phase-2 RTX path: pull real frames from the Camera handle.
+            try:
+                rgba = cam.handle.get_rgba()
+                # ``get_rgba`` returns either ``(H, W, 4)`` or
+                # ``(H, W, 3)`` depending on the Isaac Sim build. Slice
+                # to RGB defensively so the returned shape is stable
+                # for downstream agents.
+                rgb = np.asarray(rgba)[..., :3]
+                # A camera whose RTX render product hasn't accumulated a
+                # frame yet (e.g. added after the last world step, not
+                # warmed up) returns a malformed / empty buffer -- a 1-D
+                # or 0-size array rather than ``(H, W, C)``. Guard so we
+                # raise a structured RuntimeError (caught below) instead
+                # of an unhandled IndexError when building the json
+                # ``resolution`` from ``rgb.shape[1]``. Caught during the
+                # isaac_gs example's GPU validation with multiple
+                # freshly-added cameras.
+                if rgb.ndim < 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0:
+                    raise RuntimeError(
+                        f"camera {camera_name!r} returned a malformed RGB buffer "
+                        f"(shape {np.asarray(rgba).shape}); the RTX render product "
+                        "likely hasn't accumulated a frame yet -- step the world a "
+                        "few times after add_camera before rendering."
+                    )
+                depth_raw = cam.handle.get_depth()
+                if depth_raw is None:
+                    # Camera was constructed without the depth annotator
+                    # (Isaac Sim ships rgba on by default but depth is
+                    # opt-in via ``Camera.add_distance_to_image_plane_to_frame()``;
+                    # PR #61's add_camera enables it post-initialize, but
+                    # an older sim or a manually-attached Phase-1 camera
+                    # state may not). Surface a zero-depth array sized to
+                    # rgb so callers see a stable shape, plus a WARNING
+                    # so misconfigured cameras don't silently produce
+                    # zero-depth telemetry.
+                    logger.warning(
+                        "Camera '%s': get_depth() returned None (depth annotator not enabled). "
+                        "Returning zero-depth array; "
+                        "check add_distance_to_image_plane_to_frame() in add_camera.",
+                        camera_name,
+                    )
+                    depth = np.zeros(rgb.shape[:2], dtype=np.float32)
+                else:
+                    depth = np.asarray(depth_raw)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError) as e:
+                # Cleanup-clause shape mirrors create_world (#52
+                # precedent). The Camera handle's ``get_rgba`` /
+                # ``get_depth`` can raise on a not-yet-stepped world
+                # (RTX render product hasn't accumulated samples) or
+                # surface drift; surface as the structured error
+                # envelope rather than letting the exception propagate.
+                logger.error("Failed to render camera '%s': %s", camera_name, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to render camera '{camera_name}': {e}"}],
+                }
+
+            render_info = {
+                "rtx": True,
+                "prim_path": cam.prim_path,
+                "resolution": [int(rgb.shape[1]), int(rgb.shape[0])],
+                "render_mode": self._config.render_mode,
+            }
             return {
                 "status": "success",
-                "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                "depth": np.zeros((h, w), dtype=np.float32),
-                "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
+                "rgb": rgb,
+                "depth": depth,
+                "content": [
+                    {
+                        "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
+                        "json": render_info,
+                    }
+                ],
             }
 
     def add_camera(
@@ -1462,44 +1669,284 @@ class IsaacSimulation(SimEngine):
     ) -> dict[str, Any]:
         """Add an RTX camera to the scene.
 
+        Phase 2 wiring (#14): instantiates the underlying USD camera prim
+        via ``omni.isaac.sensor.Camera`` and stores the handle on the
+        ``_CameraState`` for later retrieval by :meth:`render`. In Phase 1
+        this method silently returned ``status: "success"`` without
+        creating any prim; that path is gone -- callers will now see a
+        real camera prim on the stage and a Camera handle in
+        ``self._cameras[name].handle``.
+
+        ``render`` continues to return blank frames in Phase 2 because
+        the actual ``camera.get_rgba()`` / annotator wiring is a separate
+        slice. The Camera prim is the prerequisite, not the full frame
+        path.
+
         Parameters
         ----------
         name : str
-            Camera identifier. Default "default".
+            Camera identifier. Default ``"default"``. Must be unique
+            across the simulation; a duplicate is rejected with a
+            structured error envelope.
         position : list[float], optional
-            Camera position [x, y, z].
+            World-space position ``[x, y, z]`` in meters. Default
+            ``[2.0, 2.0, 2.0]`` (an over-the-shoulder vantage that
+            sees the default ground plane and any objects above it).
         target : list[float], optional
-            Camera look-at target [x, y, z].
+            World-space look-at point ``[x, y, z]``. If provided, the
+            camera is oriented so its forward axis points at ``target``
+            via ``omni.isaac.core.utils.viewports.set_camera_view``.
+            If ``None``, the camera keeps its constructed orientation
+            (identity).
         width : int, optional
-            Image width. Default from config.
+            Image width in pixels. Defaults to ``IsaacConfig.camera_width``.
         height : int, optional
-            Image height. Default from config.
+            Image height in pixels. Defaults to ``IsaacConfig.camera_height``.
         fov : float
-            Field of view in degrees. Default 60.
+            Horizontal field of view in degrees. Default 60.0. Mapped
+            onto ``Camera.set_focal_length`` using the standard pinhole
+            relation ``focal_length = horizontal_aperture / (2 * tan(fov/2))``
+            with the USD-default 24 mm horizontal aperture.
 
         Returns
         -------
         dict
-            Status dict.
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. ``json`` carries the resolved ``prim_path``,
+            ``position``, ``target``, ``resolution``, ``fov``, and the
+            computed ``focal_length`` so an agent can confirm the
+            camera setup without re-querying.
         """
         with self._lock:
             if not self._world_created:
                 return {"status": "error", "content": [{"text": "No world created."}]}
 
-            w = width or self._config.camera_width
-            h = height or self._config.camera_height
-            pos = position or [2.0, 2.0, 2.0]
+            if name in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' already exists."}],
+                }
+
+            w = int(width or self._config.camera_width)
+            h = int(height or self._config.camera_height)
+            pos = list(position) if position is not None else [2.0, 2.0, 2.0]
+            tgt = list(target) if target is not None else None
+            fov_deg = float(fov)
 
             prim_path = f"{self._config.stage_path}/Cameras/{name}"
-            self._prim_registry.append(prim_path)
 
+            try:
+                handle, focal_length_mm = self._create_camera_prim(
+                    name=name,
+                    prim_path=prim_path,
+                    position=pos,
+                    target=tgt,
+                    width=w,
+                    height=h,
+                    fov_deg=fov_deg,
+                )
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                # Cleanup-clause shape mirrors create_world (#52 precedent)
+                # and add_object: the constructor or initialise / look-at
+                # call either succeeds and updates registries, or fails
+                # with a structured envelope and updates neither.
+                logger.error("Failed to add camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to add camera '{name}': {e}"}],
+                }
+
+            self._prim_registry.append(prim_path)
             cam_state = _CameraState(name=name, prim_path=prim_path, width=w, height=h)
+            cam_state.handle = handle
             self._cameras[name] = cam_state
 
+            cam_info = {
+                "name": name,
+                "prim_path": prim_path,
+                "position": pos,
+                "target": tgt,
+                "resolution": [w, h],
+                "fov": fov_deg,
+                "focal_length_mm": focal_length_mm,
+            }
+            logger.info(
+                "Added camera '%s' at pos=%s target=%s res=%dx%d fov=%.1f",
+                name,
+                pos,
+                tgt,
+                w,
+                h,
+                fov_deg,
+            )
             return {
                 "status": "success",
-                "content": [{"text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov}")}],
+                "content": [
+                    {
+                        "text": (f"Camera '{name}' added at {pos}, " f"resolution={w}x{h}, fov={fov_deg}"),
+                        "json": cam_info,
+                    }
+                ],
             }
+
+    def remove_camera(self, name: str) -> dict[str, Any]:
+        """Remove a camera from the scene.
+
+        Phase 2 wiring (#14): paired with :meth:`add_camera`'s prim
+        creation. Deletes the underlying USD camera prim via
+        ``omni.isaac.core.utils.prims.delete_prim`` and prunes the
+        in-Python registries. New method (no Phase 1 stub existed).
+
+        Parameters
+        ----------
+        name : str
+            Camera identifier previously passed to :meth:`add_camera`.
+
+        Returns
+        -------
+        dict
+            Status dict in the standard ``{"status", "content": [{"text"}]}``
+            shape used by mutating methods on this class. Returns ``error``
+            if the camera is unknown to ``_cameras``.
+        """
+        with self._lock:
+            if name not in self._cameras:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Camera '{name}' not found."}],
+                }
+
+            prim_path = self._cameras[name].prim_path
+
+            # Cameras aren't added via ``world.scene.add`` (they're
+            # standalone USD prims, not articulations or shape wrappers)
+            # so removal goes via the stage utility rather than
+            # ``world.scene.remove_object``. Wrapped in the same except
+            # tuple as add_camera so a transient stage error returns the
+            # structured envelope and leaves bookkeeping intact for
+            # retry.
+            try:
+                if self._world is not None:
+                    from omni.isaac.core.utils.prims import (  # type: ignore[import-not-found]
+                        delete_prim,
+                    )
+
+                    delete_prim(prim_path)
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
+                logger.error("Failed to remove camera '%s' (prim=%s): %s", name, prim_path, e)
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Failed to remove camera '{name}': {e}"}],
+                }
+
+            del self._cameras[name]
+            if prim_path in self._prim_registry:
+                self._prim_registry.remove(prim_path)
+
+            logger.info("Removed camera '%s' (prim=%s)", name, prim_path)
+            return {
+                "status": "success",
+                "content": [{"text": f"Camera '{name}' removed."}],
+            }
+
+    def _create_camera_prim(
+        self,
+        *,
+        name: str,
+        prim_path: str,
+        position: list[float],
+        target: list[float] | None,
+        width: int,
+        height: int,
+        fov_deg: float,
+    ) -> tuple[Any, float]:
+        """Construct the omni.isaac.sensor.Camera prim + apply look-at + FOV.
+
+        Returns the camera handle plus the resolved focal length in mm
+        so :meth:`add_camera` can surface the actually-used focal length
+        in its structured json payload.
+
+        Lazy-imports both ``omni.isaac.sensor.Camera`` and
+        ``omni.isaac.core.utils.viewports.set_camera_view`` so the
+        module loads cleanly without Isaac Sim installed (the call
+        site only runs after :meth:`create_world` has booted
+        ``SimulationApp``).
+        """
+        import math
+
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.sensor import Camera  # type: ignore[import-not-found]
+
+        camera = Camera(
+            prim_path=prim_path,
+            name=name,
+            position=np.asarray(position, dtype=float),
+            resolution=(int(width), int(height)),
+        )
+        # ``initialize`` allocates the RTX render product + annotators.
+        # Some Camera builds defer this to first ``get_rgba()`` call;
+        # call it explicitly so an init-time failure surfaces here
+        # (and gets caught by the cleanup clause in add_camera) rather
+        # than silently on the first render attempt.
+        camera.initialize()
+
+        # Map FOV (deg, horizontal) to focal length (mm) using the
+        # standard pinhole lens relation:
+        #
+        #     focal_length = horizontal_aperture / (2 * tan(fov / 2))
+        #
+        # The horizontal aperture MUST be the camera's actual aperture,
+        # read back from the prim -- assuming a nominal 24 mm is wrong on
+        # Isaac's Camera (its default aperture + unit convention yield
+        # fx≈6348 px at 640 px, i.e. a ~6° telephoto, instead of the
+        # intended 60° / fx≈554). Deriving the focal length from the
+        # read-back aperture makes the resulting pixel intrinsics
+        # fx = width / (2*tan(fov/2)) exactly, independent of the
+        # aperture's absolute value or units.
+        try:
+            horizontal_aperture_mm = float(camera.get_horizontal_aperture())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            horizontal_aperture_mm = 24.0
+        focal_length_mm = horizontal_aperture_mm / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+        camera.set_focal_length(focal_length_mm)
+
+        # Enable the depth annotator on the RTX render product. Isaac
+        # Sim's Camera ships with rgba enabled by default but depth
+        # is opt-in via this method; without it, ``camera.get_depth()``
+        # returns ``None`` with a "Annotator 'distance_to_image_plane'
+        # not found" warning -- which then crashes downstream
+        # ``np.asarray`` calls in ``render()``. Caught during PR #61
+        # GPU validation against the Isaac Sim 4.5 docker image.
+        # ``add_distance_to_image_plane_to_frame`` is idempotent on
+        # repeat calls so this is safe even if the camera has already
+        # been initialized with depth elsewhere.
+        try:
+            camera.add_distance_to_image_plane_to_frame()
+        except (AttributeError, RuntimeError):
+            # Older Isaac Sim builds expose this under a different name
+            # (``add_depth_to_frame``). Try the fallback before giving
+            # up; downstream ``get_depth`` will still return ``None``
+            # but ``render()``'s defensive None-handling (PR #62) will
+            # cover it.
+            try:
+                camera.add_depth_to_frame()
+            except (AttributeError, RuntimeError):
+                logger.debug(
+                    "Camera %s: depth annotator not enabled; ``get_depth()`` will return None",
+                    name,
+                )
+
+        # Apply look-at after focal-length so the camera's forward axis
+        # is correctly oriented at the target. ``set_camera_view`` works
+        # on any USD camera prim by path; no Camera-specific API.
+        if target is not None:
+            from omni.isaac.core.utils.viewports import (  # type: ignore[import-not-found]
+                set_camera_view,
+            )
+
+            set_camera_view(eye=position, target=target, camera_prim_path=prim_path)
+
+        return camera, focal_length_mm
 
     # --- Isaac-specific: Fleet Replication -----------------------------------
 
@@ -1558,18 +2005,206 @@ class IsaacSimulation(SimEngine):
 
     # --- Private Implementation ----------------------------------------------
 
-    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> list[str]:
-        """Load a robot from USD file. Returns joint names."""
-        # In full implementation: use omni.isaac.core to add USD reference
-        # and extract Articulation joint names
-        logger.info("Loading USD robot from %s at %s", usd_path, prim_path)
-        return []
+    def _load_usd_robot(self, prim_path: str, usd_path: str, position: list[float]) -> tuple[list[str], Any]:
+        """Load a robot from a USD file. Returns ``(joint_names, articulation)``.
 
-    def _load_urdf_robot(self, prim_path: str, urdf_path: str, position: list[float]) -> list[str]:
-        """Load a robot from URDF (converted to USD). Returns joint names."""
-        # In full implementation: use omni.isaac.urdf to convert and load
-        logger.info("Loading URDF robot from %s at %s", urdf_path, prim_path)
-        return []
+        Phase 2 wiring (#14): the previous Phase-1 stub silently returned
+        ``[]`` and didn't touch the stage. This Phase-2 implementation:
+
+        1. References the USD at ``usd_path`` into the stage at
+           ``prim_path`` via ``omni.isaac.core.utils.stage.add_reference_to_stage``.
+        2. Wraps the resulting prim in
+           ``omni.isaac.core.articulations.Articulation``.
+        3. Calls ``articulation.initialize()`` to populate ``dof_names`` /
+           internal handles. ``initialize`` is what triggers the Articulation
+           tree walk that surfaces the joint count; without it
+           ``dof_names`` is ``None`` on most Isaac Sim builds.
+        4. Applies the requested ``position`` via ``set_world_pose`` so
+           the robot lands where the caller asked. Identity ``[0, 0, 0]``
+           is skipped to avoid an unnecessary kernel call.
+        5. Extracts joint names from ``articulation.dof_names`` and returns
+           them alongside the live ``Articulation`` handle. Callers store
+           the handle on ``_RobotState.articulation`` so subsequent
+           ``get_observation`` / ``send_action`` calls can read joint
+           positions and apply targets through it.
+
+        Raises propagate -- the caller (``add_robot`` USD branch) wraps
+        this method in the standard cleanup-clause tuple
+        ``(RuntimeError, ValueError, OSError, AttributeError, TypeError,
+        ImportError)`` so any Isaac-side surface drift returns a
+        structured error envelope rather than blowing up the agent.
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+        from omni.isaac.core.utils.stage import (  # type: ignore[import-not-found]
+            add_reference_to_stage,
+        )
+
+        # Step 1: stage reference. The USD's default prim becomes a child
+        # of ``prim_path``; subsequent Articulation lookups walk that path.
+        add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+
+        # Step 2-3: wrap + initialise. The articulation name has to be
+        # unique within the scene's articulation registry, so derive it
+        # from the prim path's leaf segment to match the caller's
+        # ``add_robot`` ``name`` (the leaf of ``prim_path`` is the
+        # caller-visible robot name by construction).
+        articulation_name = prim_path.rsplit("/", 1)[-1]
+        articulation = Articulation(prim_path=prim_path, name=articulation_name)
+        articulation.initialize()
+
+        # Step 4: position. The USD's authored pose is the default; only
+        # call set_world_pose when the caller actually wanted a non-default
+        # placement. Saves a tensor round-trip on the common
+        # ``position=[0, 0, 0]`` case.
+        if position is not None and any(p != 0.0 for p in position):
+            articulation.set_world_pose(position=np.asarray(position, dtype=float))
+
+        # Step 5: joint names. ``dof_names`` is ``None`` if ``initialize``
+        # didn't surface them (e.g. the USD has no Articulation root on
+        # the referenced prim); coerce to ``[]`` so downstream callers
+        # see the documented "empty joint list" silent-empty mode rather
+        # than a ``TypeError`` on iteration.
+        joint_names = list(articulation.dof_names) if articulation.dof_names else []
+
+        logger.info(
+            "Loaded USD robot at %s from %s (%d joints, articulation=initialized)",
+            prim_path,
+            usd_path,
+            len(joint_names),
+        )
+        return joint_names, articulation
+
+    def _load_urdf_robot(self, prim_path: str, urdf_path: str, position: list[float]) -> tuple[list[str], Any]:
+        """Load a robot from a URDF file. Returns ``(joint_names, articulation)``.
+
+        Phase 2 wiring (#14): the previous Phase-1 stub silently
+        returned ``[]`` and didn't touch the stage. This Phase-2
+        implementation:
+
+        1. Builds an ``omni.importer.urdf._urdf.ImportConfig`` with
+           sensible defaults for a fixed-base manipulator (the most
+           common case). Override behaviour is intentionally narrow:
+           expose only the fields the agent / caller meaningfully
+           controls (fix_base + distance_scale via config), keep the
+           rest at the importer's defaults.
+        2. Runs the ``URDFParseAndImportFile`` Kit command which
+           parses the URDF and writes the USD onto the live stage at
+           (or near) ``prim_path``. The importer occasionally returns a
+           slightly different prim path than requested (it appends the
+           URDF's ``robot name`` if the destination is a directory-like
+           prim path); we honour the importer's choice and use that
+           path for subsequent Articulation construction.
+        3. Wraps the resulting prim in
+           ``omni.isaac.core.articulations.Articulation``,
+           initialises it, and applies the requested ``position``
+           (skipping origin to save a tensor round-trip, mirroring
+           ``_load_usd_robot``).
+        4. Extracts joint names from ``articulation.dof_names``,
+           coercing ``None`` to ``[]`` so a URDF with no actuated
+           joints surfaces as the documented empty-joint-list mode
+           rather than a ``TypeError`` on iteration.
+        5. Returns ``(joint_names, articulation)`` -- same shape as
+           ``_load_usd_robot`` so the ``add_robot`` URDF branch can
+           reuse the same envelope shape.
+
+        Raises propagate; the caller (``add_robot`` URDF branch)
+        wraps in the standard cleanup-clause tuple
+        ``(RuntimeError, ValueError, OSError, AttributeError,
+        TypeError, ImportError)``.
+        """
+        import numpy as np  # type: ignore[import-not-found]
+        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+
+        # Isaac Sim's URDF importer module path varies across releases:
+        # * 4.5+ uses ``isaacsim.asset.importer.urdf._urdf.ImportConfig``
+        # * pre-4.5 used ``omni.importer.urdf._urdf.ImportConfig`` (now
+        #   renamed under the deprecation transition).
+        # Try the modern path first, fall back to the old one. Caught
+        # during PR #64 GPU validation against Isaac Sim 4.5 -- the
+        # original wiring only knew the pre-4.5 path and crashed on a
+        # ``ModuleNotFoundError: No module named 'omni.importer'``.
+        try:
+            from isaacsim.asset.importer.urdf import _urdf  # type: ignore[import-not-found]
+        except ImportError:
+            from omni.importer.urdf import _urdf  # type: ignore[import-not-found]
+
+        # Step 1: import config. Defaults chosen for a fixed-base
+        # manipulator (the most common LIBERO / GR00T case); fleet RL
+        # workflows can override fix_base via a future config knob.
+        import_config = _urdf.ImportConfig()
+        import_config.fix_base = True
+        import_config.import_inertia_tensor = True
+        import_config.create_physics_scene = False  # World already created one
+        import_config.distance_scale = 1.0  # URDF in meters; matches stage units
+
+        # Step 2: parse + import via the direct ``_urdf`` interface
+        # rather than the ``URDFParseAndImportFile`` Kit command. The
+        # Kit-command path was deprecated / changed semantics across
+        # Isaac Sim releases and produced a "Used null prim" runtime
+        # error on 4.5 against a freshly-created World; the direct
+        # interface (``parse_urdf`` -> ``import_robot``) is the
+        # documented stable surface that survives across versions.
+        import os
+
+        urdf_iface = _urdf.acquire_urdf_interface()
+        # Isaac Sim 4.5+: parse_urdf(asset_root, asset_name, import_config),
+        # import_robot(asset_root, asset_name, robot, import_config, stage="").
+        # Both methods take the URDF as a (root_dir, filename) pair so
+        # the importer can resolve relative mesh paths inside the URDF.
+        # Splitting the caller's single ``urdf_path`` here keeps the
+        # method's caller-visible API as one path argument.
+        urdf_root, urdf_filename = os.path.split(os.path.abspath(urdf_path))
+        urdf_robot = urdf_iface.parse_urdf(urdf_root, urdf_filename, import_config)
+        if urdf_robot is None:
+            raise RuntimeError(f"URDF parse failed for {urdf_path!r}")
+        # ``stage=""`` (default) imports directly into the live USD
+        # stage held open by ``SimulationApp``. Returns the prim path
+        # the importer used, which we then bind to the caller's
+        # requested ``prim_path`` via ``add_reference_to_stage`` --
+        # actually, the importer adds prims directly to the live
+        # stage so we don't need a separate ``add_reference_to_stage``
+        # step. The ``usd_dest`` path is only used as a side-channel
+        # USD-on-disk export for offline asset reuse if needed.
+        imported_prim_path = urdf_iface.import_robot(urdf_root, urdf_filename, urdf_robot, import_config, "")
+        if not imported_prim_path:
+            raise RuntimeError(f"URDF import failed for {urdf_path!r} via _urdf.import_robot")
+
+        # Step 2b: bind the imported prim to our caller-requested
+        # ``prim_path``. The ``import_robot`` call adds prims at
+        # ``imported_prim_path`` (under the live stage's default-prim
+        # parent); we want the robot under our stage convention
+        # (``{stage_path}/Robots/{name}``). Use the imported path
+        # directly for ``Articulation`` construction -- the caller
+        # bookkeeping (``_RobotState.prim_path``) records this so
+        # ``remove_robot`` can look it up later. If a future caller
+        # needs strict prim-path placement, this can move to a
+        # ``MoveCommand`` to relocate after import.
+        actual_prim_path = imported_prim_path
+
+        # Step 3: Articulation wrap + initialise.
+        articulation_name = actual_prim_path.rsplit("/", 1)[-1]
+        articulation = Articulation(prim_path=actual_prim_path, name=articulation_name)
+        articulation.initialize()
+
+        # Position. Same skip-origin shortcut as ``_load_usd_robot``.
+        if position is not None and any(p != 0.0 for p in position):
+            articulation.set_world_pose(position=np.asarray(position, dtype=float))
+
+        # Step 4-5: joint names + return.
+        joint_names = list(articulation.dof_names) if articulation.dof_names else []
+
+        logger.info(
+            "Loaded URDF robot at %s from %s (%d joints, articulation=initialized)",
+            actual_prim_path,
+            urdf_path,
+            len(joint_names),
+        )
+        return joint_names, articulation
 
     def cleanup(self) -> None:
         """Release all resources.

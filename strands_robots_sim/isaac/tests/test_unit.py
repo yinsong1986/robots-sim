@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 
@@ -1096,3 +1097,1220 @@ class TestDestroyAndGetStateSurfaceObjects:
         assert info["num_objects_released"] == 2
         # Post-destroy the dict is empty.
         assert sim._objects == {}
+
+
+class TestRenderFramePathPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.render``.
+
+    Pins the four documented render paths (headless / no-camera /
+    Phase-1-handle-None / RTX-real-frames) against the right blank-vs.
+    -real frame return shapes plus the structured envelope text /
+    json. Pairs with the Phase 2 ``add_camera`` slice; the RTX path
+    only lights up when the camera in ``self._cameras`` carries a
+    non-``None`` ``handle``, which Phase 2 ``add_camera`` populates
+    via ``omni.isaac.sensor.Camera``.
+    """
+
+    def _make_sim(self, render_mode: str = "rtx_realtime") -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation(render_mode=render_mode)
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_returns_error_without_world(self) -> None:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.render()
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_headless_returns_blank_frames_with_headless_text(self) -> None:
+        """``render_mode="headless"`` -> blank frames sized to the
+        ``width`` / ``height`` arguments (or config defaults), with
+        ``"headless, no RTX"`` in the success text.
+        """
+        sim = self._make_sim(render_mode="headless")
+        result = sim.render(width=320, height=240)
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (240, 320, 3)
+        assert result["depth"].shape == (240, 320)
+        assert result["rgb"].dtype == np.uint8
+        assert result["depth"].dtype == np.float32
+        assert (result["rgb"] == 0).all()
+        assert "headless, no RTX" in result["content"][0]["text"]
+
+    def test_unknown_camera_returns_blank_with_no_camera_text(self) -> None:
+        """Unknown ``camera_name`` -> blank frames + ``"no camera"`` in text."""
+        sim = self._make_sim()
+        result = sim.render("ghost", width=160, height=120)
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (120, 160, 3)
+        assert "no camera" in result["content"][0]["text"]
+
+    def test_phase1_camera_with_no_handle_returns_blank_frames(self) -> None:
+        """A camera registered without a Phase-2 handle (``handle=None``)
+        falls back to blank frames sized to the camera's registered
+        resolution, with ``"Phase-1 camera, no RTX handle"`` text.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        sim._cameras["legacy"] = _CameraState(
+            name="legacy",
+            prim_path="/World/Cameras/legacy",
+            width=400,
+            height=300,
+        )
+        # handle deliberately left as None.
+        result = sim.render("legacy")
+        assert result["status"] == "success"
+        assert result["rgb"].shape == (300, 400, 3)
+        assert "Phase-1 camera, no RTX handle" in result["content"][0]["text"]
+
+    def test_phase2_camera_with_handle_pulls_real_frames(self) -> None:
+        """A Phase-2 camera (handle set) -> ``handle.get_rgba()`` and
+        ``handle.get_depth()`` are called and their return values flow
+        into the structured envelope.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim(render_mode="rtx_realtime")
+        handle = MagicMock(name="Camera_handle")
+        # Real Isaac get_rgba returns RGBA; pin the slice-to-RGB.
+        handle.get_rgba.return_value = np.full((240, 320, 4), 255, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((240, 320), 1.5, dtype=np.float32)
+
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "success"
+        # rgb is sliced to 3 channels (alpha dropped).
+        assert result["rgb"].shape == (240, 320, 3)
+        assert (result["rgb"] == 255).all()
+        assert result["depth"].shape == (240, 320)
+        assert (result["depth"] == 1.5).all()
+
+        handle.get_rgba.assert_called_once()
+        handle.get_depth.assert_called_once()
+
+        info = result["content"][0]["json"]
+        assert info["rtx"] is True
+        assert info["prim_path"] == "/World/Cameras/front"
+        assert info["resolution"] == [320, 240]
+        assert info["render_mode"] == "rtx_realtime"
+        assert "RTX rtx_realtime" in result["content"][0]["text"]
+
+    def test_phase2_camera_with_rgb_handle_passes_through(self) -> None:
+        """Some Isaac Sim builds return RGB (not RGBA) from get_rgba.
+        Pin that the slice-to-3-channels works against either shape.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.return_value = np.full((100, 200, 3), 128, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((100, 200), 2.0, dtype=np.float32)
+
+        cs = _CameraState(name="rgb", prim_path="/World/Cameras/rgb", width=200, height=100)
+        cs.handle = handle
+        sim._cameras["rgb"] = cs
+
+        result = sim.render("rgb")
+        assert result["rgb"].shape == (100, 200, 3)
+
+    def test_phase2_camera_get_rgba_failure_returns_error_envelope(self) -> None:
+        """If ``handle.get_rgba`` raises, render returns the structured
+        error envelope rather than letting the exception propagate.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.side_effect = RuntimeError("RTX render product not stepped")
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "error"
+        assert "RTX render product not stepped" in result["content"][0]["text"]
+        # Returned envelope must NOT carry rgb/depth keys on failure
+        # so callers can branch on ``status`` alone.
+        assert "rgb" not in result
+        assert "depth" not in result
+
+    def test_phase2_camera_malformed_rgb_returns_error_envelope(self) -> None:
+        """A not-yet-warmed camera whose ``get_rgba`` returns a malformed
+        (1-D / empty) buffer -> structured error envelope, not an
+        unhandled IndexError on ``rgb.shape[1]``.
+
+        Regression pin for the gap found during the isaac_gs example's
+        GPU validation: freshly-added cameras whose RTX render product
+        hasn't accumulated a frame return a 1-D array; the json
+        ``resolution`` build then IndexError'd.
+        """
+        import numpy as np
+
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        # 1-D buffer (e.g. empty / not-yet-rendered render product).
+        handle.get_rgba.return_value = np.zeros((0,), dtype=np.uint8)
+        cs = _CameraState(name="cold", prim_path="/World/Cameras/cold", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["cold"] = cs
+
+        result = sim.render("cold")
+        assert result["status"] == "error"
+        assert "malformed RGB buffer" in result["content"][0]["text"]
+        assert "rgb" not in result
+        assert "depth" not in result
+
+    def test_phase2_camera_get_depth_failure_returns_error_envelope(self) -> None:
+        """Pin failure path also covers ``get_depth`` raising independently
+        of ``get_rgba``.
+        """
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.return_value = np.zeros((100, 100, 4), dtype=np.uint8)
+        handle.get_depth.side_effect = AttributeError("annotator not bound")
+        cs = _CameraState(name="cam", prim_path="/World/Cameras/cam", width=100, height=100)
+        cs.handle = handle
+        sim._cameras["cam"] = cs
+
+        result = sim.render("cam")
+        assert result["status"] == "error"
+        assert "annotator not bound" in result["content"][0]["text"]
+
+
+def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported camera modules.
+
+    Returns
+    -------
+    sensor_mod, viewports_mod, stage_mod, camera_handle
+        ``sensor_mod`` stands in for ``omni.isaac.sensor`` (its
+        ``.Camera`` attribute returns a fresh handle MagicMock).
+        ``viewports_mod`` stands in for
+        ``omni.isaac.core.utils.viewports`` (``.set_camera_view``).
+        ``stage_mod`` stands in for ``omni.isaac.core.utils.prims``
+        (``.delete_prim``). ``camera_handle`` is the MagicMock the
+        ``Camera()`` constructor returns -- tests can assert on
+        ``.initialize`` / ``.set_focal_length`` calls on it.
+    """
+    sensor_mod = MagicMock()
+    viewports_mod = MagicMock()
+    stage_mod = MagicMock()
+    camera_handle = MagicMock(name="Camera_handle")
+    # add_camera derives focal length from the camera's *actual* horizontal
+    # aperture (read back via get_horizontal_aperture), so the mock must report
+    # a real number -- otherwise float(MagicMock()) defaults to 1.0. USD's
+    # nominal 24 mm keeps the pinhole relation assertions below meaningful.
+    camera_handle.get_horizontal_aperture.return_value = 24.0
+    sensor_mod.Camera.return_value = camera_handle
+    return sensor_mod, viewports_mod, stage_mod, camera_handle
+
+
+def _make_simulation_with_world_for_camera() -> object:
+    """Build an ``IsaacSimulation`` with ``_world_created=True`` and a
+    mocked ``_world`` so ``add_camera`` / ``remove_camera`` can exercise
+    their full Phase 2 wiring without booting Isaac Sim.
+    """
+    from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+    sim = IsaacSimulation()
+    sim._world_created = True
+    sim._world = MagicMock()
+    return sim
+
+
+class TestAddCameraPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation.add_camera``.
+
+    Pins the underlying ``omni.isaac.sensor.Camera`` constructor + FOV /
+    look-at wiring + the structured success envelope.
+    """
+
+    def test_returns_error_without_world(self) -> None:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.add_camera()
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_returns_error_on_duplicate_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r1 = sim.add_camera("front")
+            r2 = sim.add_camera("front")
+        assert r1["status"] == "success"
+        assert r2["status"] == "error"
+        assert "already exists" in r2["content"][0]["text"]
+        # Only one Camera() construction landed; duplicate rejected
+        # before any prim work.
+        assert sensor.Camera.call_count == 1
+
+    def test_calls_omni_camera_constructor_with_resolved_kwargs(self) -> None:
+        """``Camera()`` is called with ``prim_path``, ``name``, ``position``,
+        and ``resolution`` kwargs derived from the add_camera args.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("cam0", position=[1, 2, 3], width=320, height=240)
+        kwargs = sensor.Camera.call_args.kwargs
+        assert kwargs["name"] == "cam0"
+        assert kwargs["prim_path"] == "/World/Cameras/cam0"
+        assert kwargs["resolution"] == (320, 240)
+        assert list(kwargs["position"]) == [1, 2, 3]
+        # The handle's initialize() must be called so RTX render product
+        # allocation failures surface on add_camera, not on first render.
+        handle.initialize.assert_called_once()
+
+    def test_focal_length_matches_pinhole_relation_for_default_fov(self) -> None:
+        """``fov=60`` (default, horizontal) on a 24 mm horizontal aperture
+        yields focal_length ~ 20.78 mm via the standard pinhole relation
+        ``focal = aperture / (2 * tan(fov/2))``.
+        """
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("cam_default", fov=60.0)
+        expected_focal = 24.0 / (2.0 * math.tan(math.radians(30.0)))
+        # set_focal_length called with the right value.
+        handle.set_focal_length.assert_called_once()
+        actual_focal = handle.set_focal_length.call_args.args[0]
+        assert math.isclose(actual_focal, expected_focal, rel_tol=1e-9)
+        # Same value surfaces in the json payload.
+        assert math.isclose(
+            result["content"][0]["json"]["focal_length_mm"],
+            expected_focal,
+            rel_tol=1e-9,
+        )
+
+    def test_focal_length_scales_with_fov(self) -> None:
+        """Wider FOV -> shorter focal length (basic monotonicity sanity)."""
+        import math
+
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        captured: dict[str, float] = {}
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            r45 = sim.add_camera("narrow", fov=45.0)
+            r90 = sim.add_camera("wide", fov=90.0)
+        captured["fov45"] = r45["content"][0]["json"]["focal_length_mm"]
+        captured["fov90"] = r90["content"][0]["json"]["focal_length_mm"]
+        # FOV 45 -> tan(22.5deg)=0.414 -> 24/(2*0.414)=29.0 mm
+        # FOV 90 -> tan(45deg)=1.0    -> 24/(2*1.0)  =12.0 mm
+        assert math.isclose(captured["fov45"], 24.0 / (2 * math.tan(math.radians(22.5))), rel_tol=1e-9)
+        assert math.isclose(captured["fov90"], 12.0, rel_tol=1e-9)
+        assert captured["fov45"] > captured["fov90"]
+
+    def test_target_triggers_set_camera_view(self) -> None:
+        """When ``target`` is given, ``set_camera_view`` is called with
+        ``eye=position, target=target, camera_prim_path=prim_path``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera(
+                "front",
+                position=[2, 0, 1],
+                target=[0, 0, 0.5],
+            )
+        viewports.set_camera_view.assert_called_once()
+        kwargs = viewports.set_camera_view.call_args.kwargs
+        assert kwargs["eye"] == [2, 0, 1]
+        assert kwargs["target"] == [0, 0, 0.5]
+        assert kwargs["camera_prim_path"] == "/World/Cameras/front"
+
+    def test_no_target_leaves_camera_view_unset(self) -> None:
+        """With ``target=None`` (default), ``set_camera_view`` is NOT
+        called -- the camera keeps its constructed orientation.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("free")
+        viewports.set_camera_view.assert_not_called()
+
+    def test_default_position_and_resolution(self) -> None:
+        """Default position is ``[2.0, 2.0, 2.0]`` (over-the-shoulder
+        vantage) and resolution defaults from ``IsaacConfig``.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("default")
+        info = result["content"][0]["json"]
+        assert info["position"] == [2.0, 2.0, 2.0]
+        # Resolution follows the IsaacConfig defaults; pin the shape
+        # rather than the exact values (config defaults could change
+        # without breaking this contract).
+        assert isinstance(info["resolution"], list) and len(info["resolution"]) == 2
+        assert all(isinstance(d, int) and d > 0 for d in info["resolution"])
+
+    def test_failure_in_camera_constructor_returns_error_no_registry_pollution(self) -> None:
+        """If ``Camera(...)`` raises, neither ``_cameras`` nor
+        ``_prim_registry`` are updated.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        sensor.Camera.side_effect = RuntimeError("RTX render product alloc failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("broken")
+        assert result["status"] == "error"
+        assert "RTX render product alloc failed" in result["content"][0]["text"]
+        assert "broken" not in sim._cameras
+        assert "/World/Cameras/broken" not in sim._prim_registry
+
+    def test_failure_in_initialize_returns_error_no_registry_pollution(self) -> None:
+        """``Camera.initialize()`` failure (not just constructor failure)
+        also prevents registry updates -- pinned because some Isaac Sim
+        builds defer RTX work to ``initialize`` rather than the
+        constructor itself.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        handle.initialize.side_effect = RuntimeError("annotator allocation failed")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            result = sim.add_camera("late_fail")
+        assert result["status"] == "error"
+        assert "annotator allocation failed" in result["content"][0]["text"]
+        assert "late_fail" not in sim._cameras
+
+    def test_handle_stored_on_camera_state_for_later_render(self) -> None:
+        """The Camera handle is stored on ``_cameras[name].handle`` so a
+        future Phase-2.5 render-frame slice can call methods on it
+        (e.g. ``handle.get_rgba()``) without re-importing.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, handle = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front")
+        assert sim._cameras["front"].handle is handle
+
+    def test_registries_updated_on_success(self) -> None:
+        """Both ``_cameras`` and ``_prim_registry`` are updated by
+        a successful add_camera.
+        """
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+            },
+        ):
+            sim.add_camera("front", width=160, height=120)
+        assert "front" in sim._cameras
+        cs = sim._cameras["front"]
+        assert cs.prim_path == "/World/Cameras/front"
+        assert cs.width == 160 and cs.height == 120
+        assert "/World/Cameras/front" in sim._prim_registry
+
+
+class TestRemoveCameraPhase2:
+    """Phase 2 (#14): new ``IsaacSimulation.remove_camera`` method.
+
+    No Phase 1 stub existed; this test class pins the new contract.
+    """
+
+    def _add_a_camera(self) -> "tuple[object, MagicMock]":
+        sim = _make_simulation_with_world_for_camera()
+        sensor, viewports, stage, _ = _patched_isaac_camera_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.sensor": sensor,
+                "omni.isaac.core.utils.viewports": viewports,
+                "omni.isaac.core.utils.prims": stage,
+            },
+        ):
+            sim.add_camera("front")
+        return sim, stage
+
+    def test_returns_error_for_unknown_name(self) -> None:
+        sim = _make_simulation_with_world_for_camera()
+        result = sim.remove_camera("ghost")
+        assert result["status"] == "error"
+        assert "not found" in result["content"][0]["text"]
+
+    def test_calls_delete_prim_with_prim_path(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        stage.delete_prim.assert_called_once_with("/World/Cameras/front")
+
+    def test_prunes_cameras_dict_and_prim_registry_on_success(self) -> None:
+        sim, stage = self._add_a_camera()
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            sim.remove_camera("front")
+        assert "front" not in sim._cameras
+        assert "/World/Cameras/front" not in sim._prim_registry
+
+    def test_delete_prim_failure_keeps_bookkeeping_for_retry(self) -> None:
+        """If ``delete_prim`` raises, registries are not pruned -- the
+        caller can retry under the same name (e.g. after a stage refresh).
+        """
+        sim, stage = self._add_a_camera()
+        stage.delete_prim.side_effect = RuntimeError("stage closed")
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "error"
+        assert "stage closed" in result["content"][0]["text"]
+        assert "front" in sim._cameras
+        assert "/World/Cameras/front" in sim._prim_registry
+
+    def test_remove_after_world_torn_down_still_succeeds(self) -> None:
+        """Post-destroy (``self._world is None``) still cleans the
+        in-Python bookkeeping rather than crashing on the lazy import.
+        """
+        sim, stage = self._add_a_camera()
+        sim._world = None
+        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+            result = sim.remove_camera("front")
+        assert result["status"] == "success"
+        assert "front" not in sim._cameras
+        # delete_prim is NOT called when world is None (we skip the
+        # stage-touching path entirely; the in-Python registries are
+        # the only thing left to clean).
+        stage.delete_prim.assert_not_called()
+
+
+def _patched_isaac_articulation_modules() -> "tuple[MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the three lazy-imported modules that
+    ``_load_usd_robot`` Phase 2 wiring touches.
+
+    Returns
+    -------
+    articulations_mod, stage_mod, art_handle
+        ``articulations_mod`` stands in for
+        ``omni.isaac.core.articulations`` (its ``.Articulation``
+        constructor returns ``art_handle``). ``stage_mod`` stands in
+        for ``omni.isaac.core.utils.stage`` (``.add_reference_to_stage``).
+        ``art_handle`` is the Articulation MagicMock the constructor
+        returns -- tests can assert on ``.initialize`` /
+        ``.set_world_pose`` / ``.dof_names`` patterns.
+    """
+    articulations_mod = MagicMock()
+    stage_mod = MagicMock()
+    art_handle = MagicMock(name="Articulation_handle")
+    art_handle.dof_names = ["joint_a", "joint_b", "joint_c"]
+    articulations_mod.Articulation.return_value = art_handle
+    return articulations_mod, stage_mod, art_handle
+
+
+class TestLoadUsdRobotPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation._load_usd_robot``.
+
+    Pins the ``add_reference_to_stage`` + ``Articulation`` + ``initialize``
+    chain plus the ``add_robot`` USD-branch integration: success populates
+    ``_RobotState.articulation`` so ``get_observation`` / ``send_action``
+    have a non-``None`` handle to dispatch through.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_load_usd_robot_calls_add_reference_to_stage(self) -> None:
+        """``_load_usd_robot`` references the USD into the stage at
+        the requested ``prim_path``.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r1",
+                usd_path="/path/to/robot.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        stage.add_reference_to_stage.assert_called_once_with(
+            usd_path="/path/to/robot.usd",
+            prim_path="/World/Robots/r1",
+        )
+
+    def test_load_usd_robot_constructs_articulation_at_prim_path(self) -> None:
+        """Articulation is constructed with the same ``prim_path`` used
+        by ``add_reference_to_stage``, with the leaf segment as the
+        articulation registry name.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/panda",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        kwargs = articulations.Articulation.call_args.kwargs
+        assert kwargs["prim_path"] == "/World/Robots/panda"
+        assert kwargs["name"] == "panda"
+
+    def test_load_usd_robot_calls_initialize(self) -> None:
+        """``Articulation.initialize`` is called explicitly so
+        ``dof_names`` is populated before the caller reads it.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.initialize.assert_called_once()
+
+    def test_load_usd_robot_returns_dof_names_and_handle(self) -> None:
+        """Return shape is ``(joint_names: list[str], articulation: Any)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, art = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == ["joint_a", "joint_b", "joint_c"]
+        assert art is art_handle
+
+    def test_load_usd_robot_handles_none_dof_names(self) -> None:
+        """If ``Articulation.dof_names`` is ``None`` (some Isaac builds
+        when the USD has no Articulation root), return an empty list
+        rather than crashing on iteration.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.dof_names = None
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            joints, _ = sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == []
+
+    def test_load_usd_robot_skips_set_world_pose_for_origin_position(self) -> None:
+        """``position=[0, 0, 0]`` skips ``set_world_pose`` (USD's
+        authored pose wins; saves a tensor round-trip).
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.set_world_pose.assert_not_called()
+
+    def test_load_usd_robot_calls_set_world_pose_for_non_origin(self) -> None:
+        """Non-zero position triggers ``set_world_pose(position=...)``."""
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            sim._load_usd_robot(
+                prim_path="/World/Robots/r",
+                usd_path="/x.usd",
+                position=[1.0, 2.0, 3.0],
+            )
+        art_handle.set_world_pose.assert_called_once()
+        kwargs = art_handle.set_world_pose.call_args.kwargs
+        assert list(kwargs["position"]) == [1.0, 2.0, 3.0]
+
+
+class TestAddRobotUsdBranchPhase2:
+    """Phase 2 wiring of the ``add_robot(usd_path=...)`` integration.
+
+    Pins that the USD branch:
+    - calls ``_load_usd_robot``,
+    - stores the returned ``Articulation`` handle on
+      ``_RobotState.articulation`` (so ``get_observation`` /
+      ``send_action`` light up for USD-loaded robots),
+    - rolls back registry state if ``_load_usd_robot`` raises.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_add_robot_usd_branch_stores_articulation_on_robot_state(self) -> None:
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="my_panda", usd_path="/path/to/panda.usd")
+        assert result["status"] == "success"
+        assert "my_panda" in sim._robots
+        rs = sim._robots["my_panda"]
+        assert rs.articulation is art_handle, (
+            "USD-branch add_robot must wire the Articulation handle onto "
+            "_RobotState.articulation so get_observation / send_action "
+            "have a non-None handle to dispatch through."
+        )
+        assert rs.joint_names == ["joint_a", "joint_b", "joint_c"]
+
+    def test_add_robot_usd_branch_surfaces_structured_json(self) -> None:
+        """Success envelope's ``content[0]["json"]`` carries name /
+        prim_path / usd_path / joint_names / joint_count / position /
+        articulation_wired so an agent can confirm the load shape.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(
+                name="r",
+                usd_path="/foo.usd",
+                position=[0.5, 0.0, 0.0],
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "r"
+        assert info["prim_path"] == "/World/Robots/r"
+        assert info["usd_path"] == "/foo.usd"
+        assert info["joint_count"] == 3
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_usd_branch_returns_error_on_load_failure(self) -> None:
+        """If ``_load_usd_robot`` raises (USD file missing, Articulation
+        init fails, omni surface drift), ``add_robot`` returns the
+        structured error envelope with **no** registry pollution.
+        """
+        sim = self._make_sim()
+        articulations, stage, _ = _patched_isaac_articulation_modules()
+        stage.add_reference_to_stage.side_effect = OSError("USD file not found: /missing.usd")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="ghost", usd_path="/missing.usd")
+        assert result["status"] == "error"
+        assert "ghost" in result["content"][0]["text"]
+        assert "USD file not found" in result["content"][0]["text"]
+        # Registry NOT polluted -- caller can retry under the same name.
+        assert "ghost" not in sim._robots
+        assert "/World/Robots/ghost" not in sim._prim_registry
+
+    def test_add_robot_usd_branch_returns_error_on_initialize_failure(self) -> None:
+        """``Articulation.initialize`` failure also leaves registries
+        clean -- some Isaac Sim builds defer Articulation tree-walk to
+        ``initialize`` rather than the constructor.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        art_handle.initialize.side_effect = RuntimeError("articulation root not found in USD")
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni.isaac.core.articulations": articulations,
+                "omni.isaac.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="bad", usd_path="/bad.usd")
+        assert result["status"] == "error"
+        assert "articulation root not found" in result["content"][0]["text"]
+        assert "bad" not in sim._robots
+
+    def test_add_robot_procedural_branch_still_has_no_articulation(self) -> None:
+        """Regression pin: the procedural branch (which constructs USD
+        via the build-via-API flow, not via Articulation wrapper) must
+        keep ``_RobotState.articulation = None``. Procedural-robot
+        articulation wiring is a separate Phase 2 slice; this PR
+        intentionally only covers the USD branch.
+        """
+        sim = self._make_sim()
+        # Procedural lookup is hit when no usd_path/urdf_path is given.
+        # ``so100`` is a registered procedural robot.
+        result = sim.add_robot(name="proc", data_config="so100")
+        assert result["status"] == "success"
+        assert sim._robots["proc"].articulation is None, (
+            "Procedural add_robot branch must not silently wire an " "Articulation; that's a separate slice on #14."
+        )
+
+
+def _patched_isaac_urdf_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]":
+    """Build MagicMocks for the modules ``_load_urdf_robot`` Phase 2
+    wiring touches.
+
+    Returns
+    -------
+    urdf_iface_mod, urdf_importer_mod, articulations_mod, art_handle, import_config
+        ``urdf_iface_mod`` stands in for the
+        ``_urdf.acquire_urdf_interface()`` return value -- i.e. the
+        interface that exposes ``.parse_urdf`` and ``.import_robot``.
+        Default behaviour: ``parse_urdf`` returns a sentinel
+        ``urdf_robot_mock``; ``import_robot`` returns
+        ``"/World/Robots/imported"``.
+        ``urdf_importer_mod`` stands in for ``isaacsim.asset.importer.urdf``;
+        ``urdf_importer_mod._urdf.ImportConfig()`` returns
+        ``import_config`` so the test can inspect which fields were
+        set, and ``urdf_importer_mod._urdf.acquire_urdf_interface()``
+        returns ``urdf_iface_mod``.
+        ``articulations_mod`` stands in for
+        ``omni.isaac.core.articulations`` (returns ``art_handle``).
+        ``art_handle`` is the Articulation MagicMock with
+        ``dof_names = ["j1", "j2"]`` by default.
+        ``import_config`` is the MagicMock that ``ImportConfig()``
+        returns -- tests can read attributes like ``fix_base`` /
+        ``distance_scale`` on it.
+    """
+    urdf_iface_mod = MagicMock()
+    urdf_iface_mod.parse_urdf.return_value = MagicMock(name="urdf_robot")
+    urdf_iface_mod.import_robot.return_value = "/World/Robots/imported"
+
+    urdf_importer_mod = MagicMock()
+    urdf_importer_mod._urdf.acquire_urdf_interface.return_value = urdf_iface_mod
+
+    articulations_mod = MagicMock()
+    art_handle = MagicMock(name="Articulation_handle")
+    art_handle.dof_names = ["j1", "j2"]
+    articulations_mod.Articulation.return_value = art_handle
+
+    # ``ImportConfig()`` -> import_config; tests read attributes
+    # set on this instance.
+    import_config = MagicMock()
+    urdf_importer_mod._urdf.ImportConfig.return_value = import_config
+
+    return urdf_iface_mod, urdf_importer_mod, articulations_mod, art_handle, import_config
+
+
+def _patched_urdf_sys_modules(
+    urdf_iface_mod: MagicMock,
+    urdf_importer_mod: MagicMock,
+    articulations_mod: MagicMock,
+) -> dict[str, MagicMock]:
+    # Stub the stage-utilities mock for ``add_reference_to_stage``
+    # which the new ``_load_urdf_robot`` calls to bind the converted
+    # USD file onto the live stage at the caller-requested prim path.
+    stage_mod = MagicMock()
+
+    return {
+        # Modern Isaac Sim 4.5+ namespace is preferred; the source
+        # tries this first and falls back to ``omni.importer.urdf``.
+        "isaacsim.asset.importer.urdf": urdf_importer_mod,
+        "omni.importer.urdf": urdf_importer_mod,
+        "omni.isaac.core.articulations": articulations_mod,
+        "omni.isaac.core.utils.stage": stage_mod,
+    }
+
+
+class TestLoadUrdfRobotPhase2:
+    """Phase 2 wiring (#14) for ``IsaacSimulation._load_urdf_robot``.
+
+    Pins the ``URDFParseAndImportFile`` Kit-command + ``Articulation``
+    chain plus the same call-site contract (``add_robot`` URDF branch
+    populates ``_RobotState.articulation``) that the USD branch has.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_load_urdf_robot_executes_urdf_command_with_dest_path(self) -> None:
+        """``omni.kit.commands.execute("URDFParseAndImportFile", ...)``
+        is called with ``urdf_path``, an ``import_config``, and a
+        temp-file ``dest_path``.
+
+        Pre-PR-#64-GPU-fix the wiring passed the stage prim path as
+        ``dest_path`` directly, but the Kit command interprets
+        ``dest_path`` as a USD FILE PATH and crashed with
+        ``Sdf.ErrorException: Failed verification: 'fileFormat'`` on
+        a non-USD-suffixed value. Now ``dest_path`` is a temp .usd
+        file keyed on the stage prim's leaf segment so re-runs reuse
+        the converted USD on disk.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/path/to/robot.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # parse_urdf called with (root_dir, filename, import_config).
+        urdf_iface.parse_urdf.assert_called_once()
+        parse_args = urdf_iface.parse_urdf.call_args.args
+        assert parse_args[0] == "/path/to"  # root dir
+        assert parse_args[1] == "robot.urdf"  # filename
+        # import_robot called with (root_dir, filename, urdf_robot, import_config, stage="").
+        urdf_iface.import_robot.assert_called_once()
+        import_args = urdf_iface.import_robot.call_args.args
+        assert import_args[0] == "/path/to"
+        assert import_args[1] == "robot.urdf"
+        # stage="" (5th positional arg) -- empty string asks the
+        # importer to add prims directly to the live USD stage rather
+        # than writing a USD file. Pinned because Isaac Sim 4.5's
+        # importer raises "Used null prim" when stage is a non-empty
+        # path and the live stage isn't ready.
+        assert import_args[4] == ""
+
+    def test_load_urdf_robot_import_config_has_fixed_base_default(self) -> None:
+        """``ImportConfig.fix_base`` defaults to ``True`` -- the most
+        common LIBERO / GR00T case is a fixed-base manipulator.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # The config attributes set in source must have flowed onto the
+        # ImportConfig instance that parse_urdf and import_robot received.
+        config = import_config
+        assert config.fix_base is True
+        assert config.import_inertia_tensor is True
+        # Don't create a new physics scene -- World already made one.
+        assert config.create_physics_scene is False
+        assert config.distance_scale == 1.0
+
+    def test_load_urdf_robot_uses_imported_prim_path_for_articulation(self) -> None:
+        """Articulation is constructed against the prim path the
+        ``_urdf.import_robot`` actually used.
+
+        The importer adds prims directly to the live stage at a path
+        of its choosing (typically ``/World/<robot_name>``) when
+        called with ``stage=""``; the caller's requested ``prim_path``
+        is informational and used for bookkeeping. Articulation
+        construction targets the importer's actual path.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = "/World/some_robot_name"
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        kwargs = arts.Articulation.call_args.kwargs
+        # Articulation uses the importer's returned path (where prims
+        # actually landed on the live stage), not the caller-requested
+        # prim_path which is just bookkeeping.
+        assert kwargs["prim_path"] == "/World/some_robot_name"
+        # Articulation registry name uses that path's leaf segment.
+        assert kwargs["name"] == "some_robot_name"
+
+    def test_load_urdf_robot_no_add_reference_to_stage_call(self) -> None:
+        """``import_robot(stage="")`` adds prims directly to the live
+        stage; no separate ``add_reference_to_stage`` is needed.
+
+        Pre-PR-#64-GPU-fix the wiring used a 2-step
+        ``URDFParseAndImportFile -> add_reference_to_stage`` flow but
+        the Kit command's ``stage=<path>`` mode raised "Used null
+        prim" on Isaac Sim 4.5. The simpler 1-step
+        ``import_robot(stage="")`` is the supported path; this test
+        pins that the deprecated 2-step shape doesn't sneak back.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        sys_modules = _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)
+        with patch.dict("sys.modules", sys_modules):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        # add_reference_to_stage stub exists in the patched modules
+        # but should NOT be called.
+        stage = sys_modules["omni.isaac.core.utils.stage"]
+        stage.add_reference_to_stage.assert_not_called()
+
+    def test_load_urdf_robot_no_op_when_command_returns_empty_path(self) -> None:
+        """Pre-PR-#64-GPU-fix this test asserted a fallback to
+        ``prim_path`` when the importer returned an empty string.
+        Post-fix the second tuple element is ignored entirely (the
+        caller-requested ``prim_path`` always wins for Articulation
+        construction), so the empty-string return is now a no-op
+        from this method's perspective. Pin retained as a regression
+        guard against any future re-introduction of the imported-
+        prim-path indirection.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF import failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/x.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_raises_runtimeerror_when_command_returns_false(self) -> None:
+        """``import_robot`` returning ``""`` -> ``RuntimeError`` (caught
+        by the caller's cleanup clause). Same shape as the legacy
+        ``URDFParseAndImportFile`` Kit-command's ``(False, ...)`` return.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF import failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/bad.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_raises_runtimeerror_when_parse_returns_none(self) -> None:
+        """``parse_urdf`` returning ``None`` -> ``RuntimeError``."""
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.parse_urdf.return_value = None
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            with pytest.raises(RuntimeError, match="URDF parse failed"):
+                sim._load_urdf_robot(
+                    prim_path="/World/Robots/r",
+                    urdf_path="/bad.urdf",
+                    position=[0.0, 0.0, 0.0],
+                )
+
+    def test_load_urdf_robot_returns_dof_names_and_handle(self) -> None:
+        """Return shape mirrors ``_load_usd_robot``:
+        ``(joint_names: list[str], articulation: Any)``.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            joints, art = sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        assert joints == ["j1", "j2"]
+        assert art is art_handle
+
+    def test_load_urdf_robot_skips_set_world_pose_for_origin(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[0.0, 0.0, 0.0],
+            )
+        art_handle.set_world_pose.assert_not_called()
+
+    def test_load_urdf_robot_calls_set_world_pose_for_non_origin(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            sim._load_urdf_robot(
+                prim_path="/World/Robots/r",
+                urdf_path="/x.urdf",
+                position=[1.0, 2.0, 3.0],
+            )
+        art_handle.set_world_pose.assert_called_once()
+        kwargs = art_handle.set_world_pose.call_args.kwargs
+        assert list(kwargs["position"]) == [1.0, 2.0, 3.0]
+
+
+class TestAddRobotUrdfBranchPhase2:
+    """Phase 2 wiring of the ``add_robot(urdf_path=...)`` integration.
+
+    Same contract as the USD branch (PR #63 / TestAddRobotUsdBranchPhase2)
+    -- success populates ``_RobotState.articulation``, failure leaves
+    registries clean.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_add_robot_urdf_branch_stores_articulation(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="my_panda", urdf_path="/path/to/panda.urdf")
+        assert result["status"] == "success"
+        assert sim._robots["my_panda"].articulation is art_handle
+
+    def test_add_robot_urdf_branch_surfaces_structured_json(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(
+                name="r",
+                urdf_path="/foo.urdf",
+                position=[0.5, 0.0, 0.0],
+            )
+        info = result["content"][0]["json"]
+        assert info["name"] == "r"
+        assert info["urdf_path"] == "/foo.urdf"
+        assert info["joint_count"] == 2
+        assert info["position"] == [0.5, 0.0, 0.0]
+        assert info["articulation_wired"] is True
+
+    def test_add_robot_urdf_branch_returns_error_on_command_failure(self) -> None:
+        """``import_robot`` returning empty string -> structured error
+        envelope, no registry pollution.
+        """
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, _, import_config = _patched_isaac_urdf_modules()
+        urdf_iface.import_robot.return_value = ""
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="ghost", urdf_path="/bad.urdf")
+        assert result["status"] == "error"
+        assert "ghost" in result["content"][0]["text"]
+        assert "URDF import failed" in result["content"][0]["text"]
+        assert "ghost" not in sim._robots
+        assert "/World/Robots/ghost" not in sim._prim_registry
+
+    def test_add_robot_urdf_branch_returns_error_on_initialize_failure(self) -> None:
+        sim = self._make_sim()
+        urdf_iface, urdf_imp, arts, art_handle, import_config = _patched_isaac_urdf_modules()
+        art_handle.initialize.side_effect = RuntimeError("articulation root not in URDF")
+        with patch.dict("sys.modules", _patched_urdf_sys_modules(urdf_iface, urdf_imp, arts)):
+            result = sim.add_robot(name="bad", urdf_path="/bad.urdf")
+        assert result["status"] == "error"
+        assert "articulation root not in URDF" in result["content"][0]["text"]
+        assert "bad" not in sim._robots
