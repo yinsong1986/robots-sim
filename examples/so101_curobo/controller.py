@@ -190,25 +190,37 @@ class SO101CuroboDemo:
         """Plan a pick-and-place, execute it, and record one LeRobot episode."""
         with self._lock:
             self._require()
-            try:
-                traj = self._plan()
-            except RuntimeError as exc:  # cuRobo not wired -> actionable message
-                return f"Planner unavailable: {exc}"
-            if not self.collector.available():
-                # Still execute (move the arm) even if we can't record a dataset.
-                robot = self.scene.robot_name
-                for wp in traj.waypoints:
-                    self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
+
+            def _work() -> str:
+                try:
+                    traj = self._plan()
+                except RuntimeError as exc:  # cuRobo not wired -> actionable message
+                    return f"Planner unavailable: {exc}"
+                if not self.collector.available():
+                    # Still execute (move the arm) even if we can't record a dataset.
+                    robot = self.scene.robot_name
+                    for wp in traj.waypoints:
+                        self.sim.send_action(wp, robot_name=robot, n_substeps=n_substeps)
+                    return (
+                        f"Executed a {self.planner.name} pick-and-place ({len(traj)} waypoints). "
+                        f"Dataset NOT recorded: {LeRobotDataCollector.__module__}: lerobot missing."
+                    )
+                res = self.collector.record_episode(traj, task=task, n_substeps=n_substeps)
                 return (
-                    f"Executed a {self.planner.name} pick-and-place ({len(traj)} waypoints). "
-                    f"Dataset NOT recorded: {LeRobotDataCollector.__module__}: lerobot missing."
+                    f"Planned ({self.planner.name}) + executed + recorded 1 episode: "
+                    f"{res.frames} frames, success={res.success} (cube moved={res.cube_moved}, "
+                    f"displacement={res.displacement:.3f} m). Dataset: {self.repo_id}."
                 )
-            res = self.collector.record_episode(traj, task=task, n_substeps=n_substeps)
-            return (
-                f"Planned ({self.planner.name}) + executed + recorded 1 episode: "
-                f"{res.frames} frames, success={res.success} (cube moved={res.cube_moved}, "
-                f"displacement={res.displacement:.3f} m). Dataset: {self.repo_id}."
-            )
+
+            # On the Isaac backend the UI calls this from a Gradio worker thread,
+            # but the sim can only be driven from the main (pump) thread. Submit
+            # the WHOLE episode to the main thread so it runs inline there (like
+            # the headless smoke path) instead of round-tripping every frame
+            # through the action queue (slow + deadlock-prone for long plans).
+            run_on_main = getattr(self.sim, "run_on_main", None)
+            if callable(run_on_main):
+                return run_on_main(_work)
+            return _work()
 
     def record_dataset(
         self,
@@ -220,14 +232,23 @@ class SO101CuroboDemo:
     ) -> Dict[str, Any]:
         with self._lock:
             self._require()
-            return self.collector.record_dataset(
-                self.planner,
-                n_episodes=n_episodes,
-                task=task,
-                randomize=randomize,
-                n_substeps=n_substeps,
-                on_episode=on_episode,
-            )
+
+            def _work() -> Dict[str, Any]:
+                return self.collector.record_dataset(
+                    self.planner,
+                    n_episodes=n_episodes,
+                    task=task,
+                    randomize=randomize,
+                    n_substeps=n_substeps,
+                    on_episode=on_episode,
+                )
+
+            # Run the whole multi-episode job on the main (pump) thread for the
+            # Isaac backend (see plan_and_execute for the rationale).
+            run_on_main = getattr(self.sim, "run_on_main", None)
+            if callable(run_on_main):
+                return run_on_main(_work)
+            return _work()
 
     def render(self, camera: Optional[str] = None) -> Optional[np.ndarray]:
         """Return an RGB frame from ``camera`` (defaults to current)."""

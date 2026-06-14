@@ -102,6 +102,7 @@ class LeRobotDataCollector:
         kinematic: bool = False,
         grasp_attach: bool = False,
         attach_radius: float = 0.10,
+        attach_offset: Optional[Sequence[float]] = None,
         base_sign: float = 1.0,
     ):
         self.sim = sim
@@ -132,6 +133,11 @@ class LeRobotDataCollector:
         # reached the cube, so it stays honest.
         self.grasp_attach = grasp_attach
         self.attach_radius = attach_radius
+        # Where the cube sits relative to the gripper frame while carried. The
+        # gripper frame is the tool center between the jaws; a small -Z offset
+        # seats the cube in the jaws so it looks held (vs floating at the
+        # approach gap). Default tuned for the SO-101 gripper.
+        self.attach_offset = list(attach_offset) if attach_offset is not None else [0.0, 0.0, -0.02]
 
     # --- recording lifecycle ------------------------------------------------
 
@@ -330,15 +336,23 @@ class LeRobotDataCollector:
                     gp = self._gripper_frame_pos()
                     cp = _object_position(self.sim, self.scene.cube_name)
                     if gp and cp and math.dist(gp, cp) < self.attach_radius:
-                        offset = [cp[i] - gp[i] for i in range(3)]
+                        # Snap the cube INTO the gripper (small fixed offset below
+                        # the tool frame) rather than preserving the ~9 cm
+                        # approach gap at the moment of attach -- otherwise the
+                        # cube visually floats away from the gripper through the
+                        # whole carry ("picked without touching"). The gripper
+                        # frame is the tool center between the jaws, so a small
+                        # -Z offset seats the cube in the jaws.
+                        offset = list(self.attach_offset)
                         attached = True
                         if _GRASP_DBG:
                             logger.info(
-                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f",
+                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f offset=%s",
                                 phase,
                                 [round(x, 3) for x in gp],
                                 [round(x, 3) for x in cp],
                                 math.dist(gp, cp),
+                                offset,
                             )
                 elif attached and has_closed and gv < close_thresh:
                     attached = False  # release

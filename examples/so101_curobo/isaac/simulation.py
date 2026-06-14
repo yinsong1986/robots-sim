@@ -103,6 +103,17 @@ def _err(text: str) -> Dict[str, Any]:
     return {"status": "error", "content": [{"text": text}]}
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read a small positive int from the environment (fallback to ``default``)."""
+    import os
+
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 class _Robot:
     """Bookkeeping for one articulated robot added to the Isaac stage."""
 
@@ -165,10 +176,25 @@ class IsaacSimulation:
         self._main_tid = _threading.get_ident()
         self._lock = _threading.RLock()
         self._action_q: "_queue.Queue" = _queue.Queue()
+        # Whole-job queue: a worker thread submits a full record/plan callable via
+        # run_on_main(); the pump runs it inline on the main thread (so the job's
+        # per-frame sim calls run directly, not via per-call round-trips).
+        self._main_jobs: "_queue.Queue" = _queue.Queue()
         self._frame_cache: Dict[str, Any] = {}
         self._joint_cache: Dict[str, Dict[str, float]] = {}
         self._pump_cameras = True  # render cameras in the pump loop
         self._pump_running = False  # True while run_pump_forever owns the renderer
+        # DLSS-convergence tick counts (renders per captured frame). The ghost
+        # fix needs the renderer to settle on a held-static pose, but 8 ticks
+        # PER FRAME is the dominant cost for long trajectories in the live UI
+        # (e.g. a 355-frame cuRobo replay -> thousands of renders -> minutes).
+        # During a continuous trajectory the renderer stays warm and the pose
+        # changes little frame-to-frame, so fewer ticks converge cleanly:
+        #   _record_converge -- per recorded frame (worker capture)
+        #   _idle_converge   -- live-preview refresh when the sim is idle
+        # Both are env-tunable for headroom on slower GPUs.
+        self._record_converge = _env_int("SO101_RECORD_CONVERGE", 6)
+        self._idle_converge = _env_int("SO101_IDLE_CONVERGE", 4)
 
     def _on_main_thread(self) -> bool:
         import threading
@@ -349,10 +375,16 @@ class IsaacSimulation:
         # world.step(render=True) advances physics each tick, so converging with a
         # plain step-loop keeps the arm drifting and leaves a faint temporal ghost;
         # _converge_render holds the pose static while DLSS settles.
-        if n_actions > 0:
-            self._converge_render(8)
-        elif render:
-            self._converge_render(4)
+        #
+        # When worker actions ran this tick (n_actions>0) they include the
+        # recording capture, which does its OWN _converge_render + grab. Doing a
+        # second idle converge here just doubles the render load and serializes
+        # behind the capture -- the dominant cost that made long (cuRobo) episodes
+        # take many minutes in the live UI. So only render here when the sim is
+        # IDLE (no queued work): that keeps the live preview fresh between
+        # episodes without competing with the recorder mid-episode.
+        if n_actions == 0 and render:
+            self._converge_render(self._idle_converge)
         # 3. Refresh joint-state cache for every robot.
         for rname, r in self._robots.items():
             try:
@@ -361,9 +393,11 @@ class IsaacSimulation:
                     self._joint_cache[rname] = {jn: float(v) for jn, v in zip(r.joint_names, list(q))}
             except Exception:  # noqa: BLE001
                 pass
-        # 4. Refresh camera frame cache (atomic publish so readers never see a
-        # half-written/torn frame).
-        if render and self._pump_cameras:
+        # 4. Refresh camera frame cache for the live preview -- only when we
+        # actually rendered this tick (idle path). When actions ran, the capture
+        # already published its frames to the cache; re-grabbing here would be a
+        # wasted readback per camera every recorded frame.
+        if render and n_actions == 0 and self._pump_cameras:
             new_frames: Dict[str, Any] = {}
             for cname, cam in self._cameras.items():
                 try:
@@ -375,20 +409,83 @@ class IsaacSimulation:
             for cname, img in new_frames.items():
                 self._frame_cache[cname] = img
 
-    def run_pump_forever(self, stop_event=None, render_every: int = 2) -> None:
+    def run_pump_forever(self, stop_event=None, render_every: int = 3) -> None:
         """Block on the MAIN THREAD running pump() in a loop (UI launched elsewhere).
 
-        ``render_every`` only renders the RTX cameras every N steps (rendering is
-        the expensive part; physics + the action queue run every iteration).
+        Drains queued worker actions (an executing episode) every iteration so
+        the episode runs at full speed, and refreshes the live preview only
+        every ``render_every`` IDLE iterations. A short sleep when idle keeps the
+        renderer from running flat out and pegging the CPU -- which otherwise
+        starves the Gradio HTTP thread so the page never loads.
         """
+        import time
+
         i = 0
         self._pump_running = True
         try:
             while stop_event is None or not stop_event.is_set():
+                # A whole-job submission (UI record/plan) takes priority: run it
+                # inline on this main thread. The job drives the sim directly
+                # (no per-frame round-trips); the preview just freezes for its
+                # duration, which is the right trade for a fast, reliable record.
+                try:
+                    job = self._main_jobs.get_nowait()
+                except Exception:  # noqa: BLE001 - empty queue
+                    job = None
+                if job is not None:
+                    job()
+                    i = 0
+                    continue
+                busy = not self._action_q.empty()
+                if busy:
+                    # Episode executing via per-call queue: drain as fast as possible.
+                    self.pump(render=False)
+                    i = 0
+                    continue
+                # Idle: occasional preview refresh, then yield the CPU so the web
+                # server thread is scheduled and the page stays responsive.
                 self.pump(render=(i % max(1, render_every) == 0))
                 i += 1
+                time.sleep(0.02)
         finally:
             self._pump_running = False
+
+    def run_on_main(self, fn, timeout: Optional[float] = None):
+        """Run ``fn()`` on the MAIN THREAD (the pump owner) and return its result.
+
+        A web UI calls record/plan jobs from a Gradio worker thread. Driving the
+        episode from there means every per-frame ``set_joint_positions`` / ``step``
+        / ``get_observation`` round-trips through the action queue to the pump --
+        slow and deadlock-prone for a long (355-frame) trajectory. Instead, submit
+        the WHOLE job here: the pump runs it inline on the main thread, so inside
+        ``fn`` ``_on_main_thread()`` is True and the collector drives the sim
+        directly (exactly like the headless smoke path -- fast, no round-trips).
+        While the job runs, the pump's normal loop is paused. Re-raises any
+        exception from ``fn`` on the caller's thread.
+
+        If already on the main thread, runs ``fn`` immediately.
+        """
+        if self._on_main_thread():
+            return fn()
+        import threading
+
+        done = threading.Event()
+        box: Dict[str, Any] = {}
+
+        def _job():
+            try:
+                box["result"] = fn()
+            except BaseException as exc:  # noqa: BLE001 - surfaced to caller below
+                box["exc"] = exc
+            finally:
+                done.set()
+
+        self._main_jobs.put(_job)
+        if not done.wait(timeout=timeout):
+            raise TimeoutError("run_on_main timed out waiting for the main-thread pump.")
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("result")
 
     # --- robots -------------------------------------------------------------
 
@@ -835,17 +932,22 @@ class IsaacSimulation:
         else:
             obs.update(self._joint_cache.get(robot_name, {}))
         if not skip_images:
-            # If the main-thread pump is running it is the SOLE renderer; driving
-            # world.step(render=True) here too makes the preview flicker (two
-            # renderers racing). In that case (and on worker threads) serve cache.
-            drive_inline = on_main and not self._pump_running
+            # Drive the renderer inline whenever we're on the main thread -- we
+            # ARE the renderer-owning thread there (either the pump itself, or a
+            # whole-job submitted via run_on_main that the pump is executing
+            # inline), so there's no racing-renderer concern. Only true WORKER
+            # threads must enqueue a capture for the pump. (Previously this also
+            # gated on ``not self._pump_running``, which deadlocked a run_on_main
+            # job: on_main=True but pump_running=True -> it enqueued a _capture
+            # and waited for the pump, which was busy running this very job.)
+            drive_inline = on_main
             if drive_inline:
                 # On the main thread we may drive the renderer directly. Hold the
                 # pose static and converge the DLSS upscaler (at the native render
                 # resolution this clears any temporal smear of the moving arm).
                 if self._cameras:
                     try:
-                        self._converge_render(8)
+                        self._converge_render(self._record_converge)
                     except Exception:  # noqa: BLE001
                         logger.debug("converge render failed", exc_info=True)
                 for cname, cam in self._cameras.items():
@@ -873,7 +975,10 @@ class IsaacSimulation:
                             # Hold the just-applied pose static and converge the
                             # renderer (cameras render at a high native resolution
                             # so DLSS doesn't ghost a moving arm), then capture.
-                            self._converge_render(8)
+                            # _record_converge (default 3) keeps long trajectories
+                            # fast in the UI; the warm renderer converges in a few
+                            # ticks frame-to-frame.
+                            self._converge_render(self._record_converge)
                             for cname, cam in self._cameras.items():
                                 img = self._grab_frame(cname, cam)
                                 if img is not None:
