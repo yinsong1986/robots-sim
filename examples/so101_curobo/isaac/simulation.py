@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("so101_curobo.isaac")
 
@@ -673,13 +673,26 @@ class IsaacSimulation:
             return None
 
     def gripper_frame_pos(self, robot_name: Optional[str] = None) -> Optional[List[float]]:
-        """World position of the robot's gripper/tool link, read from the USD stage.
+        """World position of the robot's gripper/tool link (translation only)."""
+        pose = self.gripper_frame_pose(robot_name)
+        return pose[0] if pose else None
 
-        The collector's kinematic grasp-attach needs the end-effector world
-        position to decide when the gripper is close enough to the cube to
-        attach it. MuJoCo exposes this via ``mj_data``; on Isaac we read the
-        link prim's world transform. Prefers a ``gripper_frame``/``tool`` link,
-        then any ``gripper``/``moving_jaw`` link, under the robot's prim.
+    def gripper_frame_pose(self, robot_name: Optional[str] = None) -> Optional[Tuple[List[float], List[float]]]:
+        """World pose of the robot's gripper/tool link: ``(translation, rotation)``.
+
+        ``translation`` is the link origin in world coords; ``rotation`` is the
+        row-major 3x3 (flattened to 9) whose *columns* are the tool frame's
+        local x/y/z axes in world coords, so ``world = R @ local``.
+
+        The collector's kinematic grasp-attach uses this to seat the cube
+        *rigidly* in the tool frame: a plain world-space offset can't keep the
+        cube between the jaws as the wrist rotates and lifts (the cube would
+        drift beside the jaws and jitter), whereas a rigid attach carries it
+        exactly where it was grasped. MuJoCo exposes only translation via
+        ``mj_data`` (see the collector fallback); on Isaac we read the link
+        prim's world transform off the USD stage. Prefers a
+        ``gripper_frame``/``tool`` link, then any ``gripper``/``moving_jaw``
+        link, under the robot's prim.
         """
         if robot_name is None:
             robot_name = next(iter(self._robots), None)
@@ -691,7 +704,7 @@ class IsaacSimulation:
         _dbg = bool(_os.environ.get("SO101_GRASP_DBG"))
         try:
             import omni.usd
-            from pxr import Usd, UsdGeom
+            from pxr import Gf, Sdf, Usd, UsdGeom
 
             stage = omni.usd.get_context().get_stage()
             # r.prim_path is the articulation-root prim, which for the SO-101
@@ -699,8 +712,6 @@ class IsaacSimulation:
             # subtree has no link prims. Walk up to the top-level robot prim
             # (the first path component under the pseudo-root) and search its
             # whole subtree for the gripper/tool link.
-            from pxr import Sdf
-
             sdf_path = Sdf.Path(r.prim_path)
             top = sdf_path
             while top.GetParentPath() != Sdf.Path.absoluteRootPath and top.GetParentPath() != Sdf.Path.emptyPath:
@@ -708,7 +719,7 @@ class IsaacSimulation:
             root = stage.GetPrimAtPath(top)
             if not root or not root.IsValid():
                 if _dbg:
-                    logger.info("[grasp-dbg] gripper_frame_pos: root invalid for top=%r (from %r)", top, r.prim_path)
+                    logger.info("[grasp-dbg] gripper_frame_pose: root invalid for top=%r (from %r)", top, r.prim_path)
                 return None
             preferred = None
             fallback = None
@@ -724,14 +735,28 @@ class IsaacSimulation:
             prim = preferred or fallback
             if prim is None:
                 if _dbg:
-                    logger.info("[grasp-dbg] gripper_frame_pos: no EE link under %r", r.prim_path)
+                    logger.info("[grasp-dbg] gripper_frame_pose: no EE link under %r", r.prim_path)
                 return None
-            t = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
-            return [float(t[0]), float(t[1]), float(t[2])]
+            xf = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            t = xf.ExtractTranslation()
+
+            # World images of the local basis axes (rotation only) -> columns of
+            # R. Normalize to a pure rotation in case the prim carries any scale.
+            def _axis(vx: float, vy: float, vz: float) -> Tuple[float, float, float]:
+                d = xf.TransformDir(Gf.Vec3d(vx, vy, vz))
+                n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) ** 0.5 or 1.0
+                return (d[0] / n, d[1] / n, d[2] / n)
+
+            ax = _axis(1.0, 0.0, 0.0)
+            ay = _axis(0.0, 1.0, 0.0)
+            az = _axis(0.0, 0.0, 1.0)
+            rot = [ax[0], ay[0], az[0], ax[1], ay[1], az[1], ax[2], ay[2], az[2]]
+            pos = [float(t[0]), float(t[1]), float(t[2])]
+            return pos, [float(x) for x in rot]
         except Exception as exc:  # noqa: BLE001
             if _dbg:
-                logger.info("[grasp-dbg] gripper_frame_pos EXC: %s: %s", type(exc).__name__, exc)
-            logger.debug("gripper_frame_pos failed", exc_info=True)
+                logger.info("[grasp-dbg] gripper_frame_pose EXC: %s: %s", type(exc).__name__, exc)
+            logger.debug("gripper_frame_pose failed", exc_info=True)
             return None
 
     # --- cameras ------------------------------------------------------------

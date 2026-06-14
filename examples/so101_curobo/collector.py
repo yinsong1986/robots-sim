@@ -133,11 +133,11 @@ class LeRobotDataCollector:
         # reached the cube, so it stays honest.
         self.grasp_attach = grasp_attach
         self.attach_radius = attach_radius
-        # Where the cube sits relative to the gripper frame while carried. The
-        # gripper frame is the tool center between the jaws; a small -Z offset
-        # seats the cube in the jaws so it looks held (vs floating at the
-        # approach gap). Default tuned for the SO-101 gripper.
-        self.attach_offset = list(attach_offset) if attach_offset is not None else [0.0, 0.0, -0.02]
+        # Optional extra nudge of the cube *in the tool frame's local
+        # coordinates* once grasped (x/y/z along the tool axes). The rigid
+        # attach already seats the cube where it was grabbed, so this defaults
+        # to zero; expose it only for fine-tuning the seated pose.
+        self.attach_offset = list(attach_offset) if attach_offset is not None else [0.0, 0.0, 0.0]
 
     # --- recording lifecycle ------------------------------------------------
 
@@ -284,6 +284,46 @@ class LeRobotDataCollector:
         except Exception:  # noqa: BLE001
             return None
 
+    def _gripper_frame_pose(self):
+        """``((px, py, pz), rot[9])`` for the gripper/tool link, or ``None``.
+
+        Prefers a backend-native ``sim.gripper_frame_pose`` (Isaac reads the
+        link's full world transform off the USD stage). Falls back to the
+        translation from :meth:`_gripper_frame_pos` with an identity rotation,
+        so the MuJoCo path still attaches (degrading to a fixed world offset).
+        """
+        native = getattr(self.sim, "gripper_frame_pose", None)
+        if callable(native):
+            try:
+                res = native(self.scene.robot_name)
+                if res:
+                    pos, rot = res
+                    return [float(x) for x in pos], [float(x) for x in rot]
+            except Exception:  # noqa: BLE001
+                logger.debug("sim.gripper_frame_pose failed", exc_info=True)
+        pos = self._gripper_frame_pos()
+        if pos is None:
+            return None
+        return pos, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+    @staticmethod
+    def _frame_to_local(rot: List[float], origin: List[float], point: List[float]) -> List[float]:
+        """Express world ``point`` in the tool frame: ``local = R^T (point - origin)``."""
+        d = [point[i] - origin[i] for i in range(3)]
+        out = []
+        for c in range(3):  # columns of R are the tool axes in world; local[c] = axis_c . d
+            out.append(rot[c] * d[0] + rot[3 + c] * d[1] + rot[6 + c] * d[2])
+        return out
+
+    @staticmethod
+    def _frame_to_world(rot: List[float], origin: List[float], local: List[float]) -> List[float]:
+        """Map a tool-frame point back to world: ``world = origin + R @ local``."""
+        out = []
+        for r in range(3):
+            row = rot[3 * r] * local[0] + rot[3 * r + 1] * local[1] + rot[3 * r + 2] * local[2]
+            out.append(origin[r] + row)
+        return out
+
     def _execute_and_record(self, trajectory, task: str, recorder, n_substeps: int) -> int:
         """Stream the trajectory; record one frame per waypoint. Returns frame count.
 
@@ -305,7 +345,7 @@ class LeRobotDataCollector:
 
         attached = False
         has_closed = False
-        offset: Optional[List[float]] = None
+        grasp_local: Optional[List[float]] = None  # cube pos in tool-frame coords at grasp
         grasp_phases = {"grasp", "close", "lift", "place", "place_down"}
         if _GRASP_DBG:
             logger.info(
@@ -327,45 +367,51 @@ class LeRobotDataCollector:
 
             if has_grip:
                 gv = wp.get(grip, gmin)
-                if gv >= close_thresh:
+                closed = gv >= close_thresh
+                if closed:
                     has_closed = True
-                # Attach as soon as the gripper arrives within range during the
-                # grasp (BEFORE the close-knock can push the cube away). Until the
-                # gripper actually CLOSES, hold the cube at its real position
-                # (preserve the approach offset) so it stays resting on the table
-                # while the gripper descends -- snapping it into the jaws here
-                # would yank the cube up to the still-descending gripper ("cube
-                # bounces up to the arm"). Once closed, seat it in the jaws.
-                if not attached and phase in grasp_phases:
-                    gp = self._gripper_frame_pos()
+                # Form the kinematic grasp the instant the jaws close while the
+                # tool frame is within reach of the cube. Capture the cube's
+                # pose in the tool frame's *local* coordinates, in place (no
+                # teleport -> no visible jump), then carry it rigidly with that
+                # frame. A rigid attach (vs a fixed world offset) keeps the cube
+                # seated in the jaws as the wrist rotates and lifts, instead of
+                # drifting beside them and jittering ("disappear then shake").
+                # Until the jaws close the cube is left untouched (it's a static
+                # body resting on the table), so nothing yanks it during the
+                # approach.
+                if not attached and closed and phase in grasp_phases:
+                    pose = self._gripper_frame_pose()
                     cp = _object_position(self.sim, self.scene.cube_name)
-                    if gp and cp and math.dist(gp, cp) < self.attach_radius:
-                        offset = [cp[i] - gp[i] for i in range(3)]  # keep cube where it rests
-                        attached = True
-                        if _GRASP_DBG:
-                            logger.info(
-                                "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f",
-                                phase,
-                                [round(x, 3) for x in gp],
-                                [round(x, 3) for x in cp],
-                                math.dist(gp, cp),
-                            )
-                # Once the gripper has closed on the cube, seat it in the jaws
-                # (small fixed offset) so it reads as held through the carry
-                # instead of trailing at the approach gap.
-                if attached and has_closed and gv >= close_thresh and offset != list(self.attach_offset):
-                    offset = list(self.attach_offset)
-                    if _GRASP_DBG:
-                        logger.info("[grasp-dbg] SEATED in jaws at phase=%s offset=%s", phase, offset)
+                    if pose and cp:
+                        gp, rot = pose
+                        d = math.dist(gp, cp)
+                        if d < self.attach_radius:
+                            local = self._frame_to_local(rot, gp, cp)
+                            grasp_local = [local[i] + self.attach_offset[i] for i in range(3)]
+                            attached = True
+                            if _GRASP_DBG:
+                                logger.info(
+                                    "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f local=%s",
+                                    phase,
+                                    [round(x, 3) for x in gp],
+                                    [round(x, 3) for x in cp],
+                                    d,
+                                    [round(x, 3) for x in grasp_local],
+                                )
                 # Release once the gripper re-opens after having closed.
-                if attached and has_closed and gv < close_thresh:
+                if attached and has_closed and not closed:
                     attached = False
+                    grasp_local = None
                     if _GRASP_DBG:
                         logger.info("[grasp-dbg] RELEASED at phase=%s", phase)
-                if attached and offset:
-                    gp = self._gripper_frame_pos()
-                    if gp:
-                        self.sim.move_object(self.scene.cube_name, position=[gp[i] + offset[i] for i in range(3)])
+                # Carry: rigidly place the cube at the tool frame's current pose.
+                if attached and grasp_local is not None:
+                    pose = self._gripper_frame_pose()
+                    if pose:
+                        gp, rot = pose
+                        target = self._frame_to_world(rot, gp, grasp_local)
+                        self.sim.move_object(self.scene.cube_name, position=target)
                         self._zero_cube_velocity()  # avoid teleport-induced fling
 
             obs = self.sim.get_observation(robot, skip_images=not self.record_images)
