@@ -183,7 +183,7 @@ class ScriptedPlanner:
 
     name = "scripted"
 
-    def __init__(self, gripper_open: float = 0.0, gripper_close: float = 0.9, steps_per_phase: int = 8):
+    def __init__(self, gripper_open: float = 0.0, gripper_close: float = 1.5, steps_per_phase: int = 8):
         self.gripper_open = gripper_open
         self.gripper_close = gripper_close
         self.steps_per_phase = steps_per_phase
@@ -307,7 +307,7 @@ class CuroboMotionPlanner:
         orientation_tolerance: float = 1.6,
         top_down_attempts: int = 6,
         gripper_open: float = 0.0,
-        gripper_close: float = 0.9,
+        gripper_close: float = 1.5,
         **_ignored,
     ):
         import os
