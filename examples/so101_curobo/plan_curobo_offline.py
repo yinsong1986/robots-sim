@@ -47,6 +47,25 @@ def main() -> None:
     ap.add_argument("--approach", type=float, default=None, help="Approach/lift clearance height (m) above the table.")
     ap.add_argument("--table-z", type=float, default=None, help="Table surface Z (m).")
     ap.add_argument(
+        "--top-down-weight",
+        type=float,
+        default=None,
+        help="Orientation weight for the top-down grasp bias. The planner's soft "
+        "default (0.05) is calibrated best for this 5-DOF arm (~13 deg from "
+        "vertical); a HIGH weight backfires (IK returns near-horizontal poses, "
+        "tested ~64 deg). Leave unset unless experimenting.",
+    )
+    ap.add_argument(
+        "--orientation-tolerance",
+        type=float,
+        default=None,
+        help="cuRobo success tolerance (rad) for the grasp orientation. Defaults to "
+        "the planner's 1.6; tightening it tends to make the solve fall back to worse poses.",
+    )
+    ap.add_argument(
+        "--top-down-attempts", type=int, default=None, help="Best-of-N solves; keep the most vertical (default 6)."
+    )
+    ap.add_argument(
         "--joint-names",
         nargs="*",
         default=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
@@ -63,7 +82,16 @@ def main() -> None:
     jn = list(args.joint_names)
     start_q = args.start_q if args.start_q is not None else [0.0] * len(jn)
 
-    planner = CuroboMotionPlanner(urdf_path=args.urdf, asset_path=args.asset)
+    # Forward top-down tuning only if explicitly set, so the planner's calibrated
+    # soft defaults (best for this 5-DOF arm) apply otherwise.
+    planner_kwargs = {}
+    if args.top_down_weight is not None:
+        planner_kwargs["top_down_weight"] = args.top_down_weight
+    if args.orientation_tolerance is not None:
+        planner_kwargs["orientation_tolerance"] = args.orientation_tolerance
+    if args.top_down_attempts is not None:
+        planner_kwargs["top_down_attempts"] = args.top_down_attempts
+    planner = CuroboMotionPlanner(urdf_path=args.urdf, asset_path=args.asset, **planner_kwargs)
     # Only forward grasp-pose overrides that were actually passed, so the
     # planner's own defaults still apply otherwise.
     pp_kwargs = {}
