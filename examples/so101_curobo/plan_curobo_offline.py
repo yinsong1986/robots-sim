@@ -36,6 +36,16 @@ def main() -> None:
     ap.add_argument("--cube-xy", nargs=2, type=float, default=[0.20, 0.20])
     ap.add_argument("--place-xy", nargs=2, type=float, default=[0.0, 0.25])
     ap.add_argument(
+        "--grasp-z",
+        type=float,
+        default=None,
+        help="Tool-frame Z (m) at the grasp/close pose. Lower = the gripper descends "
+        "further onto the cube so the fingers straddle it (vs hovering above). "
+        "Defaults to the planner's grasp_z.",
+    )
+    ap.add_argument("--approach", type=float, default=None, help="Approach/lift clearance height (m) above the table.")
+    ap.add_argument("--table-z", type=float, default=None, help="Table surface Z (m).")
+    ap.add_argument(
         "--joint-names",
         nargs="*",
         default=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
@@ -53,12 +63,22 @@ def main() -> None:
     start_q = args.start_q if args.start_q is not None else [0.0] * len(jn)
 
     planner = CuroboMotionPlanner(urdf_path=args.urdf, asset_path=args.asset)
+    # Only forward grasp-pose overrides that were actually passed, so the
+    # planner's own defaults still apply otherwise.
+    pp_kwargs = {}
+    if args.grasp_z is not None:
+        pp_kwargs["grasp_z"] = args.grasp_z
+    if args.approach is not None:
+        pp_kwargs["approach"] = args.approach
+    if args.table_z is not None:
+        pp_kwargs["table_z"] = args.table_z
     traj = planner.plan_pick_place(
         joint_names=jn,
         start_q=start_q,
         gripper_joint=jn[-1],
         cube_xy=list(args.cube_xy),
         place_xy=list(args.place_xy),
+        **pp_kwargs,
     )
 
     payload = {
