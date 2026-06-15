@@ -195,6 +195,14 @@ class IsaacSimulation:
         # Both are env-tunable for headroom on slower GPUs.
         self._record_converge = _env_int("SO101_RECORD_CONVERGE", 6)
         self._idle_converge = _env_int("SO101_IDLE_CONVERGE", 4)
+        # Min seconds between IDLE live-preview refreshes. The idle scene is
+        # static, so refreshing a few times a second is pointless and pegs the
+        # RTX renderer (~7 cores) indefinitely -- which starves the web/record
+        # threads and makes a subsequent episode crawl. Throttle to ~1 Hz.
+        try:
+            self._idle_render_period = float(os.environ.get("SO101_IDLE_RENDER_PERIOD", "1.0"))
+        except (TypeError, ValueError):
+            self._idle_render_period = 1.0
 
     def _on_main_thread(self) -> bool:
         import threading
@@ -421,6 +429,7 @@ class IsaacSimulation:
         import time
 
         i = 0
+        last_idle_render = 0.0
         self._pump_running = True
         try:
             while stop_event is None or not stop_event.is_set():
@@ -435,6 +444,7 @@ class IsaacSimulation:
                 if job is not None:
                     job()
                     i = 0
+                    last_idle_render = 0.0
                     continue
                 busy = not self._action_q.empty()
                 if busy:
@@ -442,11 +452,17 @@ class IsaacSimulation:
                     self.pump(render=False)
                     i = 0
                     continue
-                # Idle: occasional preview refresh, then yield the CPU so the web
-                # server thread is scheduled and the page stays responsive.
-                self.pump(render=(i % max(1, render_every) == 0))
+                # Idle: refresh the preview at most ~once per _idle_render_period
+                # (the static scene needs no more), then sleep so the RTX renderer
+                # doesn't run flat out and peg ~7 cores -- which otherwise starves
+                # the Gradio HTTP / record threads (observed: 700%+ CPU forever).
+                now = time.time()
+                do_render = (now - last_idle_render) >= self._idle_render_period
+                self.pump(render=do_render)
+                if do_render:
+                    last_idle_render = now
                 i += 1
-                time.sleep(0.02)
+                time.sleep(0.05)
         finally:
             self._pump_running = False
 
