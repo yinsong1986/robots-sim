@@ -28,11 +28,12 @@ logger = logging.getLogger("so101_curobo.scene")
 ROBOT_CONFIG_CANDIDATES = ["so101", "so100", "so_arm100", "panda"]
 
 # Workspace layout (metres, world frame; arm base at origin).
-# Cube: 3 cm (matches the SO-101 RL reference) placed head-on in front of the
-# arm (+X, y=0) at a comfortable top-down reach -- the arm reaches it with
-# shoulder_pan~=0 and a near-vertical approach, so the grasp is square and the
-# posture natural (vs a diagonal [0.2,0.2] target, which forced a folded pose).
-DEFAULT_CUBE_POSITION = [0.28, 0.0, 0.018]
+# Cube: 3 cm placed head-on in front of the arm (+X, y=0) at a *far* reach
+# (x=0.34). At this distance the SO-101's forearm is ~horizontal, so a 90 deg
+# wrist points the gripper essentially straight down -> cuRobo's top-down solve
+# lands a ~4 deg-from-vertical grasp within joint limits (a closer cube forces
+# the wrist past its limit and tilts the grasp; see planner notes).
+DEFAULT_CUBE_POSITION = [0.34, 0.0, 0.018]
 DEFAULT_CUBE_HALF = [0.015, 0.015, 0.015]
 DEFAULT_CUBE_COLOR = [0.85, 0.10, 0.10, 1.0]
 DEFAULT_PLACE_POSITION = [0.0, 0.25, 0.0]  # "bin" drop target (within SO-101 reach)
@@ -234,18 +235,15 @@ def build_pick_place_scene(
             logger.info("bin marker not added (non-fatal): %s", r)
 
     cams = []
-    # Camera rig (Isaac framing) for the head-on scene: the cube is picked at
-    # +X) and placed at the bin [0, 0.25]; the arm base is at the origin, so the
-    # action spans x[0,0.30] y[0,0.25] z[0,0.25]. The FRONT camera is a nearly
-    # LEVEL side view (~6 deg below horizontal, looking +Y across the pick) so a
-    # near-vertical top-down grasp reads as vertical instead of being exaggerated
-    # by a steep down-angle. TOPDOWN looks straight down over the cube (confirms
-    # the square X/Y alignment); OBLIQUE gives a 3/4 view. All FOV 50, aimed to
-    # keep the arm + cube + bin framed across the whole trajectory.
+    # Camera rig (Isaac framing) for the head-on far cube: pick at [0.34, 0],
+    # place at the bin [0, 0.25]. FRONT is a nearly LEVEL side view (~6 deg below
+    # horizontal, looking +Y across the pick) so the near-vertical top-down grasp
+    # reads as vertical; TOPDOWN looks straight down over the cube; OBLIQUE is a
+    # 3/4 view. All FOV 50, aimed to keep arm + cube + bin framed.
     for name, pos, tgt, fov in (
-        ("front", [0.24, -1.20, 0.22], [0.20, 0.02, 0.10], 50.0),
-        ("topdown", [0.28, 0.0, 1.30], [0.28, 0.0, 0.0], 50.0),
-        ("oblique", [1.05, -0.95, 0.72], [0.18, 0.05, 0.10], 50.0),
+        ("front", [0.32, -1.20, 0.22], [0.30, 0.0, 0.09], 50.0),
+        ("topdown", [0.34, 0.0, 1.30], [0.34, 0.0, 0.0], 50.0),
+        ("oblique", [1.15, -0.90, 0.78], [0.24, 0.04, 0.08], 50.0),
     ):
         if _status(sim.add_camera(name=name, position=pos, target=tgt, fov=fov, width=cw, height=ch)) == "success":
             cams.append(name)
