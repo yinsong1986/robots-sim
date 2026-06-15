@@ -28,8 +28,12 @@ logger = logging.getLogger("so101_curobo.scene")
 ROBOT_CONFIG_CANDIDATES = ["so101", "so100", "so_arm100", "panda"]
 
 # Workspace layout (metres, world frame; arm base at origin).
-DEFAULT_CUBE_POSITION = [0.20, 0.20, 0.025]
-DEFAULT_CUBE_HALF = [0.022, 0.022, 0.022]
+# Cube: 3 cm (matches the SO-101 RL reference) placed head-on in front of the
+# arm (+X, y=0) at a comfortable top-down reach -- the arm reaches it with
+# shoulder_pan~=0 and a near-vertical approach, so the grasp is square and the
+# posture natural (vs a diagonal [0.2,0.2] target, which forced a folded pose).
+DEFAULT_CUBE_POSITION = [0.28, 0.0, 0.018]
+DEFAULT_CUBE_HALF = [0.015, 0.015, 0.015]
 DEFAULT_CUBE_COLOR = [0.85, 0.10, 0.10, 1.0]
 DEFAULT_PLACE_POSITION = [0.0, 0.25, 0.0]  # "bin" drop target (within SO-101 reach)
 DEFAULT_BIN_HALF = [0.05, 0.05, 0.012]

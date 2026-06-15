@@ -13,7 +13,7 @@ neither cuRobo nor warp, so it runs inside the kit):
     # 1) plan offline in a cuRobo-capable venv:
     python examples/so101_curobo/plan_curobo_offline.py \\
         --urdf <so101.urdf> --asset <asset_dir> \\
-        --cube-xy 0.2 0.2 --place-xy 0.0 0.25 --out curobo_traj.json
+        --cube-xy 0.28 0.0 --place-xy 0.0 0.25 --grasp-z 0.01 --out curobo_traj.json
     # 2) replay it on the Isaac backend:
     python -m examples.so101_curobo.app --backend isaac --planner curobo \\
         --curobo-urdf <so101.urdf> --curobo-traj curobo_traj.json --smoke
@@ -33,15 +33,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--urdf", default=os.environ.get("SO101_URDF"))
     ap.add_argument("--asset", default=os.environ.get("SO101_ASSET"))
-    ap.add_argument("--cube-xy", nargs=2, type=float, default=[0.20, 0.20])
+    ap.add_argument("--cube-xy", nargs=2, type=float, default=[0.28, 0.0])
     ap.add_argument("--place-xy", nargs=2, type=float, default=[0.0, 0.25])
     ap.add_argument(
         "--grasp-z",
         type=float,
-        default=None,
+        default=0.01,
         help="Tool-frame Z (m) at the grasp/close pose. Lower = the gripper descends "
-        "further onto the cube so the fingers straddle it (vs hovering above). "
-        "Defaults to the planner's grasp_z.",
+        "further onto the cube so the fingers straddle it (vs hovering above). The "
+        "default (0.01) lands the tool point at the 3 cm cube's centre for a square "
+        "top-down grasp; pass None-equivalent by overriding to use the planner's grasp_z.",
     )
     ap.add_argument("--approach", type=float, default=None, help="Approach/lift clearance height (m) above the table.")
     ap.add_argument("--table-z", type=float, default=None, help="Table surface Z (m).")
