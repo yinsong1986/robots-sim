@@ -678,6 +678,39 @@ class IsaacSimulation:
             return _err(f"move_object failed: {type(exc).__name__}: {exc}")
         return _ok(f"'{name}' moved to {position or 'same'}.")
 
+    def set_object_collision(self, name: str, enabled: bool = True) -> Dict[str, Any]:
+        """Enable/disable an object's collider (keeps the visual mesh intact).
+
+        Used by the kinematic grasp: while the cube is carried it is teleported
+        *into* the closing gripper fingers every frame. With its collider on, the
+        static cube and the finger colliders interpenetrate, and the resulting
+        contact forces fling the stiff, undamped PD arm (kp~3.6e4, kd~0) into a
+        ~5 cm/frame oscillation that the rigidly-attached cube reproduces as a
+        visible shake (measured: ~95% of carry frames reverse direction; collider
+        off drops that to ~1%). Disabling the grasped cube's collider lets the
+        gripper close cleanly around it. Re-enabled on release.
+        """
+        obj = self._objects.get(name)
+        if obj is None:
+            return _err(f"Object {name!r} not found.")
+        # Prefer the object's own API; fall back to toggling UsdPhysics on the prim.
+        try:
+            obj.set_collision_enabled(bool(enabled))
+            return _ok(f"'{name}' collision {'on' if enabled else 'off'}.")
+        except Exception:  # noqa: BLE001
+            logger.debug("set_collision_enabled unavailable; trying USD API", exc_info=True)
+        try:
+            import omni.usd
+            from pxr import UsdPhysics
+
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(f"/World/{name}")
+            api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath()) or UsdPhysics.CollisionAPI.Apply(prim)
+            api.GetCollisionEnabledAttr().Set(bool(enabled))
+            return _ok(f"'{name}' collision {'on' if enabled else 'off'} (USD).")
+        except Exception as exc:  # noqa: BLE001
+            return _err(f"set_object_collision failed: {type(exc).__name__}: {exc}")
+
     def _object_position(self, name: str) -> Optional[List[float]]:
         obj = self._objects.get(name)
         if obj is None:

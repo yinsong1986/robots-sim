@@ -252,6 +252,24 @@ class LeRobotDataCollector:
         except Exception:  # noqa: BLE001
             pass
 
+    def _set_cube_collision(self, enabled: bool) -> None:
+        """Toggle the carried cube's collider (Isaac kinematic grasp only).
+
+        The grasped cube is teleported *into* the closing gripper fingers each
+        frame; with its collider on, the static cube interpenetrates the finger
+        colliders and the contact forces fling the stiff, undamped arm -- the
+        cube then shakes ~5 cm/frame. Disabling the collider while grasped lets
+        the gripper close cleanly around it; restored on release. No-op on
+        backends without ``set_object_collision`` (e.g. MuJoCo, whose actuated
+        friction grasp needs the contact).
+        """
+        fn = getattr(self.sim, "set_object_collision", None)
+        if callable(fn):
+            try:
+                fn(self.scene.cube_name, enabled)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_object_collision failed (non-fatal)", exc_info=True)
+
     def _gripper_frame_pos(self) -> Optional[List[float]]:
         """World position of the gripper/tool link.
 
@@ -397,6 +415,10 @@ class LeRobotDataCollector:
                             grasp_local = list(rest_local)
                             attached = True
                             ramp = 0
+                            # Stop the now-grasped cube from colliding with the
+                            # gripper it's teleported into (else the static cube
+                            # fights the fingers and shakes the arm).
+                            self._set_cube_collision(False)
                             if _GRASP_DBG:
                                 logger.info(
                                     "[grasp-dbg] ATTACHED at phase=%s gp=%s cp=%s dist=%.3f rest=%s seat=%s",
@@ -412,6 +434,7 @@ class LeRobotDataCollector:
                     attached = False
                     grasp_local = rest_local = None
                     ramp = 0
+                    self._set_cube_collision(True)  # restore collider on release
                     if _GRASP_DBG:
                         logger.info("[grasp-dbg] RELEASED at phase=%s", phase)
                 # Carry: ease the cube into the mouth, then hold it rigidly there.
