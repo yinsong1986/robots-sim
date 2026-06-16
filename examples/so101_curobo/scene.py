@@ -28,12 +28,14 @@ logger = logging.getLogger("so101_curobo.scene")
 ROBOT_CONFIG_CANDIDATES = ["so101", "so100", "so_arm100", "panda"]
 
 # Workspace layout (metres, world frame; arm base at origin).
-# Cube: 3 cm placed head-on in front of the arm (+X, y=0) at a *far* reach
-# (x=0.34). At this distance the SO-101's forearm is ~horizontal, so a 90 deg
-# wrist points the gripper essentially straight down -> cuRobo's top-down solve
-# lands a ~4 deg-from-vertical grasp within joint limits (a closer cube forces
-# the wrist past its limit and tilts the grasp; see planner notes).
-DEFAULT_CUBE_POSITION = [0.34, 0.0, 0.018]
+# Cube: 3 cm placed head-on in front of the arm (+X, y=0) at x=0.30. The gripper
+# FINGER axis is gripper_frame_link +Z (URDF gripper_frame_joint), and the planner
+# now points THAT axis straight down for a true top-down grasp (measured ~3.5 deg
+# from vertical here). x=0.30 is the sweet spot: close enough that a finger-down
+# wrist is within joint limits, far enough that the arm can still reach the
+# diagonal bin afterward (x>=0.32 tilts the grasp; x=0.34 makes the bin place
+# infeasible once the grasp is finger-down). See planner notes (_FINGER_AXIS_TOOL).
+DEFAULT_CUBE_POSITION = [0.30, 0.0, 0.018]
 DEFAULT_CUBE_HALF = [0.015, 0.015, 0.015]
 DEFAULT_CUBE_COLOR = [0.85, 0.10, 0.10, 1.0]
 DEFAULT_PLACE_POSITION = [0.0, 0.25, 0.0]  # "bin" drop target (within SO-101 reach)

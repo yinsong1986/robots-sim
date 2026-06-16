@@ -55,23 +55,33 @@ def curobo_available() -> bool:
 
 CUROBO_AVAILABLE = curobo_available()
 
+# The SO-101 gripper's fingers extend along the gripper_frame_link +Z axis. From
+# the URDF gripper_frame_joint (gripper_link -> gripper_frame_link, xyz=
+# (-0.0079, -0.0002, -0.0981) rpy=(0, pi, 0)), the wrist->tool-point offset
+# expressed in the tool frame is ~[0.08, 0, 0.997] -- i.e. essentially +Z. The
+# earlier code assumed the +x axis was the approach axis; that was wrong and
+# produced a horizontal side-grasp (the tool +x can point straight down while the
+# fingers point sideways). Measure/aim THIS axis for a true top-down grasp.
+_FINGER_AXIS_TOOL = (0.08, -0.002, 0.997)
+
 
 def _approach_angle_deg(quat_wxyz: Sequence[float]) -> float:
-    """Angle in degrees between the tool approach axis and straight down (-Z).
+    """Angle in degrees between the gripper's FINGER axis and straight down (-Z).
 
-    The SO-101 ``gripper_frame_link`` local +x axis is the grasp approach
-    direction (FK-verified: at the home config the home quaternion
-    [0.707, 0, 0.707, 0] maps local +x to world -Z). For a unit quaternion
-    (w, x, y, z) the world z-component of local +x is the rotation-matrix entry
-    R[2, 0] = 2 (x z - w y); since local +x is a unit vector, its angle from the
-    straight-down axis (0, 0, -1) is ``acos(-R[2, 0])``. Returns 0 for a perfect
-    top-down approach, 90 for a horizontal (sideways) approach.
+    The SO-101 fingers extend along ``gripper_frame_link`` +Z (``_FINGER_AXIS_TOOL``;
+    see the URDF gripper_frame_joint), NOT +x. For a unit quaternion (w, x, y, z)
+    the world Z-component of a tool-frame vector ``f`` is
+    ``R[2,:] . f = (2(xz-wy), 2(yz+wx), 1-2(x^2+y^2)) . f``; the finger axis angle
+    from straight-down (0, 0, -1) is ``acos(-worldZ)``. Returns 0 for fingers
+    pointing straight down (true top-down grasp), 90 for a horizontal side-grasp.
     """
     w, x, y, z = quat_wxyz
     n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
     w, x, y, z = w / n, x / n, y / n, z / n
-    lx_z = 2.0 * (x * z - w * y)
-    return math.degrees(math.acos(max(-1.0, min(1.0, -lx_z))))
+    fx, fy, fz = _FINGER_AXIS_TOOL
+    fn = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+    world_z = (2.0 * (x * z - w * y)) * fx + (2.0 * (y * z + w * x)) * fy + (1.0 - 2.0 * (x * x + y * y)) * fz
+    return math.degrees(math.acos(max(-1.0, min(1.0, -world_z / fn))))
 
 
 @dataclass
@@ -306,8 +316,8 @@ class CuroboMotionPlanner:
         top_down_weight: float = 0.05,
         orientation_tolerance: float = 1.6,
         top_down_attempts: int = 6,
-        gripper_open: float = 0.0,
-        gripper_close: float = 1.5,
+        gripper_open: float = 0.3,
+        gripper_close: float = -0.15,
         **_ignored,
     ):
         import os
@@ -340,6 +350,15 @@ class CuroboMotionPlanner:
         self.top_down_weight = float(top_down_weight)
         self.orientation_tolerance = float(orientation_tolerance)
         self.top_down_attempts = max(1, int(top_down_attempts))
+        # Gripper joint targets (revolute, range ~[-0.174, 1.745]). IMPORTANT:
+        # the jaw CLOSES toward the LOW/negative end and OPENS toward the high end
+        # (confirmed: commanding 1.74 swings the jaw ~90 deg wide open). So the
+        # grip value must be LOW and the approach-open value just above it:
+        #   gripper_close ~ -0.15  -> jaws together to clamp the cube,
+        #   gripper_open  ~  0.3   -> jaws open just enough to clear the 3 cm cube
+        #                             on the top-down descent (the old code had
+        #                             these inverted -- close=1.74 -> jaws flew open).
+        # (Values are approximate; fine-tune against a render of the grip.)
         self.gripper_open = gripper_open
         self.gripper_close = gripper_close
         self._planner = None
@@ -399,19 +418,29 @@ class CuroboMotionPlanner:
             self._planner.update_tool_pose_criteria(
                 {self.tool_frame: ToolPoseCriteria.track_position(xyz=[1.0, 1.0, 1.0])}
             )
-        # Capture the home EE orientation as the default goal orientation. On the
-        # SO-101 the home quaternion is [0.707, 0, 0.707, 0] (wxyz) -> the tool's
-        # local +x axis (the grasp approach axis) points along world -Z (straight
-        # down), so it doubles as the top-down grasp orientation. Override via
-        # grasp_quaternion if a different approach is wanted.
+        # Grasp orientation target: point the gripper's FINGER axis straight DOWN.
+        # The fingers extend along gripper_frame_link +Z (_FINGER_AXIS_TOOL). A
+        # 180-deg rotation about the base X axis maps the tool's +Z to world -Z
+        # (fingers down) with +x facing forward, so it is the top-down grasp target.
+        # (The previous code used the home EE quaternion, which aligns the tool +x
+        # with -Z -> a horizontal side-grasp, because +x is NOT the finger axis.)
+        # cuRobo biases toward this softly (the 5-DOF arm can't hit it exactly) and
+        # best-of-N keeps the most finger-vertical solve. Override via grasp_quaternion.
+        self._default_quat = [0.0, 1.0, 0.0, 0.0]
+        # Log the home tool pose too (confirms FK/kinematics is live).
         q0 = self._planner.default_joint_state.position
         q0 = q0.unsqueeze(0) if q0.dim() == 1 else q0
         st = self._planner.compute_kinematics(JointState.from_position(q0, joint_names=self._arm_joint_names))
         tp = st.tool_poses
         if isinstance(tp, dict):
             tp = tp.get(self.tool_frame, list(tp.values())[0])
-        self._default_quat = [float(x) for x in tp.quaternion.reshape(-1, 4)[0].detach().cpu().tolist()]
-        logger.info("cuRobo SO-101 planner ready: arm joints=%s", self._arm_joint_names)
+        home_quat = [round(float(x), 3) for x in tp.quaternion.reshape(-1, 4)[0].detach().cpu().tolist()]
+        logger.info(
+            "cuRobo SO-101 planner ready: arm joints=%s home_quat=%s grasp_quat(finger-down)=%s",
+            self._arm_joint_names,
+            home_quat,
+            self._default_quat,
+        )
 
     def _plan_segment(self, start_arm_q, goal_xyz, goal_quat, orient: bool = False) -> List[List[float]]:
         import torch
@@ -538,14 +567,17 @@ class CuroboMotionPlanner:
             phases.append(phase)
 
         # (phase, goal_xyz | None for an in-place gripper event, gripper value,
-        #  orient): pick/approach/lift descend onto the cube near-vertically
-        #  (top-down); the place segments stay position-only (the bin pose is not
-        #  vertical-reachable and a top-down drop is unnecessary).
+        #  orient): reach + grasp descend onto the cube FINGER-DOWN (top-down
+        #  pickup -- the part the user sees). lift + place stay position-only: the
+        #  5-DOF arm can't both hold the gripper finger-down AND reach the diagonal
+        #  bin, so forcing a finger-down lift leaves the place segment unreachable
+        #  ("start state in collision"). Freeing the lift orientation lets the arm
+        #  re-pose for the bin while the cube rides along (rigid kinematic grasp).
         segments = [
             ("reach", [cx, cy, table_z + approach], OPEN, True),
             ("grasp", [cx, cy, table_z + grasp_z], OPEN, True),
             ("close", None, CLOSE, False),
-            ("lift", [cx, cy, table_z + approach], CLOSE, True),
+            ("lift", [cx, cy, table_z + approach], CLOSE, False),
             ("place", [px, py, table_z + approach], CLOSE, False),
             ("place_down", [px, py, table_z + grasp_z + 0.02], CLOSE, False),
             ("release", None, OPEN, False),
