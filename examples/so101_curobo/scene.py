@@ -237,13 +237,13 @@ def build_pick_place_scene(
             logger.info("bin marker not added (non-fatal): %s", r)
 
     cams = []
-    # Camera rig (Isaac framing) for the head-on far cube: pick at [0.34, 0],
-    # place at the bin [0, 0.25]. FRONT is a nearly LEVEL side view (~6 deg below
-    # horizontal, looking +Y across the pick) so the near-vertical top-down grasp
-    # reads as vertical; TOPDOWN looks straight down over the cube; OBLIQUE is a
-    # 3/4 view. All FOV 50, aimed to keep arm + cube + bin framed.
+    # Camera rig (Isaac framing) for the head-on cube pick at [0.30, 0], place at
+    # the bin [0, 0.25]. FRONT is a head-on view from the +X (cube) side, looking
+    # back along -X at the arm (rotated 90 deg to the right from the old -Y side
+    # profile); TOPDOWN looks straight down over the cube; OBLIQUE is a 3/4 view.
+    # All FOV 50, aimed to keep arm + cube + bin framed.
     for name, pos, tgt, fov in (
-        ("front", [0.32, -1.20, 0.22], [0.30, 0.0, 0.09], 50.0),
+        ("front", [1.50, 0.0, 0.22], [0.30, 0.0, 0.09], 50.0),
         ("topdown", [0.34, 0.0, 1.30], [0.34, 0.0, 0.0], 50.0),
         ("oblique", [1.15, -0.90, 0.78], [0.24, 0.04, 0.08], 50.0),
     ):
