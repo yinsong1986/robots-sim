@@ -70,11 +70,12 @@ def install_options_inline() -> str:
 
 
 def not_importable_reason() -> str:
-    """Full reason string returned by ``is_available()`` when the
-    ``omni.isaac.kit`` submodule cannot be located.
+    """Full reason string returned by ``is_available()`` when neither
+    the legacy ``omni.isaac.kit`` nor the modern ``isaacsim`` SimulationApp
+    entry point can be located.
     """
     return (
-        "omni.isaac.kit.SimulationApp not importable. "
+        "omni.isaac.kit.SimulationApp / isaacsim.SimulationApp not importable. "
         "Isaac Sim must be installed separately (not via pip). Options:\n"
         f"{install_options_block()}\n"
         f"Then install the Python helpers: {PIP_EXTRA}"
@@ -85,7 +86,7 @@ def not_available_import_error() -> str:
     """Message for the ``ImportError`` raised when SimulationApp can't
     be constructed at runtime.
     """
-    return f"omni.isaac.kit.SimulationApp not available. {install_options_inline()}"
+    return "omni.isaac.kit.SimulationApp / isaacsim.SimulationApp not available. " f"{install_options_inline()}"
 
 
 __all__ = [

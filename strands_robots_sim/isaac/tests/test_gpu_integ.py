@@ -126,3 +126,65 @@ class TestIsaacGPUIntegration:
         assert "16" in result["content"][0]["text"]
 
         sim.destroy()
+
+    def test_libero_run_isaac_lifecycle_smoke(self):
+        """Smoke-test the lifecycle ``examples/libero/run_isaac.py`` exercises.
+
+        Pins the contract from `#73 <https://github.com/strands-labs/robots-sim/issues/73>`_:
+        ``IsaacSimulation`` boots SimulationApp, creates a world, loads the
+        bundled Franka USD via ``add_robot(usd_path=...)``, attaches an
+        RTX camera, steps physics, and tears down cleanly. This is the
+        full lifecycle the LIBERO Isaac example walks through *up to*
+        ``evaluate_benchmark`` -- the latter additionally depends on the
+        LIBERO benchmark suite being importable inside Isaac's bundled
+        Python (``strands-robots`` interpreter constraint, tracked
+        separately under
+        `#71 <https://github.com/strands-labs/robots-sim/issues/71>`_),
+        which this smoke deliberately doesn't exercise.
+
+        Validated against ``nvcr.io/nvidia/isaac-sim:4.5.0`` on a 4×L4
+        host during PR validation; runs in ~3 minutes end-to-end (the
+        bulk of which is SimulationApp startup, not anything testable).
+        """
+        from strands_robots_sim.isaac import IsaacConfig, IsaacSimulation
+
+        available, msg = IsaacSimulation.is_available()
+        if not available:
+            pytest.skip(f"Isaac Sim not available: {msg}")
+
+        # Resolve the bundled-asset URL via the modern-then-legacy
+        # fallback so this test mirrors what the example scripts'
+        # ``_resolve_robot_asset`` does. Both namespaces are imported
+        # lazily; either resolves on Isaac Sim 4.5+ post-bootstrap.
+        sim = IsaacSimulation(IsaacConfig(num_envs=1, headless=True))
+        try:
+            r = sim.create_world()
+            assert r.get("status") == "success", f"create_world: {r}"
+
+            try:
+                from isaacsim.storage.native import (  # type: ignore[import-not-found]
+                    get_assets_root_path,
+                )
+            except ImportError:
+                from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+                    get_assets_root_path,
+                )
+            assets_root = get_assets_root_path()
+            assert assets_root, "get_assets_root_path() returned empty"
+
+            franka_usd = f"{assets_root}/Isaac/Robots/Franka/franka.usd"
+            r = sim.add_robot(name="robot", usd_path=franka_usd)
+            assert r.get("status") == "success", f"add_robot: {r}"
+
+            r = sim.add_camera(
+                name="image",
+                position=[2.0, 0.0, 1.5],
+                target=[0.0, 0.0, 0.5],
+                fov=60.0,
+            )
+            assert r.get("status") == "success", f"add_camera: {r}"
+
+            r = sim.step(5)
+            assert r.get("status") == "success", f"step: {r}"
+        finally:
+            sim.destroy()

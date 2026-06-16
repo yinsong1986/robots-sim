@@ -182,7 +182,18 @@ def _get_or_create_simulation_app(
             return _SIMULATION_APP
 
         try:
-            from omni.isaac.kit import SimulationApp  # type: ignore[import-not-found]
+            # Isaac Sim 4.5+: ``isaacsim.SimulationApp`` is the supported
+            # entry point. The legacy ``omni.isaac.kit.SimulationApp``
+            # still works on 4.5 (deprecated shim under ``extsDeprecated``)
+            # but emits a noisy deprecation warning at import time and
+            # may not exist at all on a pip-only ``isaacsim`` install.
+            # Try the modern path first, fall back to the legacy one so
+            # this code keeps working on older Isaac Sim builds (and on
+            # CI mocks that monkey-patch the legacy module).
+            try:
+                from isaacsim import SimulationApp  # type: ignore[import-not-found]
+            except ImportError:
+                from omni.isaac.kit import SimulationApp  # type: ignore[import-not-found]
         except ImportError as e:
             from strands_robots_sim.isaac._install import not_available_import_error
 
@@ -200,6 +211,28 @@ def _get_or_create_simulation_app(
             headless,
         )
         return _SIMULATION_APP
+
+
+# ----------------------------------------------------------------------------
+# Dual-namespace import note
+# ----------------------------------------------------------------------------
+#
+# Isaac Sim 4.5+ ships every runtime extension under TWO namespaces:
+# the legacy ``omni.isaac.*`` tree (still present as Kit-extension shims
+# under ``extsDeprecated/`` -- imports work post-SimulationApp boot but
+# emit deprecation warnings) and the modern ``isaacsim.*`` tree (the
+# supported path going forward). On the canonical Isaac Sim 4.5 docker
+# image (see ``_install.ISAAC_SIM_DOCKER_IMAGE`` for the pinned tag) every
+# ``omni.isaac.*`` lazy import in this file resolves correctly post-boot
+# via the deprecation shim, EXCEPT ``omni.importer.urdf`` which was
+# removed in 4.5 and replaced wholesale by ``isaacsim.asset.importer.urdf``
+# (the existing ``_load_urdf_robot`` already handles that pair via
+# try/except). Other lazy imports keep their legacy paths because the
+# 4.5 deprecation shims work, and downstream unit tests
+# ``patch.dict("sys.modules", {"omni.isaac.*": fake})`` to inject mocks --
+# a transparent dual-path resolves those mocks via ``importlib.import_module``
+# anyway, but inline call sites are easier to grep for during a future
+# Isaac Sim namespace cleanup.
 
 
 class _RobotState:
@@ -338,21 +371,42 @@ class IsaacSimulation(SimEngine):
         tuple[bool, str | None]
             (available, reason_if_not). If available is True, reason is None.
         """
-        # Probe what create_world() actually needs: omni.isaac.kit.SimulationApp.
-        # The bare ``omni`` namespace is a PEP 420 namespace package shared by
-        # omni.ui, omni.usd, partial Omniverse SDK installs, and Isaac-Lab
-        # pre-bootstrap states -- its mere presence is not a reliable signal
-        # that Isaac Sim is usable. ``importlib.util.find_spec`` checks the
-        # specific submodule without importing it (no side effects); it
-        # raises ModuleNotFoundError when a parent package along the dotted
-        # path is missing, which we treat the same as "not available".
+        # Probe what create_world() actually needs: a SimulationApp entry
+        # point. Isaac Sim ships TWO namespaces today:
+        #
+        #   * Legacy: ``omni.isaac.kit.SimulationApp`` (the pre-4.5 path,
+        #     still present as a deprecated shim in the 4.5 docker image
+        #     under ``extsDeprecated/`` -- emits a deprecation warning at
+        #     import time but works).
+        #   * Modern: ``isaacsim.SimulationApp`` (the supported path on
+        #     Isaac Sim 4.5+ / pip ``isaacsim``).
+        #
+        # Some Isaac Sim 4.5+ pip installs ship ONLY the modern namespace
+        # (no ``omni.isaac.kit`` until ``import isaacsim`` bootstraps the
+        # Kit kernel). Probing only ``omni.isaac.kit`` therefore returns
+        # False on a perfectly working pip ``isaacsim`` install. Accept
+        # either namespace as evidence Isaac Sim is usable.
+        #
+        # The bare ``omni`` namespace is intentionally NOT probed -- it's
+        # a PEP 420 namespace package shared by omni.ui / omni.usd /
+        # partial Omniverse SDK installs / Isaac-Lab pre-bootstrap
+        # states; its mere presence is not a reliable signal. We probe
+        # the specific submodules (``omni.isaac.kit`` / ``isaacsim``)
+        # via ``importlib.util.find_spec`` (no side effects, no actual
+        # import). Submodules deeper than ``isaacsim`` (e.g.
+        # ``isaacsim.core.api``) only resolve AFTER SimulationApp boots
+        # the Kit kernel, so we deliberately don't probe them here.
         import importlib.util
 
         try:
             kit_spec = importlib.util.find_spec("omni.isaac.kit")
         except ModuleNotFoundError:
             kit_spec = None
-        if kit_spec is None:
+        try:
+            isaacsim_spec = importlib.util.find_spec("isaacsim")
+        except ModuleNotFoundError:
+            isaacsim_spec = None
+        if kit_spec is None and isaacsim_spec is None:
             from strands_robots_sim.isaac._install import not_importable_reason
 
             return False, not_importable_reason()

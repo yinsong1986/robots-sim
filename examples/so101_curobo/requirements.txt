@@ -1,0 +1,22 @@
+# SO-101 cuRobo synthetic-data demo (issue #67) — requirements.
+#
+# The planning + data-collection loop runs on the MuJoCo backend today; cuRobo
+# and Isaac Sim are optional, out-of-band installs (see README + the install
+# hints printed by the app).
+
+# Real SO-101 in MuJoCo + the LeRobot dataset writer used by the collector.
+strands-robots[sim-mujoco,lerobot]
+
+# Natural-language agent + interactive UI.
+strands-agents>=0.1
+gradio>=4,<7
+numpy
+
+# --- Optional, NOT pip-installable here (install out-of-band) ---------------
+# cuRobo (collision-aware planning, issue #67 T3/T4/T5). Needs an NVIDIA GPU
+# (> Turing) and driver >= 580.65.06 for the latest release:
+#   git clone https://github.com/NVlabs/curobo && cd curobo
+#   uv venv --python 3.11 && source .venv/bin/activate && uv pip install .[cu12-torch]
+#
+# Isaac Sim runtime (~30 GB; backend registration is issue #67 T1):
+#   Omniverse Launcher / Isaac Lab / docker nvcr.io/nvidia/isaac-sim:4.5.0

@@ -1,146 +1,287 @@
-# Strands Robots Simulation
+<div align="center">
+  <h1>Strands Robots Sim</h1>
 
-> Heavy NVIDIA simulation backends for [`strands-robots`](https://github.com/strands-labs/robots): **Isaac Sim** (USD + IsaacLab 3.0) and **Newton/Warp** (GPU-native, 4096+ envs, differentiable).
+  <h2>The heavy NVIDIA Isaac Sim backend for <a href="https://github.com/strands-labs/robots"><code>strands-robots</code></a></h2>
 
-For the default lightweight **MuJoCo** backend, use [`strands-robots`](https://github.com/strands-labs/robots) directly — both backends in this repo plug into the same `Simulation` AgentTool / `SimEngine` ABC and load via entry points, so the user-facing API is identical across all three.
+  <div align="center">
+    <a href="https://pypi.org/project/strands-robots-sim/"><img alt="PyPI Version" src="https://img.shields.io/pypi/v/strands-robots-sim"/></a>
+    <a href="https://github.com/strands-labs/robots-sim"><img alt="GitHub stars" src="https://img.shields.io/github/stars/strands-labs/robots-sim"/></a>
+    <a href="https://github.com/strands-labs/robots-sim/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/strands-labs/robots-sim"/></a>
+    <a href="https://strands-labs.github.io/robots-sim/"><img alt="Docs" src="https://img.shields.io/badge/docs-strands--labs.github.io%2Frobots--sim-blue"/></a>
+    <a href="https://developer.nvidia.com/isaac-sim"><img alt="Isaac Sim" src="https://img.shields.io/badge/Isaac%20Sim-4.x-76B900?logo=nvidia"/></a>
+  </div>
 
-> **Status:** v0.2.0 was the re-scoped foundation release. The legacy `SimEnv` / `SteppedSimEnv` / GR00T policy code path moved upstream — see [`examples/MIGRATION.md`](examples/MIGRATION.md). **Isaac Sim Phase 1** (R7) has now landed in `main` — entry-point registration, `IsaacConfig`, `IsaacSimulation` lifecycle scaffolding, the procedural-robot builders (SO-100 / Panda / G1), and URDF / MJCF / USD loaders are all working today; the still-no-op data-plane methods (`add_object`, `add_camera`, `replicate`, the per-`IsaacSimulation` `_load_*_robot` stubs) are Phase 2 work. **Newton** lands in v0.4.0+. Track the rollout in [#8](https://github.com/strands-labs/robots-sim/issues/8).
+  <p>
+    <a href="https://strands-labs.github.io/robots-sim/">Docs</a>
+    ◆ <a href="https://github.com/strands-labs/robots">strands-robots</a>
+    ◆ <a href="https://strands-labs.github.io/robots/">Robots Docs</a>
+    ◆ <a href="https://developer.nvidia.com/isaac-sim">NVIDIA Isaac Sim</a>
+    ◆ <a href="https://github.com/orgs/strands-labs/projects/2">Project Board</a>
+  </p>
+</div>
 
----
-
-## Backend matrix
-
-| Capability | MuJoCo<br/>(`strands-robots`) | **Newton**<br/>(this repo) | **Isaac Sim**<br/>(this repo) |
-|---|:---:|:---:|:---:|
-| Native GPU | — | ✅ Warp | ✅ PhysX |
-| Apple Silicon | ✅ | ❌ (CUDA only) | ❌ |
-| Photoreal rendering | — | basic OpenGL | ✅ RTX path-traced |
-| `num_envs` per GPU | 1–8 | **4096+** | 4096+ |
-| Differentiable sim | — | ✅ (Warp autodiff) | partial |
-| Soft bodies / cloth / MPM | — | ✅ | ✅ |
-| USD scene format | — | partial | ✅ native |
-| Synthetic data (Replicator) | — | — | ✅ |
-| Download size | ~50 MB | ~500 MB | ~30 GB |
-| Setup friction | low | medium | high |
-
-Authoritative sources: [`strands-labs/robots#96`](https://github.com/strands-labs/robots/issues/96) (Newton design), [`strands-labs/robots#97`](https://github.com/strands-labs/robots/issues/97) (Isaac Sim design).
-
-- **Pick MuJoCo** for fast iteration, debugging, and macOS / Apple Silicon contributors.
-- **Pick Newton** for differentiable physics, multi-solver workloads, or fleet RL where rendering can be off.
-- **Pick Isaac Sim** for fleet RL with photoreal observations, USD-native scenes, or Replicator synth-data.
-
----
-
-## Install
-
-System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+**. macOS / Apple Silicon contributors should install [`strands-robots`](https://github.com/strands-labs/robots) directly and skip this repo.
-
-```bash
-# Isaac Sim (~30 GB SDK download on first run)
-pip install 'strands-robots-sim[isaac]'
-
-# Newton + Warp
-pip install 'strands-robots-sim[newton]'
-
-# Both
-pip install 'strands-robots-sim[all]'
-```
-
-`strands-robots` (and the default MuJoCo backend) are pulled in transitively.
-
----
-
-## Quick start
-
-> Isaac Sim Phase 1 has shipped — the snippet below is copy-paste-runnable today on a host with Isaac Sim 2024.x+ installed. Newton snippets become copy-paste-runnable when [R11 / #18](https://github.com/strands-labs/robots-sim/issues/18) ships.
-
-### Isaac Sim — photorealistic single-env
+`strands-robots-sim` is the heavy-backend companion to
+[`strands-robots`](https://github.com/strands-labs/robots). It ships an
+**`IsaacSimulation`** that plugs into the same `SimEngine` ABC the upstream
+MuJoCo backend implements, so a Strands Agent that drives a MuJoCo world
+today switches to Isaac Sim by changing one string.
 
 ```python
-import strands_robots_sim                       # registers "isaac" / "newton" via entry points
+import strands_robots_sim                       # registers "isaac" via entry points
 from strands_robots.simulation import create_simulation
 
-sim = create_simulation("isaac", render_mode="rtx_pathtracing", headless=True)
+sim = create_simulation("isaac", render_mode="rtx_realtime", headless=True)
 sim.create_world()
-sim.add_robot("so100")          # procedural; no asset files needed
+sim.add_robot("so100")                          # procedural; no asset files needed
 sim.step(100)
 frame = sim.render(camera_name="default")
 ```
 
-For URDF / MJCF / USD ingestion, use the loader module directly:
+> **📚 Documentation:** <https://strands-labs.github.io/robots-sim/>
+>
+> Includes a [Quickstart](https://strands-labs.github.io/robots-sim/getting-started/quickstart/),
+> the [Architecture](https://strands-labs.github.io/robots-sim/architecture/)
+> behind the plugin contract, the
+> [Backend reference](https://strands-labs.github.io/robots-sim/backends/isaac/),
+> and [Troubleshooting](https://strands-labs.github.io/robots-sim/troubleshooting/).
 
-```python
-from strands_robots_sim.isaac.loaders import load_urdf, load_mjcf, load_usd
+## Why robots-sim
 
-panda = load_urdf("/path/to/panda.urdf")        # stdlib XML, no extra deps
-print(panda.num_joints, panda.joint_names)
+- **RTX path-traced rendering.** Photoreal observations, paper-grade
+  frames, sim2real visuals — driven by the same agent code your MuJoCo
+  smoke tests use.
+- **USD-native scenes.** Real CAD assets, Nucleus support, IsaacLab
+  compatibility.
+- **Replicator synth-data.** Domain randomization at scale; ground-truth
+  depth, segmentation, and bounding boxes alongside RGB.
+- **Fleet RL on PhysX GPU.** 1024+ parallel envs with shared USD scenes.
+- **Plugin shape, not a fork.** `strands-robots` has zero hard dependency
+  on Isaac Sim — install this package and Isaac is discovered through
+  entry points.
+
+If none of those apply, install the lightweight default at
+[`strands-labs/robots`](https://github.com/strands-labs/robots) instead —
+it runs everywhere (including Apple Silicon), boots in seconds, and the
+agent contract is identical.
+
+## How it works
+
+```mermaid
+graph LR
+    A[Strands Agent] --> B[Simulation<br/>AgentTool]
+    B --> C[create_simulation 'isaac']
+    C --> D[Entry-point lookup<br/>strands_robots.backends]
+    D --> E[IsaacSimulation<br/>this repo]
+    E --> F[Isaac Sim Kit<br/>SimulationApp]
+    F --> G[PhysX + RTX]
+
+    classDef agent fill:#0969da,stroke:#044289,color:#fff
+    classDef glue fill:#8250df,stroke:#5a32a3,color:#fff
+    classDef plugin fill:#bf8700,stroke:#875e00,color:#fff
+
+    class A,B agent
+    class C,D glue
+    class E,F,G plugin
 ```
 
-### Newton — 4096-env fleet
+`strands-robots-sim` registers `IsaacSimulation` as a
+`strands_robots.backends` entry point. Upstream `create_simulation("isaac")`
+walks the entry-point group, imports the target string, and instantiates
+it. The full plugin contract is documented in
+[Architecture](https://strands-labs.github.io/robots-sim/architecture/).
+
+## Installation
+
+System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+, Isaac Sim 4.x**.
+macOS / Apple Silicon contributors should install
+[`strands-robots`](https://github.com/strands-labs/robots) directly and
+skip this repo.
+
+```bash
+# Step 1 — install Isaac Sim itself (NOT on PyPI):
+#   - Omniverse Launcher → Isaac Sim 4.x, OR
+#   - Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i, OR
+#   - NGC Docker: docker pull nvcr.io/nvidia/isaac-sim:4.5.0
+
+# Step 2 — install the Python plugin:
+pip install 'strands-robots-sim[isaac]'
+```
+
+`strands-robots` (the upstream MuJoCo backend, `Simulation` AgentTool,
+and policy providers) is pulled in transitively.
+
+Full install matrix in
+[Getting Started → Installation](https://strands-labs.github.io/robots-sim/getting-started/installation/).
+
+## Quick start
+
+### Single-env RTX render
 
 ```python
 import strands_robots_sim
 from strands_robots.simulation import create_simulation
 
-sim = create_simulation("newton", num_envs=4096, solver="mujoco")
+sim = create_simulation("isaac", render_mode="rtx_pathtracing", headless=True)
 sim.create_world()
-sim.add_robot("so100")
-sim.step(1000)
-state = sim.get_state()                         # batched [4096, ...] tensors
+sim.add_robot("so100")                          # procedural builder
+sim.add_object(name="cube", shape="cuboid",
+               position=[0.4, 0.0, 0.05], scale=[0.05, 0.05, 0.05])
+sim.add_camera(name="front", position=[1.2, 0.0, 0.6], target=[0.0, 0.0, 0.1])
+sim.step(120)
+frame = sim.render(camera_name="front")          # {"rgb": ..., "depth": ...}
+sim.destroy()
 ```
 
----
+### IsaacLab-style fleet (preview)
 
-## LIBERO backend matrix
+```python
+sim = create_simulation("isaac", num_envs=1024, headless=True,
+                        render_mode="headless")
+sim.create_world()
+sim.add_robot(name="panda", usd_path="/path/to/franka.usda")
+# ... RL training loop ...
+```
 
-Same task — `libero-spatial-pick_up_the_red_cube` (Panda picks a red cube from a tabletop and places it in a target zone), 50 episodes, seed 42 — run on every available backend with success rate and wall-time recorded side-by-side. Numbers are committed as each example lands, measured on a reference machine (recorded in each example file's header).
+### URDF / MJCF / USD ingestion
 
-The flagship driver [`examples/libero/libero_backend_matrix.py`](examples/libero/libero_backend_matrix.py) ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) walks all five rows and prints a unified table; each row also has a stand-alone example you can run in isolation. See [`examples/README.md` → "Running the matrix"](examples/README.md#running-the-matrix) for install combinations and the table format.
+```python
+from strands_robots_sim.isaac.loaders import load_urdf, load_mjcf, load_usd
 
-| Backend | `n_envs` | Renderer | Why use this row | Wall-time | Example | Issue |
-|---|---:|---|---|---|---|---|
-| `mujoco` | 1 | software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~9 s/ep @ 1.00 (groot)* | `libero/run_mujoco.py` | [R5 / #12](https://github.com/strands-labs/robots-sim/issues/12) |
-| `isaac` | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | TBD | `libero_isaac.py` | [R8 / #15](https://github.com/strands-labs/robots-sim/issues/15) |
-| `isaac` | 4096 | RTX off / minimal | IsaacLab-style fleet RL with USD scenes | TBD | `libero_isaac_fleet.py` | [R23 / #27](https://github.com/strands-labs/robots-sim/issues/27) |
-| `newton` | 1 | OpenGL | GPU-physics baseline; entry point for diffsim work | TBD | `libero_newton.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
-| `newton` | 4096 | OpenGL / null | Multi-solver fleet RL, lowest per-env compute | TBD | `libero_newton_fleet.py` | [R12 / #19](https://github.com/strands-labs/robots-sim/issues/19) |
+panda = load_urdf("/path/to/panda.urdf")         # stdlib XML, no extra deps
+print(panda.num_joints, panda.joint_names)
+```
 
-\* L4 / Docker dev box, `nvidia/GR00T-N1.7-LIBERO/libero_10` against `libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_…` (5 episodes, seeds 42 + 100), measured 2026-05-21 against `strands-robots` post-[#188](https://github.com/strands-labs/robots/pull/188). The full upstream catch-up wave is in: [#168](https://github.com/strands-labs/robots/pull/168) (rounds 36-44) + [#172](https://github.com/strands-labs/robots/pull/172) (closes #169) + [#173](https://github.com/strands-labs/robots/pull/173) (closes #170) + [#175](https://github.com/strands-labs/robots/pull/175) (closes #171 + #176) + [#180](https://github.com/strands-labs/robots/pull/180) (closes #179) + [#184](https://github.com/strands-labs/robots/pull/184) (closes #181) + [#186](https://github.com/strands-labs/robots/pull/186) (closes #178) + [#188](https://github.com/strands-labs/robots/pull/188) (closes #187: spec-driven instruction fallback + per-episode `policy.reset(seed=)` plumbing). Pre-#188 the ZMQ path returned `success_rate=0.20-0.60` because language-conditioned GR00T was getting an empty instruction. Post-#188 hits 5/5 reliably across seeds.
+## Backend matrix
 
----
+| Capability | MuJoCo<br/>(`strands-robots`) | **Isaac Sim**<br/>(this repo) |
+|---|:---:|:---:|
+| Native GPU | — | ✅ PhysX |
+| Apple Silicon | ✅ | ❌ |
+| Photoreal rendering | — | ✅ RTX path-traced |
+| `num_envs` per GPU | 1–8 | 1024+ |
+| USD scene format | — | ✅ native |
+| Synthetic data (Replicator) | — | ✅ |
+| Download size | ~50 MB | ~30 GB |
+| Setup friction | low | high |
 
-## Status & roadmap
+- **Pick MuJoCo** for fast iteration, debugging, macOS / Apple Silicon, CI.
+- **Pick Isaac Sim** for RTX photoreal eval, USD-native scenes, IsaacLab
+  fleet RL, or Replicator synth-data.
 
-Tracking umbrella: [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
+The full per-backend table with install hints lives in
+[Simulation → Overview](https://strands-labs.github.io/robots-sim/simulation/overview/).
 
-- **Stage 1 — Foundation cleanup**
-  - [x] R2 / [#9](https://github.com/strands-labs/robots-sim/issues/9) — remove legacy `SimEnv` / `SteppedSimEnv` / Libero env layer
-  - [x] R3 / [#10](https://github.com/strands-labs/robots-sim/issues/10) — remove duplicated GR00T policy / inference tool / tests / scripts / docs
-  - [x] R4 / [#11](https://github.com/strands-labs/robots-sim/issues/11) — README rewrite (this file)
-- **Stage 2 — MuJoCo LIBERO baseline**
-  - [x] R5 / [#12](https://github.com/strands-labs/robots-sim/issues/12) — `examples/libero/run_mujoco.py` + `examples/README.md`
-- **Stage 3 — Isaac Sim** (Phase 1 in `main`; full backend ships with v0.3.0)
-  - [x] R6 / [#13](https://github.com/strands-labs/robots-sim/issues/13) — entry-point backend registration ([#44](https://github.com/strands-labs/robots-sim/pull/44))
-  - [x] R7 (Phase 1) / [#14](https://github.com/strands-labs/robots-sim/issues/14) — `IsaacSimulation(SimEngine)` skeleton + lifecycle + procedural builders + loaders ([#45](https://github.com/strands-labs/robots-sim/pull/45) / [#46](https://github.com/strands-labs/robots-sim/pull/46) / [#47](https://github.com/strands-labs/robots-sim/pull/47) / [#51](https://github.com/strands-labs/robots-sim/pull/51))
-  - [ ] R7 (Phase 2) / [#14](https://github.com/strands-labs/robots-sim/issues/14) — data-plane wiring (`add_object` / `add_camera` / `replicate` / articulation construction)
-  - [ ] R8 / [#15](https://github.com/strands-labs/robots-sim/issues/15) — `examples/libero/run_isaac.py`
-  - [ ] R9 / [#16](https://github.com/strands-labs/robots-sim/issues/16) — `examples/isaac_replicator_synthdata.py`
-  - [ ] R10 / [#17](https://github.com/strands-labs/robots-sim/issues/17) — nightly GPU CI
-- **Stage 4 — Newton** (ships with v0.4.0)
-  - [ ] R11 / [#18](https://github.com/strands-labs/robots-sim/issues/18) — `NewtonSimulation(SimEngine)` backend
-  - [ ] R12 / [#19](https://github.com/strands-labs/robots-sim/issues/19) — Newton LIBERO examples
-  - [ ] R13 / [#20](https://github.com/strands-labs/robots-sim/issues/20) — `examples/newton_diffsim_toy.py`
-  - [ ] R14 / [#21](https://github.com/strands-labs/robots-sim/issues/21) — extend nightly GPU CI for Newton
-- **Stage 5 — Flagship** (ships with v0.5.0)
-  - [ ] R15 / [#22](https://github.com/strands-labs/robots-sim/issues/22) — `examples/libero_backend_matrix.py`
+## Simulation surface
 
-Migrating from the 0.1.x API: [`examples/MIGRATION.md`](examples/MIGRATION.md).
+`IsaacSimulation` exposes the same `SimEngine` shape MuJoCo does:
 
----
+```
+World & lifecycle    create_world / destroy / reset / step / get_state / cleanup
+Robots               add_robot (procedural | USD | URDF) / remove_robot / list_robots
+                     robot_joint_names / send_action / get_observation
+Objects              add_object (cuboid / sphere / cylinder / capsule, dynamic / static)
+                     remove_object
+Cameras & rendering  add_camera (look-at, FOV) / render (RGB + depth)
+Loaders              load_urdf / load_mjcf / load_usd  → ProceduralRobot dataclass
+```
+
+Full reference: [Simulation → World Building](https://strands-labs.github.io/robots-sim/simulation/world-building/).
+
+## Examples
+
+The repo ships runnable LIBERO drivers under `examples/libero/`:
+
+| File | Driver | Best for |
+|---|---|---|
+| `libero/run_isaac.py` | Programmatic — `evaluate_benchmark(...)` | CI / matrix tables |
+| `libero/run_isaac_agent.py` | Strands `Agent` + natural language | Demos |
+| `libero/libero_backend_matrix.py` | Flagship matrix runner — walks all backend rows ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) | Side-by-side backend comparison |
+
+Plus visually-driven demos:
+
+- [`examples/isaac_gs/`](examples/isaac_gs) — Isaac Sim + 3DGS hybrid-render digital twin
+- [`examples/so101_curobo/isaac/`](examples/so101_curobo) — SO-101 synth-data with cuRobo on Isaac
+
+```bash
+# Smoke test (mock policy, no GPU policy server):
+python examples/libero/run_isaac.py --policy mock --n-episodes 5
+
+# Real eval against an NVIDIA GR00T checkpoint:
+python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
+```
+
+Full driver matrix: [Examples → Overview](https://strands-labs.github.io/robots-sim/examples/overview/).
+
+## Project structure
+
+```
+strands_robots_sim/
+├── __init__.py                # PEP 562 lazy exports
+└── isaac/
+    ├── __init__.py            # IsaacConfig, IsaacSimulation lazy exports
+    ├── _install.py            # single source of truth for install metadata
+    ├── config.py              # IsaacConfig dataclass + validation
+    ├── simulation.py          # IsaacSimulation(SimEngine) — main backend
+    ├── procedural.py          # SO-100 / Panda / G1 builders + tree validator
+    ├── loaders.py             # URDF / MJCF / USD → ProceduralRobot
+    └── tests/                 # unit + GPU-integration tests
+docs/                          # MkDocs Material site (deployed to GitHub Pages)
+examples/
+├── libero/                    # LIBERO drivers (run_isaac.py + run_isaac_agent.py)
+├── isaac_gs/                  # Isaac Sim + 3DGS hybrid-render demo
+└── so101_curobo/              # SO-101 synth-data with cuRobo on Isaac
+```
+
+## Status
+
+- **v0.2.0** — re-scoped foundation (Isaac plugin shape, MuJoCo back upstream).
+- **v0.3.0** — Isaac Sim Phase 1 (entry-point registration, `IsaacConfig`,
+  `IsaacSimulation` lifecycle, procedural builders, URDF / MJCF / USD
+  loaders) shipped on `main`; data-plane wiring (`add_object`, `add_camera`,
+  `render`, USD- and URDF-loaded articulations) shipping incrementally.
+- **R9** — Replicator synth-data pipeline, tracked in [#16](https://github.com/strands-labs/robots-sim/issues/16).
+- **R23** — IsaacLab-style fleet driver, tracked in [#27](https://github.com/strands-labs/robots-sim/issues/27).
+
+Track the umbrella roadmap at [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
+Migration from the legacy 0.1.x API: [`examples/MIGRATION.md`](examples/MIGRATION.md).
+
+## Development
+
+```bash
+pip install -e '.[isaac,dev]'
+
+hatch run lint           # black --check + isort --check + flake8
+hatch run format         # black + isort
+hatch run test           # pytest strands_robots_sim/isaac/tests/
+
+# GPU integration tests (requires Isaac Sim on the host):
+STRANDS_GPU_TEST=1 pytest strands_robots_sim/isaac/tests/test_gpu_integ.py -v
+```
+
+Docs are MkDocs Material; build locally with:
+
+```bash
+pip install -r docs/requirements.txt
+mkdocs serve                 # live-reload at http://127.0.0.1:8000
+mkdocs build --strict        # CI's check
+```
+
+Python 3.10+ required (mirroring Isaac Sim 4.5's bundled interpreter).
+See [Contributing](https://strands-labs.github.io/robots-sim/contributing/) for the full guide.
+
+## Security
+
+Found a vulnerability? **Do not** open a public issue. Follow the
+disclosure process in [SECURITY.md](SECURITY.md) (AWS VDP / HackerOne).
 
 ## Contributing
 
-PRs welcome. `hatch run lint` (black / isort / flake8) and `hatch run test` (an import smoke until backend code lands) before submitting. Backend-specific tests will live under `tests/isaac/` (R7) and `tests/newton/` (R11). GPU CI is tracked separately in [#17](https://github.com/strands-labs/robots-sim/issues/17) (Isaac) and [#21](https://github.com/strands-labs/robots-sim/issues/21) (Newton).
+Issues and PRs welcome. Track work on the
+[Strands Labs - Robots project board](https://github.com/orgs/strands-labs/projects/2);
+it is the source of truth for roadmap and follow-ups.
+
+- [GitHub Issues](https://github.com/strands-labs/robots-sim/issues)
+- [Pull Requests](https://github.com/strands-labs/robots-sim/pulls)
 
 ## License
 
@@ -148,7 +289,12 @@ Apache-2.0 — see [`LICENSE`](LICENSE).
 
 ## Links
 
-- [`strands-labs/robots`](https://github.com/strands-labs/robots) — default MuJoCo backend, `Simulation` AgentTool, LIBERO adapter
-- [Strands Agents SDK](https://github.com/strands-agents/sdk-python)
-- [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) ([IsaacLab](https://isaac-sim.github.io/IsaacLab/))
-- [Newton](https://github.com/newton-physics/newton) (built on [NVIDIA Warp](https://github.com/NVIDIA/warp))
+<div align="center">
+  <a href="https://github.com/strands-labs/robots-sim">GitHub</a>
+  ◆ <a href="https://strands-labs.github.io/robots-sim/">Docs</a>
+  ◆ <a href="https://pypi.org/project/strands-robots-sim/">PyPI</a>
+  ◆ <a href="https://github.com/strands-labs/robots">strands-robots</a>
+  ◆ <a href="https://strands-labs.github.io/robots/">Robots Docs</a>
+  ◆ <a href="https://developer.nvidia.com/isaac-sim">NVIDIA Isaac Sim</a>
+  ◆ <a href="https://isaac-sim.github.io/IsaacLab/">IsaacLab</a>
+</div>
