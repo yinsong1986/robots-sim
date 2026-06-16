@@ -43,14 +43,6 @@ class TestEntryPointDeclaration:
             'under [project.entry-points."strands_robots.backends"] in pyproject.toml.'
         )
 
-    def test_isaac_sim_alias_entry_point_declared_in_pyproject(self):
-        """``isaac_sim`` alias is declared alongside ``isaac``."""
-        content = _PYPROJECT.read_text()
-        assert 'isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"' in content, (
-            "Expected `isaac_sim` alias entry point alongside `isaac` so users can write either "
-            '`create_simulation("isaac")` or `create_simulation("isaac_sim")`.'
-        )
-
     def test_isaac_extra_declared_in_pyproject(self):
         """``[project.optional-dependencies] isaac = [...]`` extra exists."""
         content = _PYPROJECT.read_text()
@@ -59,18 +51,17 @@ class TestEntryPointDeclaration:
             "the pip-installable subset of Isaac Sim's runtime deps (usd-core, warp-lang, pytest)."
         )
 
-    def test_isaac_extra_includes_pytest(self):
-        """``[isaac]`` ships pytest so ``pip install '.[isaac]'`` is enough to run the suite."""
+    def test_isaac_extra_includes_isaacsim_and_isaaclab(self):
+        """``[isaac]`` ships the pip-installable Isaac Sim companion deps."""
         content = _PYPROJECT.read_text()
         # crude but durable: locate the [isaac] block and check its body
         idx = content.find("\nisaac = [")
         assert idx != -1, "[isaac] extras block not found"
         block_end = content.find("]", idx)
         block = content[idx:block_end]
-        assert "pytest" in block, (
-            "[isaac] extras must include pytest so `pip install '.[isaac]'` covers the test deps "
-            "without requiring a separate dev extra on CI hosts."
-        )
+        assert "isaacsim==5.*" in block, "[isaac] extras must pin isaacsim==5.*"
+        assert "isaaclab" in block, "[isaac] extras must include isaaclab>=3.0,<4.0"
+        assert "usd-core" in block, "[isaac] extras must include usd-core"
 
     def test_entry_points_visible_via_importlib_metadata_when_installed(self):
         """If the package is pip-installed in this env, entry points are discoverable."""
@@ -90,14 +81,14 @@ class TestEntryPointDeclaration:
             )
 
         names = {ep.name for ep in backend_eps}
-        if "isaac" not in names and "isaac_sim" not in names:
+        if "isaac" not in names:
             pytest.skip(
                 "Package installed but entry-point cache is stale -- reinstall after "
                 "pyproject.toml change: `pip install -e . --force-reinstall --no-deps`."
             )
 
         for ep in backend_eps:
-            if ep.name in {"isaac", "isaac_sim"}:
+            if ep.name == "isaac":
                 assert ep.value == "strands_robots_sim.isaac.simulation:IsaacSimulation", (
                     f"Entry point {ep.name!r} resolves to {ep.value!r}; expected "
                     "'strands_robots_sim.isaac.simulation:IsaacSimulation'."

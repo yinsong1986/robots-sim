@@ -4,8 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-robots-sim"
+# Version is git-tag-driven via hatch-vcs (see [tool.hatch.version] below).
+# Stage 3 of the umbrella plan (#8) lands as v0.3.0 — that tag is cut
+# *after* this PR + R7 + the upstream U2 entry-point walker have all
+# merged; the working tree between tags reports 0.x.y.devN+g<sha>.
 dynamic = ["version"]
-description = "Heavy NVIDIA simulation backends (Isaac Sim, Newton) for strands-robots"
+description = "Heavy NVIDIA simulation backends (Isaac Sim, Newton) for strands-robots — registered as entry-point plugins."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
@@ -26,51 +30,88 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-# NOTE: heavy runtime deps (lerobot / torch / opencv-python-headless / pyzmq /
-# msgpack) were dropped in 0.2.0 — those are pulled in transitively via
-# `strands-robots` once the heavy backends land in R6+. The tiny default set
-# below is what the no-op stub itself uses.
+# strands-robots-sim is a *plugin* of strands-robots: the SimEngine ABC,
+# factory, model registry, LIBERO/MuJoCo backend, GR00T policy client, and
+# LeRobot recording adapter all live upstream. The only runtime dep this
+# package ships with is strands-robots itself (>=0.4.0 — the version that
+# walks `[project.entry-points."strands_robots.backends"]` to discover
+# pluggable backends like the Isaac/Newton ones registered below).
+#
+# Heavy / GPU-only backend dependencies (Isaac Sim, Newton/Warp) live behind
+# the `[isaac]` / `[newton]` / `[all]` extras; pip-install with no extras
+# keeps the runtime tiny and lets users layer the heavy bits on per-host.
 dependencies = [
-    "strands-agents",
-    "numpy>=1.21.0",
-    "Pillow>=8.0.0",
+    "strands-robots>=0.4.0",
 ]
 
 [project.optional-dependencies]
+# Isaac Sim is NOT installable from PyPI — it's an Omniverse Kit app.
+# Users install it separately via NVIDIA Omniverse Launcher, Isaac Lab,
+# or the nvcr.io/nvidia/isaac-sim docker image. The pins below are the
+# pip-installable companion deps an Isaac Sim runtime expects to find:
+#
+#   * `isaacsim==5.*`  — the PyPI shim that exposes Kit's Python API on
+#     hosts where Isaac Sim 5.x is installed alongside.
+#   * `isaaclab>=3.0,<4.0` — Isaac Lab's task / ROS / RL utilities.
+#   * `usd-core` — pure-Python USD runtime; used by the procedural scene
+#     builders even when Kit isn't booted.
+#
+# `pip install -e '.[isaac]'` on a non-GPU host will fail at the isaacsim
+# wheel resolution step with NVIDIA's standard "Isaac Sim not detected"
+# message; that's the helpful failure mode the issue's DoD calls for.
+isaac = [
+    "isaacsim==5.*",
+    "isaaclab>=3.0,<4.0",
+    "usd-core",
+]
+# Newton / Warp backend deps. Scaffolded here so the entry point declared
+# below resolves to an installable target; the implementation lands in R11.
+newton = [
+    "warp-lang>=1.12",
+    "newton-physics>=1.0",
+]
+# GPU boxes only — both backends in one shot.
+all = [
+    "strands-robots-sim[isaac]",
+    "strands-robots-sim[newton]",
+]
+# Dev extras. ruff + mypy + pytest-cov are the issue's target tooling;
+# black / isort / flake8 are kept transitionally so `hatch run lint`
+# (which still drives them) keeps passing — the formatter migration is a
+# follow-up to keep this PR focused on the entry-point plumbing.
 dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
     "black",
     "isort",
     "flake8",
-    "pytest>=7.0",
-]
-# Isaac Sim is NOT installable from PyPI -- it's an Omniverse Kit app.
-# The user must install it separately:
-#   - via NVIDIA Omniverse Launcher (Isaac Sim 2024.x), OR
-#   - via Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i, OR
-#   - via Docker: nvcr.io/nvidia/isaac-sim:4.5.0
-# We declare lightweight deps that Isaac ships and that ARE pip-installable:
-isaac = [
-    "usd-core>=24.5,<26.0",
-    "warp-lang>=1.13.0",
-    "pytest>=7.0",
-]
-# NOTE: the lightweight `sim` extra (libero / robosuite / mujoco / gymnasium)
-# was removed in 0.2.0 — that backend now lives in `strands-robots` and is
-# installed via `pip install 'strands-robots[sim-mujoco]'`. Heavy GPU-only
-# backends (Isaac Sim, Newton) will land here behind `[isaac]` / `[newton]`
-# extras in upcoming releases. See examples/MIGRATION.md and
-# https://github.com/strands-labs/robots-sim/issues/8.
-all = [
-    "strands-robots-sim[isaac]",
 ]
 
+# Backend entry points -- the heart of this PR.
+#
+# strands-robots>=0.4.0 walks `entry_points(group="strands_robots.backends")`
+# from its factory and registers every (name -> "module:Class") pair it
+# finds. The three entries below mean:
+#
+#   create_simulation("isaac")  -> IsaacSimulation (R7 implementation)
+#   create_simulation("newton") -> NewtonSimulation (R11 implementation)
+#   create_simulation("warp")   -> NewtonSimulation (alias; Warp is the
+#                                  underlying physics engine for Newton)
+#
+# No monkey-patching of the upstream `_BUILTIN_BACKENDS` dict; no import
+# side effects in `strands_robots_sim/__init__.py`. Discovery is purely
+# packaging metadata, which means `pip install strands-robots-sim` is the
+# *only* step needed for `create_simulation("isaac")` to start resolving
+# to our class — same UX as any setuptools-style plugin.
 [project.entry-points."strands_robots.backends"]
 isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
-isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"
+newton = "strands_robots_sim.newton.simulation:NewtonSimulation"
+warp = "strands_robots_sim.newton.simulation:NewtonSimulation"
 
 [project.urls]
 Homepage = "https://github.com/strands-labs/robots-sim"
-Documentation = "https://github.com/strands-labs/robots-sim#readme"
 Repository = "https://github.com/strands-labs/robots-sim.git"
 Issues = "https://github.com/strands-labs/robots-sim/issues"
 
@@ -83,20 +124,29 @@ source = "vcs"
 packages = ["strands_robots_sim"]
 
 [tool.hatch.envs.default]
+# `skip-install = true` keeps hatch from re-installing the project (and
+# its `strands-robots>=0.4.0` dep) into a fresh venv on every `hatch run`
+# invocation -- the >=0.4.0 pin can't resolve from PyPI until upstream U2
+# (entry-point walker) ships and the strands-labs/robots repo cuts a
+# matching release. Until then, contributors should `pip install -e .`
+# from a system Python that already has `strands-robots` installed from
+# a local checkout. The deps below are purely the lint + test toolchain
+# we want hatch to manage in its venv.
+skip-install = true
 dependencies = [
     "black",
     "isort",
     "flake8",
     "pytest>=7.0",
+    "numpy>=1.21.0",
 ]
 
 [tool.hatch.envs.default.scripts]
 # `hatch run test` runs the Isaac PR-1 entry-point + lazy-import test
-# slice (10 tests; pyproject parsing + importlib.metadata discovery +
-# PEP 562 lazy `__getattr__` contract). PR-4 of the #31 split adds the
-# simulation-module tests under the same directory; the glob picks
-# them up automatically.
-test = "pytest strands_robots_sim/isaac/tests/ -v"
+# slice (and the simulation-module tests added under the same directory
+# in PR-4 of the #31 split, plus this PR's `newton/tests/` slice). The
+# glob picks up both backend test directories automatically.
+test = "pytest strands_robots_sim/isaac/tests/ strands_robots_sim/newton/tests/ -v"
 # Lint extends to `examples/` so the runnable example files (which copy-
 # paste into PR docstrings + the README matrix) catch the same drift the
 # package source does. Keeps each new R8/R12/R23 backend example honest.
