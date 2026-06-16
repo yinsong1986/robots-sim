@@ -1,0 +1,30 @@
+/* Strands Robots Sim — house style overrides for MkDocs Material. */
+
+:root {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #ffffff;
+  --md-primary-fg-color--dark: #000000;
+  --md-accent-fg-color: #2ea44f;
+}
+
+[data-md-color-scheme="default"] .md-header,
+[data-md-color-scheme="default"] .md-tabs {
+  color: #111;
+  border-bottom: 1px solid #e1e4e8;
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #0d1117;
+}
+
+/* Tighten table padding for the dense backend / config matrices. */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.5em 0.75em;
+}
+
+/* Mermaid diagrams: keep light-on-dark legible. */
+.mermaid svg {
+  background: transparent !important;
+}
