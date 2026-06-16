@@ -177,7 +177,7 @@ def build_pick_place_scene(
     place_position: Optional[List[float]] = None,
     robot_candidates: Optional[List[str]] = None,
     add_bin: bool = True,
-    camera_size: tuple[int, int] = (320, 240),
+    camera_size: tuple[int, int] = (640, 480),
     backend: str = "mujoco",
     robot_urdf: Optional[str] = None,
 ) -> SceneInfo:

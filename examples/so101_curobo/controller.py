@@ -77,8 +77,10 @@ class SO101CuroboDemo:
         repo_id: str = "local/so101_curobo_pickplace",
         root: Optional[str] = None,
         prefer_planner: str = "auto",
-        fps: int = 20,
-        camera_size: tuple = (320, 240),
+        # 40 fps = 1 / cuRobo interpolation_dt (0.025 s) -> the recorded video plays
+        # the trajectory at real time (~15 s); 20 fps made it play at half speed.
+        fps: int = 40,
+        camera_size: tuple = (640, 480),
         record_images: bool = True,
         planner_kwargs: Optional[dict] = None,
     ):

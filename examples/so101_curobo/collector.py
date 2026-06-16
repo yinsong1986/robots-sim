@@ -93,7 +93,7 @@ class LeRobotDataCollector:
         sim,
         scene_info,
         repo_id: str = "local/so101_curobo_pickplace",
-        fps: int = 20,
+        fps: int = 40,
         root: Optional[str] = None,
         cameras: Optional[Sequence[str]] = None,
         place_radius: float = 0.10,
@@ -397,17 +397,15 @@ class LeRobotDataCollector:
                 if closed:
                     has_closed = True
                 # Form the kinematic grasp the instant the jaws close while the
-                # tool frame is within reach of the cube. Capture the cube's pose
-                # in the tool frame's *local* coords IN PLACE -- the gripper now
-                # descends vertically ONTO the cube, so it is already between the
-                # fingers; we then carry it rigidly in the tool frame
-                # (``world = origin + R @ local``) so it stays exactly where it was
-                # gripped through lift/carry/place. (Earlier code eased the cube
-                # toward a "mouth" offset over the close phase; with the top-down
-                # grasp that ease makes the cube visibly JUMP into the gripper, so
-                # it is gone -- ``attach_offset`` is now just an optional fixed
-                # tool-frame nudge, default zero.) The static cube is untouched
-                # until the jaws close (no approach yank).
+                # tool frame is within reach of the cube. Center the cube on the
+                # jaw CENTERLINE: gripper_frame_link's x=y=0 axis runs between the
+                # two jaws, so zero the cube's lateral offset and keep only its
+                # depth along the finger axis (+ optional ``attach_offset`` nudge).
+                # This seats the cube BETWEEN the jaws instead of hugging one of
+                # them -- the 5-DOF top-down solve lands the tool frame ~2 cm off
+                # the cube, so capturing fully in place left the cube at one jaw's
+                # edge. Carried rigidly in the tool frame thereafter; the static
+                # cube is untouched until the jaws close (no approach yank).
                 if not attached and closed and phase in grasp_phases:
                     pose = self._gripper_frame_pose()
                     cp = _object_position(self.sim, self.scene.cube_name)
@@ -416,7 +414,11 @@ class LeRobotDataCollector:
                         d = math.dist(gp, cp)
                         if d < self.attach_radius:
                             local = self._frame_to_local(rot, gp, cp)
-                            rest_local = [local[i] + self.attach_offset[i] for i in range(3)]
+                            rest_local = [
+                                self.attach_offset[0],
+                                self.attach_offset[1],
+                                local[2] + self.attach_offset[2],
+                            ]
                             grasp_local = list(rest_local)
                             attached = True
                             # Stop the now-grasped cube from colliding with the
