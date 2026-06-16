@@ -213,6 +213,25 @@ python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 > end-to-end today but reports `success_rate=0.0` until the
 > procedural-articulation + Isaac-recorder slices land.
 
+## Unique-capability demos
+
+Not every example is a LIBERO benchmark. The files under
+[`isaac/`](isaac/) demonstrate capabilities that are **specific to the
+Isaac Sim backend** -- things MuJoCo and Newton can't replicate because
+they don't ship the Omniverse / USD / RTX stack underneath. These
+examples sit outside the `<benchmark>/run_<backend>.py` matrix
+convention because they're showing what each backend is *for* at a
+higher level than per-task evaluation.
+
+| Example | Capability | Why Isaac-only | Tracking |
+|---|---|---|---|
+| [`isaac/isaac_replicator_synthdata.py`](isaac/isaac_replicator_synthdata.py) | NVIDIA Replicator domain-randomized synthetic-dataset generation (RGB + depth + semantic segmentation, randomized lighting / materials / camera poses) | The full Omniverse / USD stack unlocks `omni.replicator.core`. MuJoCo's renderer is rasterization-only and has no equivalent SDG / labelling pipeline. | [#16](https://github.com/strands-labs/robots-sim/issues/16) (this example) ; [#15 / R7.4](https://github.com/strands-labs/robots-sim/issues/15) (Replicator backend wiring) |
+
+Each file under `isaac/` short-circuits with a structured diagnostic on
+hosts without Isaac Sim (`IsaacSimulation.is_available()` check) so it's
+safe to invoke in CI / dev-box smoke runs without crashing on the first
+`omni.*` import.
+
 ## Migration from the legacy 0.1.x API
 
 `strands-robots-sim` 0.1.x shipped `SimEnv` / `SteppedSimEnv` plus a
