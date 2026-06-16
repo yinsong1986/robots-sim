@@ -95,7 +95,7 @@ state = sim.get_state()                         # batched [4096, ...] tensors
 
 Same task — `libero-spatial-pick_up_the_red_cube` (Panda picks a red cube from a tabletop and places it in a target zone), 50 episodes, seed 42 — run on every available backend with success rate and wall-time recorded side-by-side. Numbers are committed as each example lands, measured on a reference machine (recorded in each example file's header).
 
-The flagship driver `examples/libero_backend_matrix.py` ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) walks all five rows and prints a unified table; each row also has a stand-alone example you can run in isolation.
+The flagship driver [`examples/libero/libero_backend_matrix.py`](examples/libero/libero_backend_matrix.py) ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) walks all five rows and prints a unified table; each row also has a stand-alone example you can run in isolation. See [`examples/README.md` → "Running the matrix"](examples/README.md#running-the-matrix) for install combinations and the table format.
 
 | Backend | `n_envs` | Renderer | Why use this row | Wall-time | Example | Issue |
 |---|---:|---|---|---|---|---|

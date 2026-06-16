@@ -99,8 +99,10 @@ docker wrapper is available at
 The example file works WITHOUT this wrapper; it's only needed when
 bit-exact run-to-run reproducibility matters.
 
-The flagship driver `libero_backend_matrix.py` (R15) walks all five
-rows and prints a unified table.
+The flagship driver
+[`libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
+(R15) walks all five rows and prints a unified table — see
+[Running the matrix](#running-the-matrix) below.
 
 [^1]: Single-sample on the L4 reference dev box (`libero-10/SCENE5`,
     seed=42, n=5). Pre-#188 success rate was 0.20–0.60 across re-runs;
@@ -212,6 +214,87 @@ python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 > URDF-load). `run_isaac_agent.py` is **draft scaffolding**: it runs
 > end-to-end today but reports `success_rate=0.0` until the
 > procedural-articulation + Isaac-recorder slices land.
+
+## Running the matrix
+
+[`libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
+is the flagship: one script, one LIBERO task, every per-backend driver
+file that this checkout can actually execute, side-by-side. Missing
+backends produce `unavailable` rows; backends whose `is_available()`
+short-circuits fire produce `skip (...)` rows with the truncated
+reason. Backends that succeed produce an `ok` row with measured
+`success_rate` and `wall_time`. The script never imports backend
+modules itself — it subprocesses each `run_<backend>.py` and parses
+the two grep-stable lines documented above, so a missing backend
+never crashes the matrix.
+
+```bash
+# 1) Whatever's installed -- mock policy by default, no GR00T
+#    container needed:
+python examples/libero/libero_backend_matrix.py
+
+# 2) Limit which backend rows are attempted (faster smoke runs):
+python examples/libero/libero_backend_matrix.py --backends mujoco
+
+# 3) Real eval against the matching `libero_<suite>/` GR00T
+#    sub-checkpoint (each driver auto-orchestrates its own GR00T
+#    container; see the per-backend section above for setup):
+python examples/libero/libero_backend_matrix.py --policy groot
+
+# 4) Different LIBERO task (forwarded to every per-backend driver):
+python examples/libero/libero_backend_matrix.py \
+    --task libero-10-LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_…
+```
+
+### Install combinations
+
+The matrix script's row availability follows from which extras are
+installed, since each `run_<backend>.py` only succeeds when its
+backend can import:
+
+```bash
+# MuJoCo only (mujoco row → ok; isaac/newton rows → skip):
+pip install 'strands-robots[sim-mujoco,benchmark-libero]'
+
+# + Isaac Sim single-env + fleet (isaac-1 / isaac-4096 → ok, gated
+#   on R8 / #15 + R23 / #27 wiring):
+pip install 'strands-robots-sim[isaac]' \
+    'strands-robots[benchmark-libero]'
+
+# + Newton / Warp (newton-1 / newton-4096 → ok, gated on R12 / #19):
+pip install 'strands-robots-sim[newton]' \
+    'strands-robots[benchmark-libero]'
+```
+
+A row that reads `unavailable (no run_<backend>.py)` means the
+per-backend driver file hasn't landed in this checkout yet — the
+matrix script is forward-compatible with rows that don't exist on
+disk yet, so it keeps working as the staged plan tracked in
+[#8](https://github.com/strands-labs/robots-sim/issues/8) lands
+each backend in turn.
+
+### Output format
+
+The table is bracketed by stable markers so a downstream CI job can
+locate it in a longer log:
+
+```
+=== libero_backend_matrix ===
+Task: libero-spatial-pick_up_the_red_cube  (10 episodes, seed=42)
+backend       success_rate   wall_time  status
+----------------------------------------------------------------
+mujoco                1.00       86.4s  ok
+isaac-1                 --          --  skip (Isaac Sim is not available on this host: …)
+isaac-4096              --          --  unavailable (no run_isaac_fleet.py)
+newton-1                --          --  unavailable (no run_newton.py)
+newton-4096             --          --  unavailable (no run_newton_fleet.py)
+=== /libero_backend_matrix ===
+```
+
+Pass `--backends mujoco,isaac-1` to attempt only a subset, and
+`--per-backend-timeout 1200` to allow longer-running drivers (the
+default 600 s is generous for 10-episode mock smoke; full
+`--policy=groot` runs at 50 episodes can need more).
 
 ## Migration from the legacy 0.1.x API
 
