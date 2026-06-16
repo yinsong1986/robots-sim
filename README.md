@@ -195,6 +195,7 @@ The repo ships runnable LIBERO drivers under `examples/libero/`:
 |---|---|---|
 | `libero/run_isaac.py` | Programmatic — `evaluate_benchmark(...)` | CI / matrix tables |
 | `libero/run_isaac_agent.py` | Strands `Agent` + natural language | Demos |
+| `libero/libero_backend_matrix.py` | Flagship matrix runner — walks all backend rows ([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) | Side-by-side backend comparison |
 
 Plus visually-driven demos:
 
