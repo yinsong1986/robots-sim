@@ -34,20 +34,23 @@ Dependency status (as of 2026-06)
 The real-asset robot load rides on the USD- / URDF-loaded
 ``add_robot`` paths:
 
-* `PR #63 <https://github.com/strands-labs/robots-sim/pull/63>`_ --
+* `PR #63 <https://github.com/strands-labs/robots-sim/pull/63>`_ /
+  `PR #70 <https://github.com/strands-labs/robots-sim/pull/70>`_ --
   ``add_robot(usd_path=...)`` Articulation construction (the default
-  path this script uses).
-* `PR #64 <https://github.com/strands-labs/robots-sim/pull/64>`_ --
-  ``add_robot(urdf_path=...)`` for the ``--robot-urdf`` override.
+  path this script uses). **Merged.**
+* `PR #64 <https://github.com/strands-labs/robots-sim/pull/64>`_ /
+  `PR #70 <https://github.com/strands-labs/robots-sim/pull/70>`_ --
+  ``add_robot(urdf_path=...)`` for the ``--robot-urdf`` override. The
+  URDF importer module path differs across releases; the backend
+  tries the modern ``isaacsim.asset.importer.urdf`` first and falls
+  back to the legacy ``omni.importer.urdf`` for pre-4.5 builds.
 
-Until those merge, the robot load no-ops on a stock ``main`` build.
-The camera / video path additionally rides on:
+The camera / video path rides on:
 
 * `PR #61 (add_camera Phase 2) <https://github.com/strands-labs/robots-sim/pull/61>`_
   + `PR #62 (render frame-path) <https://github.com/strands-labs/robots-sim/pull/62>`_
-  -- without them ``render`` returns blank frames, so ``--policy=groot``'s
-  ``video.image`` observation is empty. ``--policy=mock`` doesn't read
-  images and tolerates their absence.
+  -- both merged. ``--policy=mock`` works fully (doesn't read images);
+  ``--policy=groot`` will read from the camera handle.
 
 Tracks `#15 <https://github.com/strands-labs/robots-sim/issues/15>`_
 (R8 — example file). Filename is ``run_isaac.py`` rather than the
@@ -74,20 +77,25 @@ Usage
 Requires
 --------
 ``pip install 'strands-robots-sim[isaac]' 'strands-robots[benchmark-libero]'``
-plus a working Isaac Sim 5.x install on the host (RTX GPU, Ubuntu
+plus a working Isaac Sim 4.5+ install on the host (RTX GPU, Ubuntu
 22.04+, CUDA 12+). On a non-Isaac host the script exits early with a
 diagnostic from :meth:`IsaacSimulation.is_available` rather than
-crashing on the first ``omni.*`` import.
+crashing on the first ``omni.*`` / ``isaacsim.*`` import.
 
-Verification status
--------------------
-Not yet run end-to-end against a real Isaac Sim install -- needs the
-nightly GPU runner from
-`#17 <https://github.com/strands-labs/robots-sim/issues/17>`_ /
-`PR #59 <https://github.com/strands-labs/robots-sim/pull/59>`_
-provisioned. CLI / control-flow / lint validation pass against the
-current main on a CPU-only dev box (Isaac is *not* importable; the
-``is_available()`` short-circuit in :func:`main` exits cleanly).
+Verification status (as of 2026-06)
+-----------------------------------
+Validated end-to-end on the canonical Isaac Sim 4.5 NGC docker image
+(``nvcr.io/nvidia/isaac-sim:4.5.0``, RTX/L4 GPU, headless): the
+script runs past ``IsaacSimulation.is_available`` → ``create_world``
+→ ``add_robot`` (real Franka USD over the Omniverse CDN) →
+``add_camera`` → physics ``step``. ``--policy=mock --n-episodes=5``
+exercises the full lifecycle except for ``evaluate_benchmark``, which
+additionally depends on the LIBERO benchmark suite being importable
+inside Isaac's bundled Python (``strands-robots`` interpreter
+constraint -- see `#71 <https://github.com/strands-labs/robots-sim/issues/71>`_).
+On a non-Isaac host (no GPU, no Omniverse) ``is_available()`` still
+short-circuits cleanly with the install-hint reason string, so this
+file remains safe to import / lint on CPU-only CI runners.
 """
 
 from __future__ import annotations
@@ -344,13 +352,23 @@ def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | N
 
     ``get_assets_root_path`` is imported lazily (only resolvable after
     ``create_world`` has booted ``SimulationApp``), so this is called
-    *after* ``sim.create_world()`` in :func:`main`.
+    *after* ``sim.create_world()`` in :func:`main`. Tries the modern
+    ``isaacsim.storage.native`` namespace first (Isaac Sim 4.5+ supported
+    path) and falls back to the legacy ``omni.isaac.nucleus`` shim --
+    matches the dual-path policy in ``strands_robots_sim/isaac/simulation.py``.
     """
     if args.robot_urdf is not None:
         return None, args.robot_urdf
     if args.robot_usd is not None:
         return args.robot_usd, None
-    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+    try:
+        from isaacsim.storage.native import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
+    except ImportError:
+        from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
 
     assets_root = get_assets_root_path()
     if not assets_root:
@@ -369,18 +387,18 @@ def main() -> None:
     suite = _suite_for_task(args.task)
 
     # Fail-fast on hosts without Isaac Sim. The is_available probe is
-    # cheap (it only does importlib.util.find_spec on omni.isaac.kit;
-    # zero omni.* modules land in sys.modules) so we run it before
-    # touching the GR00T container or any benchmark side effects --
-    # a misconfigured host should exit with a structured error
-    # before a docker pull starts.
+    # cheap (it only does importlib.util.find_spec on omni.isaac.kit /
+    # isaacsim; zero omni.* / isaacsim.* modules land in sys.modules)
+    # so we run it before touching the GR00T container or any benchmark
+    # side effects -- a misconfigured host should exit with a structured
+    # error before a docker pull starts.
     available, reason = IsaacSimulation.is_available()
     if not available:
         raise RuntimeError(
             f"Isaac Sim is not available on this host: {reason}. "
-            "Install Isaac Sim 5.x via the Omniverse Launcher / Isaac Lab / NGC "
-            "Docker image and ensure `omni.isaac.kit` is importable in this "
-            "Python environment."
+            "Install Isaac Sim 4.5+ via the Omniverse Launcher / Isaac Lab / NGC "
+            "Docker image and ensure `omni.isaac.kit` (legacy) or `isaacsim` "
+            "(4.5+ supported) is importable in this Python environment."
         )
 
     # Bring up GR00T container (idempotent; no-op for --policy=mock).

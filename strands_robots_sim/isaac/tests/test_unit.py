@@ -240,6 +240,55 @@ class TestIsaacSimulationAvailability:
         assert reason is not None
         assert "omni.isaac.kit" in reason
 
+    def test_is_available_accepts_modern_isaacsim_namespace(self, monkeypatch):
+        """is_available() must accept the modern ``isaacsim`` namespace.
+
+        Pin for `#73 <https://github.com/strands-labs/robots-sim/issues/73>`_:
+        Isaac Sim 4.5+ ships ``isaacsim.SimulationApp`` as the supported
+        entry point, with ``omni.isaac.kit`` retained as a deprecated
+        shim. Some pip-only ``isaacsim`` installs ship ONLY the modern
+        namespace -- no ``omni.isaac.kit`` until ``import isaacsim``
+        bootstraps the Kit kernel. Probing only the legacy path
+        therefore returns False on a perfectly working modern install.
+        ``is_available()`` must accept either as evidence Isaac Sim is
+        usable.
+        """
+        import importlib.util
+
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        captured: list[str] = []
+        real_find_spec = importlib.util.find_spec
+
+        def fake_find_spec(name, *args, **kwargs):
+            captured.append(name)
+            if name == "omni.isaac.kit":
+                return None  # legacy not present
+            if name == "isaacsim":
+                # Return a non-None ModuleSpec sentinel; is_available
+                # only checks for None vs not-None.
+                return importlib.util.spec_from_loader("isaacsim", loader=None)
+            return real_find_spec(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+        available, reason = IsaacSimulation.is_available()
+
+        assert "omni.isaac.kit" in captured
+        assert "isaacsim" in captured, (
+            "is_available() must also call find_spec('isaacsim') so a "
+            "pip-only ``isaacsim`` install (no legacy shim) is recognised; "
+            f"got find_spec calls: {captured!r}"
+        )
+        # Exact return depends on whether torch is importable on the test
+        # host; we only assert that the omni-not-importable branch does
+        # NOT short-circuit to False when isaacsim is present.
+        if not available:
+            assert reason is not None
+            assert "omni.isaac.kit" not in reason or "isaacsim" in reason, (
+                "When isaacsim is present (modern namespace), the is_available "
+                "False branch must not blame the legacy ``omni.isaac.kit`` alone."
+            )
+
 
 class TestIsaacSimulationContract:
     """Tests for IsaacSimulation method contracts (mocked)."""

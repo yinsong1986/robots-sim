@@ -10,14 +10,29 @@ because ``MuJoCoSimEngine`` inherits from ``AgentTool`` and exposes
 its 64-action enum, this Isaac file wraps :meth:`IsaacSimulation.evaluate_benchmark`
 in a single ``@tool``-decorated function and passes that to the agent.
 
-This file is **draft / scaffolding** as of 2026-06: the same Phase-2
-gates that hold ``run_isaac.py`` non-functional (`#61 <https://github.com/strands-labs/robots-sim/pull/61>`_
-add_camera + the procedural-articulation slice on `#14 <https://github.com/strands-labs/robots-sim/issues/14>`_)
-also hold this file -- the agent will run end-to-end on a real Isaac
-Sim install today and produce ``success_rate=0.0`` because the
-procedural Panda's joint positions are unreadable. The CLI / agent
-prompt / output shape are fixed now so a matrix-driver wrapper can
-target both backends interchangeably.
+Status (as of 2026-06)
+----------------------
+Validated end-to-end on the canonical Isaac Sim 4.5 NGC docker image
+(``nvcr.io/nvidia/isaac-sim:4.5.0``, RTX/L4 GPU, headless): the script
+runs past ``IsaacSimulation.is_available`` → ``create_world`` →
+``add_robot`` (real Franka USD over the Omniverse CDN) → ``add_camera``,
+and the agent invokes ``evaluate_isaac_benchmark`` on a one-tool
+surface. ``evaluate_benchmark`` additionally depends on the LIBERO
+benchmark suite being importable inside Isaac's bundled Python
+(``strands-robots`` interpreter constraint -- see
+`#71 <https://github.com/strands-labs/robots-sim/issues/71>`_); on a
+host without that wired up, the agent's tool call surfaces the
+``ImportError`` in its summary rather than crashing the process.
+
+The earlier ``--policy=groot`` ``success_rate=0.0`` warning predates
+PRs `#61 <https://github.com/strands-labs/robots-sim/pull/61>`_ /
+`#70 <https://github.com/strands-labs/robots-sim/pull/70>`_ landing the
+camera + Articulation Phase-2 wiring; with both merged on ``main``,
+the procedural / real-asset robot load + camera frames are now wired
+correctly. End-to-end ``--policy=groot`` numbers still need a host
+that satisfies all of: Isaac Sim 4.5+, libero (BDDL files),
+``strands-robots`` under Isaac's Python (#71), and a GR00T inference
+container.
 
 Why a single-tool wrapper instead of full enum
 -----------------------------------------------
@@ -55,10 +70,10 @@ decision (invoking ``evaluate_isaac_benchmark`` with kwargs filled
 from prompt context); the script owns:
 
 * ``is_available()`` short-circuit on a non-Isaac host -- the cheap
-  ``importlib.util.find_spec("omni.isaac.kit")`` probe runs before
-  the GR00T container side effects so a misconfigured matrix run
-  exits with a structured ``RuntimeError`` rather than wasting 30 s
-  on a docker pull.
+  ``importlib.util.find_spec("omni.isaac.kit") | find_spec("isaacsim")``
+  probe runs before the GR00T container side effects so a misconfigured
+  matrix run exits with a structured ``RuntimeError`` rather than wasting
+  30 s on a docker pull.
 * GR00T inference container lifecycle (start, wait-for-load, teardown
   on exit) via ``gr00t_inference(action='lifecycle', ...)`` -- same
   block as ``run_mujoco_agent.py``, container name defaulted to
@@ -90,7 +105,7 @@ Usage
     #    orchestrates the GR00T inference container (idempotent). Pre-
     #    condition: HF token at `~/.cache/huggingface/token` (gated
     #    Cosmos-Reason2-2B backbone) + Docker + an NVIDIA GPU + Isaac
-    #    Sim 5.x installed.
+    #    Sim 4.5+ installed.
     python examples/libero/run_isaac_agent.py --policy groot --port 8000 --n-episodes 5
 
 Requires
@@ -100,7 +115,7 @@ Requires
   via AWS Bedrock -- see https://strandsagents.com/ for setup. Without
   one the ``Agent(...)`` call below raises an authentication /
   configuration error pointing at the SDK setup docs.
-- Isaac Sim 5.x installed via Omniverse Launcher / Isaac Lab / NGC
+- Isaac Sim 4.5+ installed via Omniverse Launcher / Isaac Lab / NGC
   Docker image. Pure-Python ``pip install`` doesn't suffice.
 - For ``--policy=groot``: Docker + an NVIDIA GPU + ~30 GB free disk
   for the GR00T checkpoint (cached across re-runs).
@@ -384,13 +399,23 @@ def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | N
     (``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``). Loads a
     *real* robot rather than the procedural stick-figure (see
     ``run_isaac.py`` for the rationale). ``get_assets_root_path`` is
-    imported lazily (only resolvable after ``create_world``).
+    imported lazily (only resolvable after ``create_world``) and tries
+    the modern ``isaacsim.storage.native`` namespace first, falling back
+    to the legacy ``omni.isaac.nucleus`` shim -- matches the dual-path
+    policy in ``strands_robots_sim/isaac/simulation.py``.
     """
     if args.robot_urdf is not None:
         return None, args.robot_urdf
     if args.robot_usd is not None:
         return args.robot_usd, None
-    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+    try:
+        from isaacsim.storage.native import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
+    except ImportError:
+        from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
 
     assets_root = get_assets_root_path()
     if not assets_root:
@@ -417,9 +442,9 @@ def main() -> None:
     if not available:
         raise RuntimeError(
             f"Isaac Sim is not available on this host: {reason}. "
-            "Install Isaac Sim 5.x via the Omniverse Launcher / Isaac Lab / NGC "
-            "Docker image and ensure `omni.isaac.kit` is importable in this "
-            "Python environment."
+            "Install Isaac Sim 4.5+ via the Omniverse Launcher / Isaac Lab / NGC "
+            "Docker image and ensure `omni.isaac.kit` (legacy) or `isaacsim` "
+            "(4.5+ supported) is importable in this Python environment."
         )
 
     # Build the policy-config phrase the agent will paste into its
