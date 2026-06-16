@@ -1,6 +1,19 @@
 # Isaac Sim Backend
 
-GPU-native photorealistic simulation backend for `strands-robots-sim` using NVIDIA Isaac Sim.
+GPU-native photorealistic simulation backend for `strands-robots-sim` using
+NVIDIA Isaac Sim. This page is the **backend reference** — class layout,
+phase-1 / phase-2 status, configuration matrix, procedural builders,
+loaders, and tests.
+
+For introductory material, prefer:
+
+- [Getting Started → Installation](../getting-started/installation.md) —
+  Isaac Sim install + `pip install 'strands-robots-sim[isaac]'`.
+- [Getting Started → Quickstart](../getting-started/quickstart.md) — first
+  RTX render in a fresh world.
+- [Architecture](../architecture.md) — the entry-point plugin contract.
+- [Simulation → World Building](../simulation/world-building.md) — the
+  `add_robot` / `add_object` / `add_camera` reference.
 
 ## Overview
 
@@ -186,19 +199,22 @@ The hardcoded `_build_*` functions in `procedural.py` remain as a zero-dep, test
 
 The loader module is verified against the seven robosuite-bundled MJCFs that the `strands-robots` LIBERO adapter consumes (`panda` / `iiwa` / `kinova3` / `jaco` / `sawyer` / `ur5e` / `baxter`); the parity tests live in `strands_robots_sim/isaac/tests/test_loaders.py::TestRobosuiteMjcfParity`.
 
-## Comparison with Newton Backend
+## Comparison with the upstream MuJoCo backend
 
-| Feature | Newton (Warp) | Isaac Sim |
+| Feature | MuJoCo (`strands-robots`) | Isaac Sim (this repo) |
 |---------|:---:|:---:|
-| Physics parallelism | 4096+ envs | 1024 envs |
-| Rendering | OpenGL/null | RTX photorealistic |
-| USD native | Partial | Full |
+| Physics parallelism | 1-8 envs | 1024+ envs |
+| Apple Silicon | Yes | No (CUDA only) |
+| Rendering | Software / GL | RTX photorealistic |
+| USD native | No | Full |
 | Sensors (camera, LiDAR) | Basic | RTX GPU-batched |
 | Synthetic data gen | No | Replicator |
-| Soft body/cloth | Yes (VBD) | Yes (PhysX) |
-| Differentiable sim | Yes (Warp tape) | No |
-| Install size | ~500MB | ~30GB |
-| Use case | Fast RL training | Photorealistic sim2real |
+| Install size | ~50 MB | ~30 GB |
+| Setup friction | Low | High |
+| Use case | Fast iteration / CI / macOS | Photoreal sim2real / fleet RL |
+
+For the cross-backend story (when to pick which) see
+[Simulation → Overview](../simulation/overview.md).
 
 ## Architecture
 

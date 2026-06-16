@@ -14,3 +14,6 @@ Isaac-GR00T/
 *.pptx
 scan-report.json
 .coverage
+
+# MkDocs build output
+site/
