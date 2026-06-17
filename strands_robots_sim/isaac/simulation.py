@@ -25,11 +25,42 @@ Environment variables:
 from __future__ import annotations
 
 import logging
+import os
+import queue
 import threading
 import time
 from typing import Any, TypedDict
 
 import numpy as np
+
+# Minimum NATIVE render width for RTX cameras. Isaac's RTX pipeline runs
+# the DLSS temporal upscaler, which renders internally at ~half the output
+# width and upscales. Below ~300 px internal resolution DLSS falls back
+# to a temporal-accumulation path that smears a moving arm into a
+# translucent "ghost" (long-standing front/oblique-view bug seen during
+# the SO-101 cuRobo example's GPU validation -- see issue #69 / PR #68).
+# Rendering at >= 640 px wide keeps the DLSS internal resolution above
+# that threshold so every frame is crisp on its own; captured frames
+# are downscaled to the caller's requested size before return.
+_MIN_RENDER_PX = 640
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a small positive int from the environment (fallback to ``default``)."""
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a positive float from the environment (fallback to ``default``)."""
+    try:
+        v = float(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
 
 
 class SimulationAppLaunchConfig(TypedDict, total=False):
@@ -244,11 +275,21 @@ class _RobotState:
         prim_path: str,
         joint_names: list[str],
         articulation: Any = None,
+        actual_prim_path: str | None = None,
     ):
         self.name = name
         self.prim_path = prim_path
         self.joint_names = joint_names
         self.articulation = articulation
+        # The prim path the URDF importer / USD reference actually
+        # placed the robot at, which can differ from ``prim_path`` when
+        # the importer ignores the requested destination (Isaac Sim 4.5
+        # ``isaacsim.asset.importer.urdf.import_robot`` ignores the
+        # ``stage=""`` argument and lands the robot under the URDF's
+        # ``robot name``, e.g. ``/so101_new_calib`` regardless of
+        # ``/World/Robots/arm`` being requested). Used by
+        # ``gripper_frame_pose`` to walk the actual robot subtree.
+        self.actual_prim_path = actual_prim_path or prim_path
 
 
 class _CameraState:
@@ -318,7 +359,21 @@ class IsaacSimulation(SimEngine):
         # eagerly (rather than silently dropped) so a typo like
         # ``IsaacSimulation(headles=False)`` surfaces at construction time
         # instead of producing a default-config sim with no warning.
+        #
+        # A small allow-list of legacy kwargs from the example-local
+        # adapter retired by issue #69 is accepted for backward compat
+        # with callers that still pass them via
+        # ``create_simulation("isaac", tool_name=..., default_timestep=...)``.
+        # They are stored on the instance (not on ``IsaacConfig``) so the
+        # config dataclass stays narrow.
         import dataclasses
+
+        # Pull the legacy shortcuts out of ``kwargs`` before strict
+        # IsaacConfig kwarg-validation runs.
+        legacy_tool_name = kwargs.pop("tool_name", "isaac")
+        legacy_default_timestep = kwargs.pop("default_timestep", None)
+        legacy_default_width = kwargs.pop("default_width", None)
+        legacy_default_height = kwargs.pop("default_height", None)
 
         if config is None:
             # IsaacConfig is a dataclass; passing an unknown kwarg raises
@@ -333,7 +388,19 @@ class IsaacSimulation(SimEngine):
                     f"IsaacSimulation got unexpected kwargs: {unknown}. " f"Known IsaacConfig fields: {sorted(fields)}."
                 )
             config = dataclasses.replace(config, **kwargs)
+        # Apply legacy timestep / camera-size shortcuts onto the config
+        # if the caller passed them. These map to the canonical
+        # ``physics_dt`` / ``camera_width`` / ``camera_height`` fields so
+        # downstream code only reads from one source of truth.
+        if legacy_default_timestep is not None:
+            config = dataclasses.replace(config, physics_dt=float(legacy_default_timestep))
+        if legacy_default_width is not None:
+            config = dataclasses.replace(config, camera_width=int(legacy_default_width))
+        if legacy_default_height is not None:
+            config = dataclasses.replace(config, camera_height=int(legacy_default_height))
         self._config = config
+        # Tool-name is informational; some Strands tooling renders it.
+        self.tool_name = legacy_tool_name
 
         # Simulation state (all lazy-initialized)
         self._app: Any = None
@@ -351,9 +418,45 @@ class IsaacSimulation(SimEngine):
         self._cameras: dict[str, _CameraState] = {}
         self._objects: dict[str, _ObjectState] = {}
         self._prim_registry: list[str] = []  # track all created prims for cleanup
+        # Per-camera output size (RTX cameras render at >= _MIN_RENDER_PX
+        # wide so DLSS doesn't ghost a moving arm; captured frames are
+        # downscaled to the size the caller asked for before return).
+        self._cam_out_size: dict[str, tuple[int, int]] = {}
 
         # Thread safety
         self._lock = threading.RLock()
+
+        # --- Main-thread pump (for off-main-thread callers, e.g. Gradio).
+        # Isaac Sim's renderer + physics may only be driven from the
+        # thread that created SimulationApp (the main thread). A web UI
+        # like Gradio calls into the sim from worker threads, where
+        # ``world.step(render=True)`` deadlocks. So when ``run_pump_forever``
+        # is engaged the main thread runs ``pump()`` (steps + renders +
+        # caches frames and joint state); worker-thread reads return the
+        # cache, and worker-thread actions are enqueued for the pump to
+        # apply. ``_main_tid`` identifies the owning thread; when called
+        # ON it we run inline (no queue), so the headless smoke-test path
+        # is unchanged. See issue #69 for the consolidation rationale.
+        self._main_tid = threading.get_ident()
+        self._action_q: queue.Queue = queue.Queue()
+        self._main_jobs: queue.Queue = queue.Queue()
+        self._frame_cache: dict[str, Any] = {}
+        self._joint_cache: dict[str, dict[str, float]] = {}
+        self._pump_running = False  # True while run_pump_forever owns the renderer
+        self._pump_cameras = True
+        # DLSS-convergence tick counts. Holding the kinematic arm still
+        # for a few RTX render ticks lets the temporal upscaler settle
+        # on the new pose; both knobs are env-tunable for headroom on
+        # slower GPUs (the same names the retired example used so
+        # existing operator runbooks keep working).
+        self._record_converge = _env_int("SO101_RECORD_CONVERGE", 6)
+        self._idle_converge = _env_int("SO101_IDLE_CONVERGE", 4)
+        # Min seconds between IDLE live-preview refreshes. Static idle
+        # scenes don't need to be re-rendered at full speed -- doing so
+        # pegs the RTX renderer (~7 cores) and starves Gradio HTTP /
+        # recorder threads. ~1 Hz is a working default validated against
+        # the example's Gradio UI on an L4.
+        self._idle_render_period = _env_float("SO101_IDLE_RENDER_PERIOD", 1.0)
 
         logger.info(
             "IsaacSimulation initialized: num_envs=%d, device=%s, headless=%s",
@@ -361,6 +464,9 @@ class IsaacSimulation(SimEngine):
             config.device,
             config.headless,
         )
+
+    def _on_main_thread(self) -> bool:
+        return threading.get_ident() == self._main_tid
 
     @classmethod
     def is_available(cls) -> tuple[bool, str | None]:
@@ -893,6 +999,7 @@ class IsaacSimulation(SimEngine):
                     prim_path=prim_path,
                     joint_names=joint_names,
                     articulation=articulation,
+                    actual_prim_path=getattr(articulation, "_strands_actual_prim_path", None),
                 )
                 self._robots[name] = robot_state
 
@@ -955,6 +1062,7 @@ class IsaacSimulation(SimEngine):
                     prim_path=prim_path,
                     joint_names=joint_names,
                     articulation=articulation,
+                    actual_prim_path=getattr(articulation, "_strands_actual_prim_path", None),
                 )
                 self._robots[name] = robot_state
 
@@ -1787,6 +1895,19 @@ class IsaacSimulation(SimEngine):
             tgt = list(target) if target is not None else None
             fov_deg = float(fov)
 
+            # RTX cameras: render at a higher NATIVE resolution if the
+            # caller's requested output is small, so the DLSS upscaler
+            # stays above its temporal-ghost threshold; preserve the
+            # requested aspect ratio. Captured frames are downscaled
+            # back to ``(w, h)`` before return. See ``_MIN_RENDER_PX``
+            # docstring for the why; gated by config.render_mode so
+            # the headless CI path skips the cost.
+            out_w, out_h = w, h
+            if self._config.render_mode != "headless" and w < _MIN_RENDER_PX:
+                scale = _MIN_RENDER_PX / float(w)
+                w = _MIN_RENDER_PX
+                h = int(round(h * scale))
+
             prim_path = f"{self._config.stage_path}/Cameras/{name}"
 
             try:
@@ -1814,6 +1935,9 @@ class IsaacSimulation(SimEngine):
             cam_state = _CameraState(name=name, prim_path=prim_path, width=w, height=h)
             cam_state.handle = handle
             self._cameras[name] = cam_state
+            # Track requested OUTPUT size (may differ from native render
+            # size when DLSS upscaling required a larger native frame).
+            self._cam_out_size[name] = (out_w, out_h)
 
             cam_info = {
                 "name": name,
@@ -2108,6 +2232,15 @@ class IsaacSimulation(SimEngine):
         articulation_name = prim_path.rsplit("/", 1)[-1]
         articulation = Articulation(prim_path=prim_path, name=articulation_name)
         articulation.initialize()
+        # USD reference: the prim path is exactly what the caller asked
+        # for (``add_reference_to_stage`` honours ``prim_path``); record
+        # it as the actual landing path for symmetry with the URDF
+        # branch. ``add_robot`` reads this back to seed
+        # ``_RobotState.actual_prim_path``.
+        try:
+            articulation._strands_actual_prim_path = prim_path  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
 
         # Step 4: position. The USD's authored pose is the default; only
         # call set_world_pose when the caller actually wanted a non-default
@@ -2190,11 +2323,27 @@ class IsaacSimulation(SimEngine):
         # Step 1: import config. Defaults chosen for a fixed-base
         # manipulator (the most common LIBERO / GR00T case); fleet RL
         # workflows can override fix_base via a future config knob.
+        # Self-collision is left off because mesh-mesh self-contact
+        # between adjacent links of a fresh-from-OnShape URDF (the
+        # SO-101 case validated by issue #69) tends to manifest as a
+        # high-frequency oscillation that the actuator-less arm can't
+        # damp out. ``merge_fixed_joints`` is left off so cuRobo's
+        # joint conventions stay aligned with the URDF's; merging
+        # would silently drop link names cuRobo's plan references.
         import_config = _urdf.ImportConfig()
         import_config.fix_base = True
         import_config.import_inertia_tensor = True
         import_config.create_physics_scene = False  # World already created one
         import_config.distance_scale = 1.0  # URDF in meters; matches stage units
+        # Best-effort: not every Isaac Sim 4.5+/5.x build exposes these
+        # attrs. ``setattr`` would happily set a typo'd attr and silently
+        # drop it; explicit hasattr guards keep the contract narrow.
+        if hasattr(import_config, "merge_fixed_joints"):
+            import_config.merge_fixed_joints = False
+        if hasattr(import_config, "self_collision"):
+            import_config.self_collision = False
+        if hasattr(import_config, "make_default_prim"):
+            import_config.make_default_prim = False
 
         # Step 2: parse + import via the direct ``_urdf`` interface
         # rather than the ``URDFParseAndImportFile`` Kit command. The
@@ -2244,6 +2393,18 @@ class IsaacSimulation(SimEngine):
         articulation_name = actual_prim_path.rsplit("/", 1)[-1]
         articulation = Articulation(prim_path=actual_prim_path, name=articulation_name)
         articulation.initialize()
+        # Stash the importer's actual landing path on the articulation
+        # handle as a sidecar attribute so the caller (``add_robot``)
+        # can record it on ``_RobotState.actual_prim_path`` for later
+        # USD-stage walks (e.g. ``gripper_frame_pose``). The return
+        # tuple shape ``(joint_names, articulation)`` is pinned by
+        # downstream tests.
+        try:
+            articulation._strands_actual_prim_path = actual_prim_path  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            # Some Articulation builds don't allow attribute assignment;
+            # caller falls back to the requested prim_path in that case.
+            pass
 
         # Position. Same skip-origin shortcut as ``_load_usd_robot``.
         if position is not None and any(p != 0.0 for p in position):
@@ -2259,6 +2420,536 @@ class IsaacSimulation(SimEngine):
             len(joint_names),
         )
         return joint_names, articulation
+
+    # --- SimEngine: extra helpers for the SO-101 cuRobo example -------------
+    #
+    # These methods migrated in from the example-local Isaac adapter
+    # (``examples/so101_curobo/isaac/simulation.py``) when issue #69
+    # consolidated it into this library backend. They cover three
+    # concerns the headless ``SimEngine`` core doesn't:
+    #
+    # 1. **Main-thread pump** (``pump`` / ``run_pump_forever`` / ``run_on_main``)
+    #    -- Isaac's renderer + physics may only be driven from the
+    #    thread that created ``SimulationApp``. A web UI like Gradio
+    #    serves callbacks on worker threads where ``world.step(render=True)``
+    #    deadlocks. The pump runs on the main thread and is the single
+    #    place that advances the sim and renders the cameras.
+    #
+    # 2. **Kinematic teleport-grasp helpers** (``set_object_collision``,
+    #    ``gripper_frame_pos``, ``gripper_frame_pose``, ``move_object``,
+    #    ``_object_position``) -- the actuator-less SO-101 URDF can't
+    #    grip via friction, so the collector teleport-follows the cube
+    #    to the gripper. Reading the gripper-link world pose off the
+    #    USD stage (rather than via the articulation handle) and
+    #    toggling the cube collider while it's carried gives a stable
+    #    multi-episode grasp.
+    #
+    # 3. **DLSS ghost mitigation** (``_converge_render``, ``_resize_rgb``,
+    #    ``_configure_renderer``, ``_add_lighting``, ``set_joint_positions``,
+    #    plus the ``add_camera`` native-resolution upscale) -- RTX
+    #    cameras at small (<300 px) internal resolution smear a moving
+    #    arm into a translucent "ghost"; rendering at >= ``_MIN_RENDER_PX``
+    #    wide and holding the kinematic pose static for a few converge
+    #    ticks per captured frame keeps every frame crisp.
+    #
+    # The headless / CI path doesn't engage any of these (the main-thread
+    # callers run inline, the renderer config is best-effort, and the
+    # native-resolution upscale is gated by ``render_mode != "headless"``).
+
+    # --- main-thread pump --------------------------------------------------
+
+    def pump(self, render: bool = True) -> None:
+        """Drain queued actions, step once, refresh caches. MAIN THREAD ONLY.
+
+        A web UI calls ``get_observation``/``send_action`` from worker
+        threads where Isaac's renderer / physics deadlock. Those calls
+        instead enqueue actions and read cached frames; this pump (run
+        on the owning main thread) is the single place that actually
+        advances the sim and renders the cameras.
+        """
+        if not self._world_created or self._world is None:
+            return
+        # 1. Apply any actions queued by worker threads, counting them.
+        n_actions = 0
+        while not self._action_q.empty():
+            try:
+                fn = self._action_q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+                n_actions += 1
+            except (RuntimeError, ValueError, AttributeError, TypeError, KeyError, IndexError):
+                # Queued worker actions are best-effort. Narrow to the
+                # exceptions Isaac's articulation / object handles
+                # plausibly raise (RuntimeError, ValueError, AttributeError,
+                # TypeError) plus indexing surface (KeyError, IndexError);
+                # programming bugs (NameError, ImportError) propagate so
+                # they're caught early in development rather than
+                # swallowed silently.
+                logger.debug("queued action failed", exc_info=True)
+        # 2. When worker actions ran this tick (n_actions > 0) they include
+        # the recording capture, which does its OWN _converge_render + grab.
+        # Doing a second idle converge here just doubles the render load and
+        # serializes behind the capture. So only render here when the sim is
+        # IDLE (no queued work): that keeps the live preview fresh between
+        # episodes without competing with the recorder mid-episode.
+        if n_actions == 0 and render:
+            self._converge_render(self._idle_converge)
+        # 3. Refresh joint-state cache for every robot.
+        for rname, r in self._robots.items():
+            if r.articulation is None:
+                continue
+            try:
+                q = r.articulation.get_joint_positions()
+                if q is not None:
+                    arr = q.cpu().numpy() if hasattr(q, "cpu") else np.asarray(q)
+                    self._joint_cache[rname] = {jn: float(v) for jn, v in zip(r.joint_names, list(arr))}
+            except (RuntimeError, ValueError, AttributeError, TypeError):
+                pass
+        # 4. Refresh camera frame cache for the live preview -- only when we
+        # actually rendered this tick (idle path). When actions ran, the
+        # capture already published its frames to the cache; re-grabbing
+        # here would be a wasted readback per camera every recorded frame.
+        if render and n_actions == 0 and self._pump_cameras:
+            for cname, cam in self._cameras.items():
+                if cam.handle is None:
+                    continue
+                try:
+                    img = self._grab_frame(cname, cam.handle)
+                    if img is not None:
+                        self._frame_cache[cname] = img
+                except (RuntimeError, ValueError, AttributeError, TypeError):
+                    logger.debug("pump frame grab failed for %s", cname, exc_info=True)
+
+    def run_pump_forever(self, stop_event: Any = None) -> None:
+        """Block on the MAIN THREAD running ``pump()`` in a loop.
+
+        Drains queued worker actions (an executing episode) every
+        iteration so the episode runs at full speed, and refreshes the
+        live preview only every ``_idle_render_period`` IDLE seconds.
+        A short sleep when idle keeps the renderer from running flat
+        out -- which otherwise starves the Gradio HTTP thread so the
+        page never loads.
+
+        ``stop_event`` is a ``threading.Event``-style object whose
+        ``is_set()`` returning truthy ends the loop. ``None`` (default)
+        loops until ``KeyboardInterrupt``.
+        """
+        last_idle_render = 0.0
+        self._pump_running = True
+        try:
+            while stop_event is None or not stop_event.is_set():
+                # A whole-job submission (UI record/plan) takes priority:
+                # run it inline on this main thread. The job drives the
+                # sim directly (no per-frame round-trips); the preview
+                # just freezes for its duration, which is the right
+                # trade for a fast, reliable record.
+                try:
+                    job = self._main_jobs.get_nowait()
+                except queue.Empty:
+                    job = None
+                if job is not None:
+                    job()
+                    last_idle_render = 0.0
+                    continue
+                busy = not self._action_q.empty()
+                if busy:
+                    self.pump(render=False)
+                    continue
+                now = time.time()
+                do_render = (now - last_idle_render) >= self._idle_render_period
+                self.pump(render=do_render)
+                if do_render:
+                    last_idle_render = now
+                time.sleep(0.05)
+        finally:
+            self._pump_running = False
+
+    def run_on_main(self, fn: Any, timeout: float | None = None) -> Any:
+        """Run ``fn()`` on the MAIN THREAD (the pump owner) and return its result.
+
+        A web UI calls record/plan jobs from a Gradio worker thread.
+        Driving the episode from there means every per-frame
+        ``set_joint_positions`` / ``step`` / ``get_observation``
+        round-trips through the action queue to the pump -- slow and
+        deadlock-prone for a long (355-frame) trajectory. Instead,
+        submit the WHOLE job here: the pump runs it inline on the
+        main thread, so inside ``fn`` ``_on_main_thread()`` is True and
+        the collector drives the sim directly (exactly like the
+        headless smoke path -- fast, no round-trips).
+
+        While the job runs, the pump's normal loop is paused. Re-raises
+        any exception from ``fn`` on the caller's thread. If already on
+        the main thread, runs ``fn`` immediately.
+        """
+        if self._on_main_thread():
+            return fn()
+        done = threading.Event()
+        box: dict[str, Any] = {}
+
+        def _job() -> None:
+            try:
+                box["result"] = fn()
+            except BaseException as exc:  # noqa: BLE001 - surfaced to caller below
+                box["exc"] = exc
+            finally:
+                done.set()
+
+        self._main_jobs.put(_job)
+        if not done.wait(timeout=timeout):
+            raise TimeoutError("run_on_main timed out waiting for the main-thread pump.")
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("result")
+
+    # --- joint targets / kinematic teleport --------------------------------
+
+    def set_joint_positions(
+        self,
+        positions: Any = None,
+        robot_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Drive an articulated robot kinematically to ``positions``.
+
+        Used by the SO-101 cuRobo example to replay a planned trajectory
+        on the actuator-less arm: ``send_action`` (position-target write
+        + step) wouldn't move it because the URDF imports without
+        position actuators on the SO-101. This writes joint state
+        directly so the kinematic carry works.
+
+        ``positions`` may be a ``dict`` keyed by joint name (only the
+        listed joints are written; others retain their current value)
+        or a list/array in the robot's joint order.
+        """
+        with self._lock:
+            if not self._world_created or not self._robots:
+                return {"status": "error", "content": [{"text": "No world/robot."}]}
+            if positions is None:
+                return {"status": "error", "content": [{"text": "'positions' is required."}]}
+            if robot_name is None:
+                robot_name = next(iter(self._robots))
+            r = self._robots.get(robot_name)
+            if r is None or r.articulation is None:
+                return {"status": "error", "content": [{"text": f"Robot {robot_name!r} not initialized."}]}
+
+            def _apply() -> None:
+                if isinstance(positions, dict):
+                    cur = list(r.articulation.get_joint_positions())
+                    idx = {jn: i for i, jn in enumerate(r.joint_names)}
+                    for jn, v in positions.items():
+                        if jn in idx:
+                            cur[idx[jn]] = float(v)
+                    r.articulation.set_joint_positions(np.array(cur, dtype=float))
+                else:
+                    r.articulation.set_joint_positions(np.array(positions, dtype=float))
+
+            if self._on_main_thread():
+                _apply()
+                return {"status": "success", "content": [{"text": "Set joint positions (main)."}]}
+            self._action_q.put(_apply)
+            return {"status": "success", "content": [{"text": "Set joint positions (queued)."}]}
+
+    def move_object(
+        self,
+        name: str,
+        position: list[float] | None = None,
+        orientation: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Teleport an object to ``(position, orientation)``.
+
+        Used by the SO-101 cuRobo example for the kinematic
+        teleport-grasp: while the cube is carried it is teleported into
+        the closing gripper fingers every frame. Velocities are zeroed
+        so a teleport doesn't fling a dynamic body.
+        """
+        obj = self._objects.get(name)
+        if obj is None or obj.handle is None:
+            return {"status": "error", "content": [{"text": f"Object {name!r} not found."}]}
+        try:
+            pos = np.array(position[:3], dtype=float) if position else None
+            ori = np.array(orientation[:4], dtype=float) if orientation else None
+            obj.handle.set_world_pose(position=pos, orientation=ori)
+            if hasattr(obj.handle, "set_linear_velocity"):
+                obj.handle.set_linear_velocity(np.zeros(3))
+            if hasattr(obj.handle, "set_angular_velocity"):
+                obj.handle.set_angular_velocity(np.zeros(3))
+        except (RuntimeError, ValueError, AttributeError, TypeError) as exc:
+            return {"status": "error", "content": [{"text": f"move_object failed: {type(exc).__name__}: {exc}"}]}
+        return {"status": "success", "content": [{"text": f"'{name}' moved to {position or 'same'}."}]}
+
+    def set_object_collision(self, name: str, enabled: bool = True) -> dict[str, Any]:
+        """Enable / disable an object's collider (keeps the visual mesh intact).
+
+        Used by the SO-101 cuRobo kinematic grasp: while the cube is
+        carried it is teleported *into* the closing gripper fingers
+        every frame. With its collider on, the static cube and the
+        finger colliders interpenetrate, and the resulting contact
+        forces fling the stiff, undamped PD arm (kp ~3.6e4, kd ~0)
+        into a ~5 cm/frame oscillation. Disabling the grasped cube's
+        collider lets the gripper close cleanly around it; re-enabled
+        on release.
+        """
+        obj = self._objects.get(name)
+        if obj is None:
+            return {"status": "error", "content": [{"text": f"Object {name!r} not found."}]}
+        if obj.handle is not None:
+            try:
+                obj.handle.set_collision_enabled(bool(enabled))
+                return {"status": "success", "content": [{"text": f"'{name}' collision {'on' if enabled else 'off'}."}]}
+            except (RuntimeError, ValueError, AttributeError, TypeError):
+                logger.debug("set_collision_enabled unavailable; falling back to USD API", exc_info=True)
+        # Fallback: toggle UsdPhysics.CollisionAPI on the prim directly.
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import UsdPhysics  # type: ignore[import-not-found]
+
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(obj.prim_path)
+            api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath()) or UsdPhysics.CollisionAPI.Apply(prim)
+            api.GetCollisionEnabledAttr().Set(bool(enabled))
+            return {
+                "status": "success",
+                "content": [{"text": f"'{name}' collision {'on' if enabled else 'off'} (USD)."}],
+            }
+        except (RuntimeError, ValueError, AttributeError, TypeError, ImportError) as exc:
+            return {
+                "status": "error",
+                "content": [{"text": f"set_object_collision failed: {type(exc).__name__}: {exc}"}],
+            }
+
+    def _object_position(self, name: str) -> list[float] | None:
+        """Return the world-frame position of ``name`` (or ``None`` if missing)."""
+        obj = self._objects.get(name)
+        if obj is None or obj.handle is None:
+            return None
+        try:
+            pos, _ = obj.handle.get_world_pose()
+            return [float(x) for x in pos]
+        except (RuntimeError, ValueError, AttributeError, TypeError):
+            return None
+
+    def gripper_frame_pos(self, robot_name: str | None = None) -> list[float] | None:
+        """World position of the robot's gripper / tool link (translation only)."""
+        pose = self.gripper_frame_pose(robot_name)
+        return pose[0] if pose else None
+
+    def gripper_frame_pose(self, robot_name: str | None = None) -> tuple[list[float], list[float]] | None:
+        """World pose of the robot's gripper / tool link: ``(translation, rotation)``.
+
+        ``translation`` is the link origin in world coords; ``rotation``
+        is the row-major 3x3 (flattened to 9) whose *columns* are the
+        tool frame's local x/y/z axes in world coords, so
+        ``world = R @ local``.
+
+        The SO-101 example's collector uses this to seat the cube
+        *rigidly* in the tool frame for the kinematic teleport-grasp:
+        a plain world-space offset can't keep the cube between the
+        jaws as the wrist rotates and lifts (the cube would drift
+        beside the jaws and jitter). Prefers a ``gripper_frame``/``tool``
+        link, then any ``gripper``/``moving_jaw`` link, under the robot's
+        prim subtree.
+        """
+        if robot_name is None:
+            robot_name = next(iter(self._robots), None)
+        r = self._robots.get(robot_name) if robot_name else None
+        if r is None:
+            return None
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import (  # type: ignore[import-not-found]
+                Gf,
+                Sdf,
+                Usd,
+                UsdGeom,
+            )
+
+            stage = omni.usd.get_context().get_stage()
+            # ``r.actual_prim_path`` is the prim path the URDF importer
+            # / USD reference actually placed the robot at (which may
+            # differ from the requested ``prim_path``: Isaac Sim 4.5
+            # ``isaacsim.asset.importer.urdf.import_robot`` ignores the
+            # destination argument and lands the robot at
+            # ``/{robot_name}``). Walk up from there to the top-level
+            # robot prim and search its whole subtree for the gripper
+            # / tool link.
+            sdf_path = Sdf.Path(r.actual_prim_path)
+            top = sdf_path
+            while top.GetParentPath() != Sdf.Path.absoluteRootPath and top.GetParentPath() != Sdf.Path.emptyPath:
+                top = top.GetParentPath()
+            root = stage.GetPrimAtPath(top)
+            if not root or not root.IsValid():
+                return None
+            preferred = None
+            fallback = None
+            for p in Usd.PrimRange(root):
+                if not p.IsA(UsdGeom.Xformable):
+                    continue
+                ln = p.GetName().lower()
+                if "gripper_frame" in ln or "tool" in ln:
+                    preferred = p
+                    break
+                if "moving_jaw" in ln or "gripper" in ln:
+                    fallback = fallback or p
+            prim = preferred or fallback
+            if prim is None:
+                return None
+            xf = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            t = xf.ExtractTranslation()
+
+            def _axis(vx: float, vy: float, vz: float) -> tuple[float, float, float]:
+                d = xf.TransformDir(Gf.Vec3d(vx, vy, vz))
+                n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) ** 0.5 or 1.0
+                return (d[0] / n, d[1] / n, d[2] / n)
+
+            ax = _axis(1.0, 0.0, 0.0)
+            ay = _axis(0.0, 1.0, 0.0)
+            az = _axis(0.0, 0.0, 1.0)
+            rot = [ax[0], ay[0], az[0], ax[1], ay[1], az[1], ax[2], ay[2], az[2]]
+            pos = [float(t[0]), float(t[1]), float(t[2])]
+            return pos, [float(x) for x in rot]
+        except (RuntimeError, ValueError, AttributeError, TypeError, ImportError):
+            logger.debug("gripper_frame_pose failed", exc_info=True)
+            return None
+
+    # --- DLSS-ghost mitigation + RTX renderer config ------------------------
+
+    def _converge_render(self, n: int = 8) -> None:
+        """Render ``n`` ticks while HOLDING the robots at their current pose.
+
+        ``world.step(render=True)`` advances physics every tick, so a
+        kinematic arm keeps drifting (gravity / settling) while we try
+        to converge the DLSS temporal upscaler -> the moving target
+        leaves a faint ghost. Re-asserting each robot's joint positions
+        (and zeroing velocities) before every render freezes the pose
+        so DLSS converges on a single, static image.
+        """
+        if not self._world_created or self._world is None:
+            return
+        for _ in range(max(1, n)):
+            for r in self._robots.values():
+                if r.articulation is None:
+                    continue
+                try:
+                    q = r.articulation.get_joint_positions()
+                    if q is not None:
+                        qa = np.asarray(q, dtype=float)
+                        r.articulation.set_joint_positions(qa)
+                        try:
+                            r.articulation.set_joint_velocities(np.zeros_like(qa))
+                        except (RuntimeError, ValueError, AttributeError, TypeError):
+                            pass
+                except (RuntimeError, ValueError, AttributeError, TypeError):
+                    pass
+            self._world.step(render=True)
+
+    def _grab_frame(self, cname: str, cam: Any) -> Any:
+        """Capture ``cam`` as an RGB uint8 array at the camera's requested output size.
+
+        The RTX camera renders at a higher native resolution (to keep
+        DLSS out of its temporal-ghost regime); this downscales the
+        result back to the size the caller asked for. Returns ``None``
+        if no frame is available yet.
+        """
+        frame = cam.get_rgba()
+        if frame is None or not getattr(frame, "size", 0):
+            return None
+        img = np.asarray(frame)[:, :, :3].astype("uint8")
+        out = self._cam_out_size.get(cname)
+        if out is not None:
+            ow, oh = out
+            if img.shape[1] != ow or img.shape[0] != oh:
+                img = self._resize_rgb(img, ow, oh)
+        return img
+
+    @staticmethod
+    def _resize_rgb(img: Any, out_w: int, out_h: int) -> Any:
+        """Downscale an HxWx3 uint8 array to ``(out_h, out_w)``.
+
+        Uses cv2 / PIL if present, else a fast NumPy area-average /
+        nearest fallback (no new deps).
+        """
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            return cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        except ImportError:
+            pass
+        try:
+            from PIL import Image  # type: ignore[import-not-found]
+
+            return np.asarray(Image.fromarray(img).resize((out_w, out_h), Image.BILINEAR))
+        except ImportError:
+            pass
+        h, w = img.shape[:2]
+        if w % out_w == 0 and h % out_h == 0:
+            fx, fy = w // out_w, h // out_h
+            return img.reshape(out_h, fy, out_w, fx, 3).mean(axis=(1, 3)).astype("uint8")
+        ys = (np.arange(out_h) * (h / out_h)).astype(int).clip(0, h - 1)
+        xs = (np.arange(out_w) * (w / out_w)).astype(int).clip(0, w - 1)
+        return img[ys][:, xs]
+
+    def _configure_renderer(self) -> None:
+        """Best-effort RTX settings for a stable real-time image.
+
+        These carb settings (RaytracedLighting, FXAA, no temporal
+        denoiser) nudge RTX toward a single-frame-stable image, but
+        note the RTX pipeline re-asserts ``/rtx/post/aa/op`` back to
+        DLSS (3) on every render tick, so they do NOT by themselves
+        stop the moving-arm "ghost". The actual ghost fix is rendering
+        cameras at a high native resolution (>= ``_MIN_RENDER_PX`` wide)
+        so the DLSS upscaler stays out of its temporal-ghost regime,
+        plus ``_converge_render`` holding the pose static while it
+        settles. Best-effort: skipped silently when ``carb.settings``
+        isn't importable.
+        """
+        try:
+            import carb  # type: ignore[import-not-found]
+
+            s = carb.settings.get_settings()
+            s.set("/rtx/rendermode", "RaytracedLighting")
+            s.set("/rtx/directLighting/sampledLighting/enabled", True)
+            s.set("/rtx/raytracing/subframes", 1)
+            s.set("/rtx/pathtracing/totalSpp", 1)
+            s.set("/rtx/sceneDb/ambientLightIntensity", 1.0)
+            s.set("/rtx/post/aa/op", 1)
+            s.set("/rtx/post/dlss/execMode", 0)
+            s.set("/rtx/post/taa/enabled", False)
+            s.set("/rtx/directLighting/denoiser/enabled", False)
+            s.set("/rtx/raytracing/lightcache/spatialCache/enabled", False)
+        except (ImportError, AttributeError, RuntimeError):
+            logger.debug("renderer config skipped", exc_info=True)
+
+    def _add_lighting(self) -> None:
+        """Add a dome + key + fill light so RTX camera frames aren't black.
+
+        Unlike MuJoCo (which has implicit headlight / ambient), an Isaac
+        stage is unlit by default -- without this, ``get_rgba()``
+        returns near-black frames and the UI preview looks empty.
+        Best-effort; skipped silently when Pixar USD imports fail.
+        """
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import (  # type: ignore[import-not-found]
+                Gf,
+                Sdf,
+                UsdGeom,
+                UsdLux,
+            )
+
+            stage = omni.usd.get_context().get_stage()
+            dome = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/lights/dome"))
+            dome.CreateIntensityAttr(800.0)
+            distant = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/lights/key"))
+            distant.CreateIntensityAttr(2500.0)
+            distant.CreateAngleAttr(1.0)
+            UsdGeom.Xformable(distant.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-45.0, 0.0, 25.0))
+            fill = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/lights/fill"))
+            fill.CreateIntensityAttr(1500.0)
+            fill.CreateAngleAttr(1.0)
+            UsdGeom.Xformable(fill.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-60.0, 0.0, 180.0))
+        except (ImportError, AttributeError, RuntimeError):
+            logger.debug("Could not add scene lighting", exc_info=True)
 
     def cleanup(self) -> None:
         """Release all resources.

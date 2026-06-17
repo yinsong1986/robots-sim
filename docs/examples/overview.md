@@ -121,7 +121,7 @@ demos under `examples/`:
 
 - [`examples/isaac_gs/`](https://github.com/strands-labs/robots-sim/tree/main/examples/isaac_gs) —
   Isaac Sim + 3DGS hybrid-render digital-twin example.
-- [`examples/so101_curobo/isaac/`](https://github.com/strands-labs/robots-sim/tree/main/examples/so101_curobo) —
+- [`examples/so101_curobo/`](https://github.com/strands-labs/robots-sim/tree/main/examples/so101_curobo) —
   SO-101 synthetic-data generation with cuRobo on the Isaac Sim backend.
 
 Each subdir has its own README with run instructions.
