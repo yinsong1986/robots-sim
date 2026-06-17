@@ -133,3 +133,78 @@ class TestLazyImportSurface:
             isaac_pkg, "__getattr__"
         ), "PEP 562 module-level __getattr__ must be defined for lazy import to work."
         assert callable(isaac_pkg.__getattr__)
+
+
+class TestNewtonRemoved:
+    """Pin the Isaac-only re-scope (#8, #89): no Newton/Warp surface remains.
+
+    The package was re-scoped to ship Isaac Sim as the only heavy backend.
+    Newton/Warp was dropped from #8 and all Newton tracking issues closed,
+    but the code + packaging lagged behind. These assertions pin the
+    contract so Newton can't silently drift back into the package, the
+    extras, or the entry points.
+    """
+
+    def test_no_newton_package_dir(self):
+        """The ``strands_robots_sim/newton/`` package is gone."""
+        newton_dir = pathlib.Path(__file__).resolve().parents[2] / "newton"
+        assert not newton_dir.exists(), (
+            f"strands_robots_sim/newton/ still exists at {newton_dir}; the "
+            "Isaac-only re-scope (#89) removes the Newton backend package."
+        )
+
+    def test_no_newton_or_warp_entry_points_in_pyproject(self):
+        """No ``newton``/``warp`` entries under strands_robots.backends."""
+        content = _PYPROJECT.read_text()
+        assert "NewtonSimulation" not in content, (
+            "pyproject.toml still references NewtonSimulation; the Isaac-only "
+            "re-scope (#89) removes the newton/warp backend entry points."
+        )
+        assert "strands_robots_sim.newton" not in content, (
+            "pyproject.toml still imports from strands_robots_sim.newton; "
+            "the Newton backend package was removed (#89)."
+        )
+
+    def test_no_newton_extra_in_pyproject(self):
+        """No ``[newton]`` optional-dependencies extra remains."""
+        content = _PYPROJECT.read_text()
+        assert "\nnewton = [" not in content and "\nnewton=[" not in content, (
+            "pyproject.toml still declares a `newton = [...]` extra; the " "Isaac-only re-scope (#89) removes it."
+        )
+        # The `all` extra must not pull in the dropped [newton] extra.
+        assert "strands-robots-sim[newton]" not in content, (
+            "The `all` extra still references `strands-robots-sim[newton]`; "
+            "it must reference only `[isaac]` after the re-scope (#89)."
+        )
+
+    def test_no_warp_lang_dependency(self):
+        """``warp-lang``/``newton-physics`` deps are gone from packaging."""
+        content = _PYPROJECT.read_text()
+        assert "warp-lang" not in content, (
+            "pyproject.toml still pins warp-lang (the Newton backend dep); " "removed by the Isaac-only re-scope (#89)."
+        )
+        assert "newton-physics" not in content, "pyproject.toml still pins newton-physics; removed by #89."
+
+    def test_installed_entry_points_exclude_newton_and_warp(self):
+        """If pip-installed, no newton/warp backend entry points resolve."""
+        try:
+            eps = importlib.metadata.entry_points()
+            if hasattr(eps, "select"):
+                backend_eps = list(eps.select(group="strands_robots.backends"))
+            else:
+                backend_eps = eps.get("strands_robots.backends", [])
+        except Exception as exc:  # pragma: no cover - defensive
+            pytest.skip(f"importlib.metadata unavailable: {exc}")
+
+        if not backend_eps:
+            pytest.skip(
+                "Package not installed (no entry points discoverable). "
+                "Run `pip install -e .` to validate this assertion locally."
+            )
+
+        names = {ep.name for ep in backend_eps}
+        assert "newton" not in names and "warp" not in names, (
+            f"Installed backend entry points still expose Newton/Warp: {sorted(names)}. "
+            "Reinstall after the #89 re-scope: "
+            "`pip install -e . --force-reinstall --no-deps`."
+        )
