@@ -37,8 +37,8 @@ graph TB
 
     AT --> FAC
     FAC -->|entry point lookup| ABC
-    ABC <|.. MUJ
-    ABC <|.. ISA
+    MUJ -.->|implements| ABC
+    ISA -.->|implements| ABC
     ISA --> CFG
     ISA --> APP
     APP --> WORLD
