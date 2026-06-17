@@ -9,14 +9,14 @@ name = "strands-robots-sim"
 # *after* this PR + R7 + the upstream U2 entry-point walker have all
 # merged; the working tree between tags reports 0.x.y.devN+g<sha>.
 dynamic = ["version"]
-description = "GPU-accelerated NVIDIA simulation backends (Isaac Sim, Newton) for strands-robots — registered as entry-point plugins."
+description = "GPU-accelerated NVIDIA simulation backend (Isaac Sim) for strands-robots — registered as entry-point plugins."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "AWS", email = "opensource@amazon.com"},
 ]
-keywords = ["robots", "agents", "isaac-sim", "newton", "warp", "libero", "strands", "sdk"]
+keywords = ["robots", "agents", "isaac-sim", "libero", "strands", "sdk"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -35,11 +35,11 @@ classifiers = [
 # LeRobot recording adapter all live upstream. The only runtime dep this
 # package ships with is strands-robots itself (>=0.4.0 — the version that
 # walks `[project.entry-points."strands_robots.backends"]` to discover
-# pluggable backends like the Isaac/Newton ones registered below).
+# pluggable backends like the Isaac one registered below).
 #
-# GPU-only backend dependencies (Isaac Sim, Newton/Warp) live behind
-# the `[isaac]` / `[newton]` / `[all]` extras; pip-install with no extras
-# keeps the runtime tiny and lets users layer the GPU bits on per-host.
+# GPU-only backend dependencies (Isaac Sim) live behind the `[isaac]`
+# extra; pip-install with no extras keeps the runtime tiny and lets
+# users layer the GPU bits on per-host.
 dependencies = [
     "strands-robots>=0.4.0",
 ]
@@ -70,16 +70,9 @@ isaac = [
     "isaaclab>=2.0,<3.0",
     "usd-core",
 ]
-# Newton / Warp backend deps. Scaffolded here so the entry point declared
-# below resolves to an installable target; the implementation lands in R11.
-newton = [
-    "warp-lang>=1.12",
-    "newton-physics>=1.0",
-]
-# GPU boxes only — both backends in one shot.
+# GPU boxes only — the heavy backend in one shot.
 all = [
     "strands-robots-sim[isaac]",
-    "strands-robots-sim[newton]",
 ]
 # Dev extras. ruff + mypy + pytest-cov are the issue's target tooling;
 # black / isort / flake8 are kept transitionally so `hatch run lint`
@@ -102,9 +95,6 @@ dev = [
 # finds. The three entries below mean:
 #
 #   create_simulation("isaac")  -> IsaacSimulation (R7 implementation)
-#   create_simulation("newton") -> NewtonSimulation (R11 implementation)
-#   create_simulation("warp")   -> NewtonSimulation (alias; Warp is the
-#                                  underlying physics engine for Newton)
 #
 # No monkey-patching of the upstream `_BUILTIN_BACKENDS` dict; no import
 # side effects in `strands_robots_sim/__init__.py`. Discovery is purely
@@ -113,8 +103,6 @@ dev = [
 # to our class — same UX as any setuptools-style plugin.
 [project.entry-points."strands_robots.backends"]
 isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
-newton = "strands_robots_sim.newton.simulation:NewtonSimulation"
-warp = "strands_robots_sim.newton.simulation:NewtonSimulation"
 
 [project.urls]
 Homepage = "https://github.com/strands-labs/robots-sim"
@@ -148,11 +136,9 @@ dependencies = [
 ]
 
 [tool.hatch.envs.default.scripts]
-# `hatch run test` runs the Isaac PR-1 entry-point + lazy-import test
-# slice (and the simulation-module tests added under the same directory
-# in PR-4 of the #31 split, plus this PR's `newton/tests/` slice). The
-# glob picks up both backend test directories automatically.
-test = "pytest strands_robots_sim/isaac/tests/ strands_robots_sim/newton/tests/ -v"
+# `hatch run test` runs the Isaac entry-point + lazy-import test slice
+# and the simulation-module tests under the same directory.
+test = "pytest strands_robots_sim/isaac/tests/ -v"
 # Lint extends to `examples/` so the runnable example files (which copy-
 # paste into PR docstrings + the README matrix) catch the same drift the
 # package source does. Keeps each new R8/R12/R23 backend example honest.

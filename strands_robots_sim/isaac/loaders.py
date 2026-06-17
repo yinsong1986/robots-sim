@@ -8,9 +8,7 @@ loader rather than a per-robot Python builder.
 
 Supported formats:
     * **URDF** — ``load_urdf(path)``. Parsed with stdlib
-      ``xml.etree.ElementTree``. No external deps; mirrors the parser
-      semantics on the Newton side (``strands_robots_sim/newton/simulation.py``
-      on PR #30) so both backends share behaviour.
+      ``xml.etree.ElementTree``. No external deps.
     * **MJCF** — ``load_mjcf(path)``. Parsed with stdlib
       ``xml.etree.ElementTree``. Handles ``<worldbody>`` / nested ``<body>``
       / ``<joint>`` for LIBERO-style scenes. No mujoco-Python dep needed for

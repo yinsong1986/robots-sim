@@ -6,9 +6,11 @@ relies on:
 1. The ``[isaac]`` extra is declared in ``pyproject.toml`` and pulls in
    the pip-installable companion deps for the supported Isaac Sim 4.5.x
    runtime (``isaacsim==4.5.*``, ``isaaclab>=2.0,<3.0``, ``usd-core``).
-2. The ``isaac`` and ``isaac_sim`` entry points under
-   ``strands_robots.backends`` resolve to
-   ``strands_robots_sim.isaac.simulation:IsaacSimulation``.
+2. The ``isaac`` entry point under ``strands_robots.backends``
+   resolves to ``strands_robots_sim.isaac.simulation:IsaacSimulation``.
+   ``isaac`` is the *only* backend name declared; the docs must not
+   advertise any other alias (e.g. ``isaac_sim``) that packaging does
+   not back.
 3. ``import strands_robots_sim.isaac`` is a PEP 562 lazy stub: it loads
    without pulling any ``omni.*`` modules into ``sys.modules``.
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import pathlib
+import tomllib
 
 import pytest
 
@@ -41,6 +44,56 @@ class TestEntryPointDeclaration:
         assert 'isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"' in content, (
             'Expected `isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"` '
             'under [project.entry-points."strands_robots.backends"] in pyproject.toml.'
+        )
+
+    def test_isaac_is_the_only_backend_entry_point(self):
+        """Exactly one backend name (``isaac``) is declared in pyproject.toml.
+
+        Drift guard for #95: the docs previously advertised an ``isaac_sim``
+        alias under ``strands_robots.backends`` that ``pyproject.toml`` never
+        declared, so ``create_simulation("isaac_sim")`` would hit an
+        unknown-backend error. Pin the declared name set to exactly
+        ``{"isaac"}`` so any new alias must be added to packaging (and this
+        test) deliberately rather than drifting in via docs alone.
+        """
+        data = tomllib.loads(_PYPROJECT.read_text())
+        backends = data.get("project", {}).get("entry-points", {}).get("strands_robots.backends", {})
+        declared = set(backends)
+        assert declared == {"isaac"}, (
+            f"strands_robots.backends declares {sorted(declared)}; expected "
+            "exactly {'isaac'}. If you add a backend alias (e.g. isaac_sim), "
+            "declare it in pyproject.toml AND update the docs + this test so "
+            "docs and packaging cannot drift (see #95)."
+        )
+
+    def test_docs_do_not_advertise_undeclared_backend_aliases(self):
+        """Docs must not list a backend entry-point name packaging omits.
+
+        Drift guard for #95: four docs files and this module's docstring
+        previously claimed an ``isaac_sim`` entry point. After the fix the
+        only backend name anywhere is ``isaac``. This asserts no doc reintroduces
+        an ``isaac_sim`` *entry-point* claim. The unrelated Isaac Lab install
+        path token ``_isaac_sim`` (e.g. ``_isaac_sim/setup_python_env.sh``) is
+        explicitly allowed.
+        """
+        repo_root = _PYPROJECT.parent
+        docs_dir = repo_root / "docs"
+        if not docs_dir.is_dir():
+            pytest.skip("docs/ not present in this checkout")
+
+        offenders = []
+        for md in docs_dir.rglob("*.md"):
+            for lineno, line in enumerate(md.read_text().splitlines(), 1):
+                if "isaac_sim" not in line:
+                    continue
+                # Allow the Isaac Lab install-path token, not an entry point.
+                if "_isaac_sim" in line or "setup_python_env" in line:
+                    continue
+                offenders.append(f"{md.relative_to(repo_root)}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Docs advertise an `isaac_sim` backend name that pyproject.toml does "
+            "not declare (see #95). Offending lines:\n" + "\n".join(offenders)
         )
 
     def test_isaac_extra_declared_in_pyproject(self):
@@ -133,3 +186,78 @@ class TestLazyImportSurface:
             isaac_pkg, "__getattr__"
         ), "PEP 562 module-level __getattr__ must be defined for lazy import to work."
         assert callable(isaac_pkg.__getattr__)
+
+
+class TestNewtonRemoved:
+    """Pin the Isaac-only re-scope (#8, #89): no Newton/Warp surface remains.
+
+    The package was re-scoped to ship Isaac Sim as the only heavy backend.
+    Newton/Warp was dropped from #8 and all Newton tracking issues closed,
+    but the code + packaging lagged behind. These assertions pin the
+    contract so Newton can't silently drift back into the package, the
+    extras, or the entry points.
+    """
+
+    def test_no_newton_package_dir(self):
+        """The ``strands_robots_sim/newton/`` package is gone."""
+        newton_dir = pathlib.Path(__file__).resolve().parents[2] / "newton"
+        assert not newton_dir.exists(), (
+            f"strands_robots_sim/newton/ still exists at {newton_dir}; the "
+            "Isaac-only re-scope (#89) removes the Newton backend package."
+        )
+
+    def test_no_newton_or_warp_entry_points_in_pyproject(self):
+        """No ``newton``/``warp`` entries under strands_robots.backends."""
+        content = _PYPROJECT.read_text()
+        assert "NewtonSimulation" not in content, (
+            "pyproject.toml still references NewtonSimulation; the Isaac-only "
+            "re-scope (#89) removes the newton/warp backend entry points."
+        )
+        assert "strands_robots_sim.newton" not in content, (
+            "pyproject.toml still imports from strands_robots_sim.newton; "
+            "the Newton backend package was removed (#89)."
+        )
+
+    def test_no_newton_extra_in_pyproject(self):
+        """No ``[newton]`` optional-dependencies extra remains."""
+        content = _PYPROJECT.read_text()
+        assert "\nnewton = [" not in content and "\nnewton=[" not in content, (
+            "pyproject.toml still declares a `newton = [...]` extra; the " "Isaac-only re-scope (#89) removes it."
+        )
+        # The `all` extra must not pull in the dropped [newton] extra.
+        assert "strands-robots-sim[newton]" not in content, (
+            "The `all` extra still references `strands-robots-sim[newton]`; "
+            "it must reference only `[isaac]` after the re-scope (#89)."
+        )
+
+    def test_no_warp_lang_dependency(self):
+        """``warp-lang``/``newton-physics`` deps are gone from packaging."""
+        content = _PYPROJECT.read_text()
+        assert "warp-lang" not in content, (
+            "pyproject.toml still pins warp-lang (the Newton backend dep); " "removed by the Isaac-only re-scope (#89)."
+        )
+        assert "newton-physics" not in content, "pyproject.toml still pins newton-physics; removed by #89."
+
+    def test_installed_entry_points_exclude_newton_and_warp(self):
+        """If pip-installed, no newton/warp backend entry points resolve."""
+        try:
+            eps = importlib.metadata.entry_points()
+            if hasattr(eps, "select"):
+                backend_eps = list(eps.select(group="strands_robots.backends"))
+            else:
+                backend_eps = eps.get("strands_robots.backends", [])
+        except Exception as exc:  # pragma: no cover - defensive
+            pytest.skip(f"importlib.metadata unavailable: {exc}")
+
+        if not backend_eps:
+            pytest.skip(
+                "Package not installed (no entry points discoverable). "
+                "Run `pip install -e .` to validate this assertion locally."
+            )
+
+        names = {ep.name for ep in backend_eps}
+        assert "newton" not in names and "warp" not in names, (
+            f"Installed backend entry points still expose Newton/Warp: {sorted(names)}. "
+            "Reinstall after the #89 re-scope: "
+            "`pip install -e . --force-reinstall --no-deps`."
+        )

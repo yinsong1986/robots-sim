@@ -7,9 +7,9 @@ on:
         required: true
         type: string
 
-# Until backend code lands in R7 (Isaac) / R11 (Newton) this repo is a
-# minimal plugin stub — there's nothing to test beyond "the package still
-# imports". Heavy GPU CI is tracked separately in R10 / R14. The job ID
+# Until the Isaac backend code lands (R7) this repo is a minimal plugin
+# stub — there's nothing to test beyond "the package still imports".
+# Heavy GPU CI is tracked separately in R10. The job ID
 # (`test-lint`) and display name (`Test and Lint`) are preserved so the
 # required-check rule on `main` continues to match.
 jobs:

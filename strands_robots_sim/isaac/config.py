@@ -25,7 +25,7 @@ class IsaacConfig:
     ----------
     num_envs : int
         Number of parallel environments. Default 1. For fleet training,
-        set to 1024 (Isaac is heavier per-env than Newton).
+        set to 1024 (Isaac is heavy per-env).
     device : str
         CUDA device string. ``"cuda:0"`` (default) or ``"cuda:N"``.
     headless : bool

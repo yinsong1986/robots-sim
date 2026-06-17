@@ -251,11 +251,10 @@ versions = update one constant.
 ```toml
 # pyproject.toml
 [project.entry-points."strands_robots.backends"]
-isaac     = "strands_robots_sim.isaac.simulation:IsaacSimulation"
-isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"
+isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 ```
 
-Both names resolve to the same class. `create_simulation("isaac", ...)`
+`create_simulation("isaac", ...)`
 upstream does:
 
 ```python
