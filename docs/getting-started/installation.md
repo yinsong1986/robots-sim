@@ -8,7 +8,7 @@
 2. **The `strands-robots-sim` Python package** — a thin pip-installable
    plugin that registers `IsaacSimulation` as a `strands_robots.backends`
    entry point and adds a few light deps that Isaac uses internally
-   (`usd-core` for USD authoring, `warp-lang` for sensor kernels).
+   (`usd-core` for USD authoring).
 
 Order matters: install Isaac Sim **first**, then `pip install
 'strands-robots-sim[isaac]'` into the same Python environment.

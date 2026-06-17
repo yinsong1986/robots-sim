@@ -1,6 +1,6 @@
 """Procedural robot builders for Isaac Sim (USD prim API).
 
-Mirrors strands_robots_sim.newton.procedural but uses USD/Isaac APIs
+Builds procedural scenes using USD/Isaac APIs
 to construct robots purely from code -- no binary asset files required.
 
 Supported procedural robots:

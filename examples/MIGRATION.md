@@ -12,7 +12,7 @@ This release is **breaking**: importing `SimEnv` or `SteppedSimEnv` from
 `strands_robots_sim` raises `ImportError` with a pointer back to this file.
 
 Going forward, `strands-robots-sim` is the home for **heavy, NVIDIA-GPU-only**
-simulation backends (Isaac Sim, Newton/Warp) that plug into `strands-robots`
+simulation backends (Isaac Sim) that plug into `strands-robots`
 through its `SimEngine` ABC. See the umbrella issue
 [strands-labs/robots-sim#8](https://github.com/strands-labs/robots-sim/issues/8)
 for the full re-scope and roadmap.
@@ -27,7 +27,6 @@ pip install 'strands-robots[sim-mujoco]'
 
 # Heavy GPU-only backends:
 pip install 'strands-robots-sim[isaac]'    # Isaac Sim — Stage 3 (Phase 1 shipped; data-plane in Phase 2)
-# pip install 'strands-robots-sim[newton]' # Newton / Warp — Stage 4 (pending)
 ```
 
 ---
@@ -42,7 +41,7 @@ pip install 'strands-robots-sim[isaac]'    # Isaac Sim — Stage 3 (Phase 1 ship
 | `agent("Run the LIBERO benchmark …")` (the natural-language entry point in the deleted `examples/libero_example.py`) | `Agent(tools=[sim])` plus a single `agent("…")` prompt — runnable example: [`examples/libero/run_mujoco_agent.py`](libero/run_mujoco_agent.py) | The script owns the deterministic plumbing (GR00T container lifecycle via `gr00t_inference(action='lifecycle', ...)`, LIBERO scene pre-warm, MP4 recording start/stop); the agent's job is the natural-language → `evaluate_benchmark` action-pick + kwarg-fill + summary. The lifecycle-vs-agent split is intentional — see the file's docstring for why infrastructure orchestration stays under deterministic Python control. |
 | `from strands_robots_sim import SteppedSimEnv` (iterative System-2 supervision) | No in-distribution iterative example — see [`R24 / #29`](https://github.com/strands-labs/robots-sim/issues/29) for the OOD-anchored runnable demo (cross-suite checkpoint mismatch / LIBERO-PRO perturbations / distractor injection) and upstream [`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136) (U6) for the canonical pattern doc | With `nvidia/GR00T-N1.7-LIBERO/libero_<suite>/` finetuned end-to-end on each suite, an in-distribution iterative-supervision demo would be theater — the System-2 hook has nothing to actually decide. The pattern earns its complexity in OOD scenarios; that's R24's scope. |
 | `agent.tool.my_sim(record_video=True)` → `rollouts/YYYY_MM_DD/...mp4` | `sim.start_cameras_recording(cameras=[...], output_dir="rollouts/YYYY_MM_DD", name=...)` + `sim.stop_cameras_recording()` (the example files do this around `evaluate_benchmark`) | The `rollouts/YYYY_MM_DD/<timestamp>--<metadata>__<camera>.mp4` filename convention is preserved by the example files; per-episode segmentation needs upstream `record_video=` plumbing on `evaluate_benchmark` and is filed as a follow-up. |
-| `pip install 'strands-robots-sim[sim]'` (libero / robosuite / scipy / mujoco / gymnasium) | `pip install 'strands-robots[sim-mujoco,benchmark-libero]'` | The lightweight backend stack moved upstream. Heavy GPU backends (Isaac, Newton) will live behind `[isaac]` / `[newton]` extras in this repo. |
+| `pip install 'strands-robots-sim[sim]'` (libero / robosuite / scipy / mujoco / gymnasium) | `pip install 'strands-robots[sim-mujoco,benchmark-libero]'` | The lightweight backend stack moved upstream. The heavy GPU backend (Isaac Sim) lives behind the `[isaac]` extra in this repo. |
 
 ---
 
@@ -125,16 +124,6 @@ sim.evaluate_benchmark(
     n_episodes=50,
     seed=42,
 )
-```
-
-### After — Newton fleet (Stage 4, future)
-
-```python
-sim = create_simulation("newton", num_envs=4096, solver="mujoco")
-sim.create_world()
-load_libero_suite("libero_spatial")
-sim.evaluate_benchmark(benchmark_name="libero-spatial-pick_up_the_red_block",
-                      n_episodes=50, seed=42)
 ```
 
 ---
