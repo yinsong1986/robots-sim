@@ -166,6 +166,13 @@ from strands_robots_sim.isaac.config import IsaacConfig  # noqa: E402  # late im
 
 logger = logging.getLogger(__name__)
 
+# Shape-name aliases accepted by :meth:`IsaacSimulation.add_object`.
+# Maps an alias -> the canonical shape name. ``"cuboid"`` mirrors Isaac's
+# ``DynamicCuboid`` / ``FixedCuboid`` class names and the vocabulary used
+# throughout the docs; it normalizes to the canonical ``"box"`` (see #88).
+# A unit test pins this mapping so docs and code can't drift apart again.
+_SHAPE_ALIASES: dict[str, str] = {"cuboid": "box"}
+
 # Module-level singleton tracking for SimulationApp
 _SIMULATION_APP: Any = None
 _SIMULATION_APP_LOCK = threading.Lock()
@@ -1136,8 +1143,11 @@ class IsaacSimulation(SimEngine):
             than silently overwriting the existing prim.
         shape : str
             Shape type: ``"box"`` (default), ``"sphere"``, ``"capsule"``,
-            ``"cylinder"``. Anything else returns a structured error
-            envelope listing the valid set.
+            ``"cylinder"``. ``"cuboid"`` is accepted as an alias for
+            ``"box"`` (it mirrors Isaac's ``DynamicCuboid`` class name and
+            the docs vocabulary; it normalizes to ``"box"``, which is the
+            value reported back in the result ``json``). Anything else
+            returns a structured error envelope listing the valid set.
         position : list[float], optional
             World-space position ``[x, y, z]`` in meters. Default
             ``[0.0, 0.0, 0.5]`` (50 cm above origin so an object dropped
@@ -1146,7 +1156,10 @@ class IsaacSimulation(SimEngine):
             World-space orientation as a quaternion ``[w, x, y, z]``.
             Default ``[1.0, 0.0, 0.0, 0.0]`` (identity).
         size : list[float], optional
-            Shape dimensions in meters. Conventions per shape:
+            Shape dimensions in meters. ``scale`` is accepted as an alias
+            for ``size`` (matches Isaac's ``DynamicCuboid(scale=...)``
+            convention and the docs vocabulary -- see #88); an explicit
+            ``size`` wins if both are passed. Conventions per shape:
 
             * ``box``:      ``[width, height, depth]`` (default ``[0.05, 0.05, 0.05]``).
             * ``sphere``:   ``[radius]`` (default ``[0.05]``).
@@ -1180,12 +1193,20 @@ class IsaacSimulation(SimEngine):
             if not self._world_created:
                 return {"status": "error", "content": [{"text": "No world created."}]}
 
+            # Normalize shape aliases. ``"cuboid"`` is accepted as an
+            # alias for ``"box"`` because it matches Isaac's underlying
+            # ``DynamicCuboid`` / ``FixedCuboid`` class names and is the
+            # vocabulary used throughout the docs (see issue #88). The
+            # canonical name stored / reported is ``"box"``.
+            shape = _SHAPE_ALIASES.get(shape, shape)
+
             # Validate shape
             valid_shapes = ("box", "sphere", "capsule", "cylinder")
             if shape not in valid_shapes:
+                accepted = valid_shapes + tuple(_SHAPE_ALIASES)
                 return {
                     "status": "error",
-                    "content": [{"text": f"Unknown shape: {shape!r}. Valid: {valid_shapes}"}],
+                    "content": [{"text": f"Unknown shape: {shape!r}. Valid: {accepted}"}],
                 }
 
             if name in self._objects:
@@ -1193,6 +1214,14 @@ class IsaacSimulation(SimEngine):
                     "status": "error",
                     "content": [{"text": f"Object '{name}' already exists."}],
                 }
+
+            # ``scale`` is accepted as an alias for ``size`` (matches
+            # Isaac's ``DynamicCuboid(scale=...)`` convention and the docs
+            # vocabulary -- see issue #88). An explicit ``size`` always
+            # wins over ``scale`` if both are passed.
+            scale_alias = kwargs.pop("scale", None)
+            if size is None and scale_alias is not None:
+                size = scale_alias
 
             pos = list(position) if position is not None else [0.0, 0.0, 0.5]
             orient = list(orientation) if orientation is not None else [1.0, 0.0, 0.0, 0.0]

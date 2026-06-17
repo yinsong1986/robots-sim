@@ -109,16 +109,23 @@ sim.add_object(name="cube", shape="cuboid",
                mass=0.1)
 
 sim.add_object(name="ball", shape="sphere",
-               position=[0.0, 0.4, 0.05], radius=0.04)
+               position=[0.0, 0.4, 0.05], size=[0.04])
 
 sim.add_object(name="wall", shape="cuboid",
                position=[0.0, 0.5, 0.5],
                scale=[1.0, 0.01, 1.0], is_static=True)
 ```
 
+`shape` accepts `"box"` (canonical), `"sphere"`, `"cylinder"`,
+`"capsule"`, and `"cuboid"` (an alias for `"box"` that mirrors Isaac's
+`DynamicCuboid` class name). Dimensions are passed via `size=`; `scale=`
+is accepted as an alias for `size=`. The result `json` always reports the
+canonical `"box"`. Per-shape `size` conventions: box `[w, h, d]`, sphere
+`[radius]`, cylinder / capsule `[radius, height]`.
+
 | Shape | `omni.isaac.core.objects` |
 |---|---|
-| `"cuboid"` / `"box"` | `DynamicCuboid` / `FixedCuboid` |
+| `"box"` / `"cuboid"` | `DynamicCuboid` / `FixedCuboid` |
 | `"sphere"` | `DynamicSphere` / `FixedSphere` |
 | `"cylinder"` | `DynamicCylinder` / `FixedCylinder` |
 | `"capsule"` | `DynamicCapsule` / `FixedCapsule` |
