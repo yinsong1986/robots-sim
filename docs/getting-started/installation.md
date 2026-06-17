@@ -110,8 +110,7 @@ from importlib.metadata import entry_points
 
 for ep in entry_points(group="strands_robots.backends"):
     print(ep.name, "->", ep.value)
-# isaac     -> strands_robots_sim.isaac.simulation:IsaacSimulation
-# isaac_sim -> strands_robots_sim.isaac.simulation:IsaacSimulation
+# isaac -> strands_robots_sim.isaac.simulation:IsaacSimulation
 ```
 
 ## From source

@@ -99,12 +99,11 @@ never knows which backend is underneath.
 
 ```toml
 [project.entry-points."strands_robots.backends"]
-isaac     = "strands_robots_sim.isaac.simulation:IsaacSimulation"
-isaac_sim = "strands_robots_sim.isaac.simulation:IsaacSimulation"
+isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 ```
 
 When `strands-robots-sim` is installed, `importlib.metadata.entry_points`
-sees both names. `create_simulation("isaac", ...)` upstream walks the
+sees the `isaac` name. `create_simulation("isaac", ...)` upstream walks the
 `strands_robots.backends` group, finds the `isaac` entry, imports the
 target string, and instantiates it.
 
