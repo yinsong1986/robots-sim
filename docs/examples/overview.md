@@ -14,7 +14,8 @@ sibling so you can pick the driver that matches your audience.
 | `<benchmark>/run_<backend>_agent.py` | **Strands `Agent` + natural language** — script owns the deterministic plumbing (GR00T container lifecycle, scene pre-warm, MP4 recording); a single `agent("…")` call invokes the eval and produces a prose summary | Demos / "what does a Strands integration buy?" |
 
 The programmatic file prints two grep-stable lines that the flagship
-`R15` matrix driver subprocess-and-parses for the side-by-side table:
+`libero_backend_matrix.py` driver subprocess-and-parses for the
+side-by-side table:
 
 ```
 benchmark_name=libero-spatial-pick_up_the_red_cube
@@ -42,21 +43,24 @@ either file to reuse an already-running container instead.
 
 ## Backend matrix (LIBERO)
 
-Same task — `libero-spatial-pick_up_the_red_cube`, 50 episodes, seed 42 —
-on every backend, with success rate and wall-time recorded side-by-side.
-Numbers are committed as each example lands, measured on a reference
-machine (recorded in each example file's header).
+Same task — `libero-spatial-pick_up_the_red_cube`, 10 episodes, seed 42 —
+on the two supported backends, with success rate and wall-time recorded
+side-by-side. Numbers come from the *programmatic* file with
+`--policy=groot` against the matching `libero_<suite>/` sub-checkpoint
+unless a row says otherwise; mock-policy smoke runs are reference only.
 
 | Example | Backend | `n_envs` | Renderer | Why use this row | Wall-time @ success-rate |
 |---|---|---:|---|---|---|
 | [`libero/run_mujoco.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | Software / GL | Default; macOS + Apple Silicon OK; fast iteration | ~9 s/ep @ 1.00 (groot)[^1] |
-| [`libero/run_isaac.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/libero/run_isaac.py) | Isaac Sim | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | _TBD ([R8 / #15](https://github.com/strands-labs/robots-sim/issues/15))_ |
-| `libero/run_isaac_fleet.py` | Isaac Sim | 4096 | RTX off / minimal | IsaacLab-style fleet RL with USD scenes | _TBD ([R23 / #27](https://github.com/strands-labs/robots-sim/issues/27))_ |
+| [`libero/run_isaac.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/libero/run_isaac.py) | Isaac Sim | 1 | RTX path-traced | Photoreal eval, demo videos, paper-grade frames | _measured by [`libero_backend_matrix.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/libero/libero_backend_matrix.py); lifecycle validated in [PR #74](https://github.com/strands-labs/robots-sim/pull/74)_ |
 
-The flagship driver `libero_backend_matrix.py`
-([R15 / #22](https://github.com/strands-labs/robots-sim/issues/22)) walks
-the rows and prints a unified table; each row also has a stand-alone
-example you can run in isolation.
+IsaacLab-style fleet RL (`n_envs=4096`) is surfaced by the flagship
+matrix driver `libero_backend_matrix.py` as a separate
+`run_isaac_fleet.py` row (`isaac-4096`), which reads `unavailable` until
+that driver lands. The flagship driver walks the rows and prints a
+unified table; each row also has a stand-alone example you can run in
+isolation. Roadmap and follow-ups are tracked under the umbrella
+[#8](https://github.com/strands-labs/robots-sim/issues/8).
 
 [^1]: Single-sample on the L4 reference dev box (`libero-10/SCENE5`,
     seed=42, n=5). Pre-`strands-labs/robots#188` success rate was 0.20–0.60
