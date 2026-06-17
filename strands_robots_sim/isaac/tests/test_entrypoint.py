@@ -4,8 +4,8 @@ Pins the three pieces of packaging surface that the Isaac backend
 relies on:
 
 1. The ``[isaac]`` extra is declared in ``pyproject.toml`` and pulls in
-   the pip-installable subset of Isaac Sim's runtime deps (``usd-core``,
-   ``warp-lang``, ``pytest``).
+   the pip-installable subset of Isaac Sim's runtime deps (``isaacsim``,
+   ``isaaclab``, ``usd-core``).
 2. The ``isaac`` and ``isaac_sim`` entry points under
    ``strands_robots.backends`` resolve to
    ``strands_robots_sim.isaac.simulation:IsaacSimulation``.
@@ -48,7 +48,7 @@ class TestEntryPointDeclaration:
         content = _PYPROJECT.read_text()
         assert "\nisaac = [" in content or "\nisaac=[" in content, (
             "Expected `isaac = [...]` under [project.optional-dependencies] declaring "
-            "the pip-installable subset of Isaac Sim's runtime deps (usd-core, warp-lang, pytest)."
+            "the pip-installable subset of Isaac Sim's runtime deps (isaacsim, isaaclab, usd-core)."
         )
 
     def test_isaac_extra_includes_isaacsim_and_isaaclab(self):

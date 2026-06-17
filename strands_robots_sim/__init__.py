@@ -8,9 +8,9 @@ MuJoCo + LIBERO + GR00T code path now lives in
 via the ``Simulation`` AgentTool, the ``LiberoAdapter`` benchmark plugin, and
 ``strands_robots.tools.gr00t_inference``.
 
-This module is currently a no-op stub. Heavy GPU-only backends
-(``IsaacSimulation``, ``NewtonSimulation``) will register themselves through
-``strands-robots`` entry points in upcoming releases; see the umbrella issue
+This module is currently a no-op stub. The heavy GPU-only Isaac Sim
+backend (``IsaacSimulation``) registers itself through ``strands-robots``
+entry points; see the umbrella issue
 https://github.com/strands-labs/robots-sim/issues/8.
 
 See ``examples/MIGRATION.md`` for the old-API → new-API mapping.

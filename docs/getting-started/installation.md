@@ -7,8 +7,8 @@
    or the NGC Docker image.
 2. **The `strands-robots-sim` Python package** — a thin pip-installable
    plugin that registers `IsaacSimulation` as a `strands_robots.backends`
-   entry point and adds a few light deps that Isaac uses internally
-   (`usd-core` for USD authoring, `warp-lang` for sensor kernels).
+   entry point and adds the pip-installable Isaac Sim companion deps
+   (`isaacsim`, `isaaclab`, and `usd-core` for USD authoring).
 
 Order matters: install Isaac Sim **first**, then `pip install
 'strands-robots-sim[isaac]'` into the same Python environment.
@@ -80,11 +80,11 @@ Use the same Python environment that Isaac Sim's `python.sh` /
 pip install 'strands-robots-sim[isaac]'
 ```
 
-The `[isaac]` extra pulls in `usd-core` (USD scene authoring) and
-`warp-lang` (a lightweight kernel runtime Isaac Sim uses internally for
-some sensor paths). `strands-robots` is pulled in transitively, which gives
-you the upstream `Simulation` AgentTool, `create_simulation()` factory,
-and policy providers.
+The `[isaac]` extra pulls in `isaacsim` and `isaaclab` (the
+pip-installable Isaac Sim / Isaac Lab companion packages) plus
+`usd-core` (USD scene authoring). `strands-robots` is pulled in
+transitively, which gives you the upstream `Simulation` AgentTool,
+`create_simulation()` factory, and policy providers.
 
 ## Step 3 — verify the install
 

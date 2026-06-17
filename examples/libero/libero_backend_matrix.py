@@ -3,12 +3,11 @@
 
 The flagship demo of this repo. Runs one LIBERO task on whichever of
 the per-backend driver scripts (``run_mujoco.py``, ``run_isaac.py``,
-``run_isaac_fleet.py``, ``run_newton.py``, ``run_newton_fleet.py``)
-the host can actually execute, and prints a single side-by-side table
-with ``success_rate`` and ``wall_time`` per backend. Missing backends
-are skipped gracefully -- a CPU-only laptop with just MuJoCo installed
-should produce a table where every Isaac / Newton row reads
-``unavailable`` and only the MuJoCo row carries a measurement.
+``run_isaac_fleet.py``) the host can actually execute, and prints a
+single side-by-side table with ``success_rate`` and ``wall_time`` per
+backend. Missing backends are skipped gracefully -- a CPU-only laptop
+with just MuJoCo installed should produce a table where every Isaac
+row reads ``unavailable`` and only the MuJoCo row carries a measurement.
 
 Why a subprocess-and-parse driver, not direct ``create_simulation``?
 --------------------------------------------------------------------
@@ -33,8 +32,8 @@ Detection
 For each backend row, the matrix script:
 
 1. Checks that the per-backend driver file exists in this checkout.
-   Missing → ``unavailable (file missing)``. (E.g. ``run_newton.py``
-   doesn't land until R12 / `#19`.)
+   Missing → ``unavailable (file missing)``. (E.g. ``run_isaac_fleet.py``
+   doesn't land until R23 / `#27`.)
 2. Spawns ``python <file> --policy=mock --n-episodes=N --seed=S``.
    If that exits non-zero, captures the last few stderr lines and
    marks the row ``skip (<reason>)``. The most common skip reason is
@@ -75,27 +74,22 @@ never crash it -- they just produce ``unavailable`` rows. The
 underlying per-backend files do import their backends, and the
 combinations that produce non-skip rows are::
 
-    # Just MuJoCo (mujoco row only -- isaac/newton rows skip):
+    # Just MuJoCo (mujoco row only -- isaac rows skip):
     pip install 'strands-robots[sim-mujoco,benchmark-libero]'
 
     # + Isaac Sim single-env + fleet (isaac-1, isaac-4096 rows):
     pip install 'strands-robots-sim[isaac]' \\
         'strands-robots[benchmark-libero]'
 
-    # + Newton / Warp (newton, newton-4096 rows; gated on R12 / #19):
-    pip install 'strands-robots-sim[newton]' \\
-        'strands-robots[benchmark-libero]'
-
 Verification status
 -------------------
 CLI / subprocess-and-parse / table-printing logic is verified on a
 CPU-only dev box where every ``run_*`` driver is expected to short-
-circuit on Isaac / Newton ``is_available()`` calls and only the
-``mujoco`` row produces a measurement. Full multi-backend numbers
-(the actual side-by-side table this script exists to deliver) land
-once R8 (`#15`) and R23 (`#27`) finish wiring their data planes;
-``examples/README.md`` and the umbrella issue `#8` track those
-landings.
+circuit on Isaac ``is_available()`` calls and only the ``mujoco`` row
+produces a measurement. Full multi-backend numbers (the actual
+side-by-side table this script exists to deliver) land once R8 (`#15`)
+and R23 (`#27`) finish wiring their data planes; ``examples/README.md``
+and the umbrella issue `#8` track those landings.
 """
 
 from __future__ import annotations
@@ -118,14 +112,12 @@ from typing import Optional
 #
 # Driver files that don't yet exist on disk produce an
 # ``unavailable (file missing)`` row -- the matrix script doesn't
-# need them all to land at once. R5 / R8 / R23 / R12 each add their
+# need them all to land at once. R5 / R8 / R23 each add their
 # own driver as part of the staged plan tracked in #8.
 _BACKEND_ROWS: list[tuple[str, str, list[str]]] = [
     ("mujoco", "run_mujoco.py", []),
     ("isaac-1", "run_isaac.py", []),
     ("isaac-4096", "run_isaac_fleet.py", []),
-    ("newton-1", "run_newton.py", []),
-    ("newton-4096", "run_newton_fleet.py", []),
 ]
 
 # Two grep-stable lines that every per-backend driver produces. Kept

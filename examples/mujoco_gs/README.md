@@ -309,8 +309,8 @@ walls and counters, then load it via `Simulation.load_scene(...)` before
   point `run_policy` at a real ONNX checkpoint to recreate that part.
 
 These are all deliberate scope cuts to keep this an *example* rather than a
-full feature. PRs welcome — swap in `gsplat`'s SH evaluation or wire up a
-Newton/Warp backend for the heavier parallel cases.
+full feature. PRs welcome — swap in `gsplat`'s SH evaluation or wire up the
+Isaac Sim backend for the heavier parallel cases.
 
 ## License
 
