@@ -82,22 +82,39 @@ def make_sim(backend: str = "mujoco", **isaac_kwargs: Any):
         return Simulation(tool_name="sim", mesh=False)
 
     if backend in ("isaac", "isaacsim", "isaac_sim"):
-        # Register the example's Isaac backend (issue #67 T1) so
-        # create_simulation("isaac") resolves. No-op when Isaac isn't installed.
-        try:
-            from .isaac import register as _register_isaac
-
-            _register_isaac()
-        except Exception:  # noqa: BLE001 - registration is best-effort
-            logger.debug("Isaac backend registration skipped", exc_info=True)
+        # The Isaac backend is provided by ``strands_robots_sim.isaac``
+        # via the ``[project.entry-points."strands_robots.backends"]``
+        # entry-point ``isaac = strands_robots_sim.isaac.simulation:IsaacSimulation``
+        # (see issue #69 for the consolidation rationale -- the
+        # example-local adapter has been retired).
+        #
+        # Until the upstream factory walks that entry-point group
+        # (tracked by upstream U2 / strands-robots#131), we register
+        # the backend manually here so ``create_simulation("isaac")``
+        # resolves on a stock ``strands-robots>=0.3`` install. Once
+        # U2 ships and ``strands-robots>=0.4`` is the floor, this
+        # ``register_backend`` call becomes redundant and can be
+        # dropped.
         try:
             from strands_robots.simulation import create_simulation
+            from strands_robots.simulation.factory import register_backend
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 "Isaac backend requested but create_simulation() is unavailable. "
-                "Use backend='mujoco' (default), or land the backend registration "
-                "(issue #67 T1) so create_simulation('isaac') resolves."
+                "Use backend='mujoco' (default), or install a strands-robots build "
+                "that ships the SimEngine factory."
             ) from exc
+        try:
+            from strands_robots_sim.isaac.simulation import IsaacSimulation as _IsaacSim
+
+            register_backend(
+                "isaac",
+                lambda: _IsaacSim,
+                aliases=["isaac_sim", "isaacsim", "nvidia"],
+                force=True,  # idempotent across re-imports
+            )
+        except Exception:  # noqa: BLE001 - registration is best-effort
+            logger.debug("Isaac backend registration skipped", exc_info=True)
         try:
             return create_simulation(
                 "isaac",
@@ -108,7 +125,7 @@ def make_sim(backend: str = "mujoco", **isaac_kwargs: Any):
             raise RuntimeError(
                 f"Could not create the Isaac Sim backend ({type(exc).__name__}: {exc}). "
                 "The Isaac Sim runtime (Python 3.10 venv with `isaacsim`) is required; "
-                "see examples/so101_curobo/isaac for the validated install recipe. "
+                "install it via the NGC docker image or NVIDIA Omniverse Launcher. "
                 "Falling back to MuJoCo is recommended on boxes without it."
             ) from exc
 
@@ -213,12 +230,21 @@ def build_pick_place_scene(
     # set_world_pose (so the kinematic carry works) but never drifts or flings, so
     # every episode resets to the identical pose. MuJoCo (dynamic actuated grasp)
     # keeps a dynamic cube.
+    #
+    # ``size`` convention divergence between backends: MuJoCo's ``add_object``
+    # takes half-extents (matching ``mjcf`` ``geom size``); the
+    # ``strands_robots_sim.isaac`` backend (the consolidated one as of issue
+    # #69) takes full extents. Convert here based on the backend so the
+    # physical cube/bin sizes match across both runs.
+    is_isaac = backend in ("isaac", "isaacsim", "isaac_sim")
+    cube_size = [2.0 * h for h in DEFAULT_CUBE_HALF] if is_isaac else list(DEFAULT_CUBE_HALF)
+    bin_size = [2.0 * h for h in DEFAULT_BIN_HALF] if is_isaac else list(DEFAULT_BIN_HALF)
     cube_static = bool(robot_urdf)
     sim.add_object(
         name="cube",
         shape="box",
         position=cube_position,
-        size=DEFAULT_CUBE_HALF,
+        size=cube_size,
         color=DEFAULT_CUBE_COLOR,
         mass=0.04,
         is_static=cube_static,
@@ -228,7 +254,7 @@ def build_pick_place_scene(
             name="bin",
             shape="box",
             position=[place_position[0], place_position[1], DEFAULT_BIN_HALF[2]],
-            size=DEFAULT_BIN_HALF,
+            size=bin_size,
             color=DEFAULT_BIN_COLOR,
             mass=1.0,
             is_static=True,

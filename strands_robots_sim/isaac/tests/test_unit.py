@@ -2363,3 +2363,93 @@ class TestAddRobotUrdfBranchPhase2:
         assert result["status"] == "error"
         assert "articulation root not in URDF" in result["content"][0]["text"]
         assert "bad" not in sim._robots
+
+
+class TestSendActionReturnContract:
+    """``send_action`` must return the SimEngine ``dict`` envelope.
+
+    The ABC (``strands_robots.simulation.base.SimEngine``) declares
+    ``send_action -> dict[str, Any]`` and ``PolicyRunner`` increments its
+    ``_action_errors`` counter only when the returned ``status == "error"``.
+    A bare ``None`` return (the pre-fix behaviour) silently swallowed every
+    action failure. These tests pin the envelope on each path.
+    """
+
+    def _make_sim_with_robot(self, joint_names=("j0", "j1", "j2")):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation, _RobotState
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        art = MagicMock()
+        sim._robots["arm"] = _RobotState(
+            name="arm",
+            prim_path="/World/Robots/arm",
+            joint_names=list(joint_names),
+            articulation=art,
+        )
+        return sim, art
+
+    def test_no_world_returns_error_envelope(self):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.send_action({"j0": 0.1})
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+        assert "No world created." in result["content"][0]["text"]
+
+    def test_unknown_robot_returns_error_envelope(self):
+        sim, _ = self._make_sim_with_robot()
+        result = sim.send_action({"j0": 0.1}, robot_name="missing")
+        assert result["status"] == "error"
+        assert "missing" in result["content"][0]["text"]
+
+    def test_ambiguous_robot_returns_error_envelope(self):
+        from strands_robots_sim.isaac.simulation import _RobotState
+
+        sim, _ = self._make_sim_with_robot()
+        sim._robots["arm2"] = _RobotState(
+            name="arm2",
+            prim_path="/World/Robots/arm2",
+            joint_names=["j0"],
+            articulation=MagicMock(),
+        )
+        result = sim.send_action({"j0": 0.1})
+        assert result["status"] == "error"
+        assert "specify robot_name" in result["content"][0]["text"]
+
+    def test_success_returns_success_envelope(self):
+        sim, art = self._make_sim_with_robot()
+        result = sim.send_action({"j0": 0.1, "j1": 0.2, "j2": 0.3}, n_substeps=2)
+        assert result["status"] == "success"
+        assert "arm" in result["content"][0]["text"]
+        assert "2 substeps" in result["content"][0]["text"]
+        art.set_joint_position_targets.assert_called_once()
+        assert sim._world.step.call_count == 2
+
+    def test_array_action_returns_success_envelope(self):
+        sim, art = self._make_sim_with_robot()
+        result = sim.send_action(np.array([0.1, 0.2, 0.3], dtype=np.float32))
+        assert result["status"] == "success"
+        art.set_joint_position_targets.assert_called_once()
+
+    def test_unresolved_keys_return_error_with_json_block(self):
+        sim, art = self._make_sim_with_robot()
+        result = sim.send_action({"j0": 0.1, "bogus": 9.9})
+        assert result["status"] == "error"
+        # Resolvable keys are still applied (physics advanced)...
+        art.set_joint_position_targets.assert_called_once()
+        # ...but the unresolved key surfaces in a json block for self-correction.
+        json_block = next(c["json"] for c in result["content"] if "json" in c)
+        assert json_block["unresolved_keys"] == ["bogus"]
+        assert json_block["applied"] == ["j0"]
+
+    def test_articulation_failure_returns_error_envelope(self):
+        sim, art = self._make_sim_with_robot()
+        art.set_joint_position_targets.side_effect = RuntimeError("articulation torn down")
+        result = sim.send_action({"j0": 0.1})
+        assert result["status"] == "error"
+        assert "articulation torn down" in result["content"][0]["text"]
+        # Physics must not advance once the action couldn't be applied.
+        sim._world.step.assert_not_called()
