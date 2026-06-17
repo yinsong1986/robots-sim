@@ -11,12 +11,13 @@ patterns the deleted `SimEnv` API used to cover.
 
 | File suffix | Driver | Replaces | Best for |
 |---|---|---|---|
-| `<benchmark>/run_<backend>.py` | **Programmatic** — Python script calls `sim.evaluate_benchmark(...)` directly | `SimEnv` | CI / benchmark numbers / the backend-matrix table |
+| `<benchmark>/run_<backend>.py` | **Programmatic** — Python script calls `sim.evaluate_benchmark(...)` directly | `SimEnv` | CI / benchmark numbers / the flagship backend-matrix table |
 | `<benchmark>/run_<backend>_agent.py` | **Strands `Agent` + natural language** — script owns the deterministic plumbing (GR00T container lifecycle, scene pre-warm, MP4 recording); a single `agent("…")` call invokes `evaluate_benchmark` from natural-language kwargs and produces a prose summary | the natural-language entry point in the deleted `libero_example.py` | Demoing why a Strands integration buys you anything beyond direct calls |
 
 The programmatic files print two grep-stable lines (`benchmark_name=...`
 and `policy=... task=... success_rate=... wall_time=...s`) that the
-flagship [`libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
+flagship driver
+[`examples/libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
 subprocess-and-parses for the side-by-side comparison table. The agent
 files are for human inspection — output is non-deterministic
 LLM-generated prose, not matrix-ingested.
@@ -27,8 +28,8 @@ LLM-generated prose, not matrix-ingested.
 > its training distribution the policy executes the canonical task
 > without stalling, so System-2 supervision over an in-distribution
 > finetuned policy has nothing to actually decide. The canonical
-> iterative-supervision pattern doc lives upstream at
-> [`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136).
+> pattern doc for OOD-anchored iterative supervision lives upstream at
+> [`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136) (U6).
 
 ## Two policy choices
 
@@ -60,7 +61,7 @@ canonical mujoco baseline number for the matrix table is the
 ## Backend matrix
 
 Same task — `libero-spatial-pick_up_the_red_cube`, 10 episodes, seed
-42 — on every available backend with success rate and wall-time
+42 — on the two supported backends with success rate and wall-time
 side-by-side. Numbers come from the *programmatic* file with
 `--policy=groot` against the matching `libero_<suite>/` sub-checkpoint
 unless a row says otherwise; mock-policy smoke runs are listed below
@@ -69,7 +70,12 @@ the table for reference.
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
 | [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client)[^1] | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
-| [`libero/run_isaac.py`](libero/run_isaac.py) | Isaac Sim | 1 | _TBD_ | RTX path-traced; loads a real Franka USD via `add_robot(usd_path=...)`. End-to-end RTX validation tracked under the [#8](https://github.com/strands-labs/robots-sim/issues/8) umbrella |
+| [`libero/run_isaac.py`](libero/run_isaac.py) | Isaac Sim | 1 | _measured by [`libero_backend_matrix.py`](libero/libero_backend_matrix.py)_ | RTX path-traced; loads a real Franka USD via `add_robot(usd_path=...)`. End-to-end validation landed in [PR #74](https://github.com/strands-labs/robots-sim/pull/74). |
+
+IsaacLab-style fleet RL (n_envs=4096) is surfaced by the flagship
+matrix driver as a separate `run_isaac_fleet.py` row (`isaac-4096`),
+which reads `unavailable` until that driver lands; see
+[Running the matrix](#running-the-matrix) below.
 
 **Mock-policy smoke wall-time (reference only, not matrix-authoritative):**
 
@@ -94,7 +100,8 @@ The example file works WITHOUT this wrapper; it's only needed when
 bit-exact run-to-run reproducibility matters.
 
 The flagship driver
-[`libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
+[`examples/libero/libero_backend_matrix.py`](libero/libero_backend_matrix.py)
+([#22](https://github.com/strands-labs/robots-sim/issues/22))
 walks every per-backend driver this checkout can execute (today MuJoCo +
 Isaac Sim) and prints a unified table — see
 [Running the matrix](#running-the-matrix) below.
@@ -111,7 +118,7 @@ Isaac Sim) and prints a unified table — see
 ```bash
 pip install 'strands-robots[sim-mujoco,benchmark-libero]'
 
-# 1) Programmatic, deterministic, no LLM. The matrix driver ingests this output.
+# 1) Programmatic, deterministic, no LLM. The flagship matrix driver ingests this output.
 python examples/libero/run_mujoco.py --policy mock --n-episodes 5
 
 # 2) Strands-Agent + natural language. Requires a configured LLM
@@ -193,15 +200,16 @@ python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 > diagnostic from `IsaacSimulation.is_available()` rather than crashing
 > on the first `omni.*` import.
 
-> **Status (landing):** CLI / control-flow / lint validation and the
-> `is_available()` short-circuit are verified on a CPU-only dev box; the
-> LIBERO suite + helper resolution paths are unit-checked against
-> `strands-robots`. The Phase-2 data-plane slices these scripts ride on
-> (add_camera, render frame-path, USD-load, URDF-load) have landed. The
-> full RTX eval (the matrix wall-time @ success-rate number above) runs
-> on an Isaac Sim host with an RTX GPU; end-to-end validation of the
-> Isaac example scripts is tracked under the
-> [#8](https://github.com/strands-labs/robots-sim/issues/8) umbrella.
+> **Status (landing):** Phase-2 data-plane slices (`add_camera`, render
+> frame-path, USD-load, URDF-load) are merged on `main`. End-to-end
+> validation of `run_isaac.py` + `run_isaac_agent.py` against an Isaac
+> Sim 4.5 install — including the `is_available()` namespace-shim, the
+> port from `omni.isaac.*` to `isaacsim.*`, and the matrix wall-time @
+> success-rate number above — landed in
+> [PR #74](https://github.com/strands-labs/robots-sim/pull/74). On a
+> non-Isaac host both scripts still exit early with a structured
+> diagnostic via `IsaacSimulation.is_available()` rather than crashing
+> on the first import.
 
 ## Running the matrix
 
@@ -250,11 +258,10 @@ pip install 'strands-robots-sim[isaac]' \
 ```
 
 A row that reads `unavailable (no run_<backend>.py)` means the
-per-backend driver file hasn't landed in this checkout yet — the
-matrix script is forward-compatible with rows that don't exist on
-disk yet, so it keeps working as the staged plan tracked in
-[#8](https://github.com/strands-labs/robots-sim/issues/8) lands
-each backend in turn.
+per-backend driver file isn't in this checkout — the matrix script is
+forward-compatible with rows that don't exist on disk, so it keeps
+working as the staged plan tracked in
+[#8](https://github.com/strands-labs/robots-sim/issues/8) evolves.
 
 ### Output format
 
@@ -271,7 +278,7 @@ isaac-1                 --          --  skip (Isaac Sim is not available on this
 === /libero_backend_matrix ===
 ```
 
-Pass `--backends mujoco,isaac-1` to attempt only a subset, and
+Pass `--backends mujoco,isaac` to attempt only a subset, and
 `--per-backend-timeout 1200` to allow longer-running drivers (the
 default 600 s is generous for 10-episode mock smoke; full
 `--policy=groot` runs at 50 episodes can need more).
@@ -280,11 +287,12 @@ default 600 s is generous for 10-episode mock smoke; full
 
 Not every example is a LIBERO benchmark. The files under
 [`isaac/`](isaac/) demonstrate capabilities that are **specific to the
-Isaac Sim backend** -- things MuJoCo can't replicate because
-it doesn't ship the Omniverse / USD / RTX stack underneath. These
-examples sit outside the `<benchmark>/run_<backend>.py` matrix
-convention because they're showing what each backend is *for* at a
-higher level than per-task evaluation.
+Isaac Sim backend** -- things the lightweight MuJoCo backend can't
+replicate because it doesn't ship the Omniverse / USD / RTX stack
+underneath. These examples sit outside the
+`<benchmark>/run_<backend>.py` matrix convention because they're
+showing what the Isaac backend is *for* at a higher level than
+per-task evaluation.
 
 | Example | Capability | Why Isaac-only | Tracking |
 |---|---|---|---|
@@ -301,7 +309,6 @@ safe to invoke in CI / dev-box smoke runs without crashing on the first
 natural-language `libero_example.py`. Those code paths moved upstream
 in 0.2.0 — see [`MIGRATION.md`](MIGRATION.md) for the explicit
 `SimEnv → libero/run_mujoco.py`, `agent("Run the task ...") →
-libero/run_mujoco_agent.py`, and the `SteppedSimEnv` iterative-supervision
-pattern (documented upstream at
-[`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136))
+libero/run_mujoco_agent.py`, and `SteppedSimEnv → upstream U6
+([`strands-labs/robots#136`](https://github.com/strands-labs/robots/issues/136))`
 mapping.
