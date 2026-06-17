@@ -48,11 +48,17 @@ dependencies = [
 # Isaac Sim is NOT installable from PyPI — it's an Omniverse Kit app.
 # Users install it separately via NVIDIA Omniverse Launcher, Isaac Lab,
 # or the nvcr.io/nvidia/isaac-sim docker image. The pins below are the
-# pip-installable companion deps an Isaac Sim runtime expects to find:
+# pip-installable companion deps an Isaac Sim runtime expects to find,
+# and they must match the supported Isaac Sim **4.5.x** image / launcher
+# build documented in README.md, docs/, and
+# strands_robots_sim/isaac/_install.py (ISAAC_SIM_DOCKER_IMAGE =
+# nvcr.io/nvidia/isaac-sim:4.5.0). Keep this major.minor in lockstep with
+# those surfaces — see issue #90.
 #
-#   * `isaacsim==5.*`  — the PyPI shim that exposes Kit's Python API on
-#     hosts where Isaac Sim 5.x is installed alongside.
-#   * `isaaclab>=3.0,<4.0` — Isaac Lab's task / ROS / RL utilities.
+#   * `isaacsim==4.5.*` — the PyPI shim that exposes Kit's Python API on
+#     hosts where Isaac Sim 4.5.x is installed alongside.
+#   * `isaaclab>=2.0,<3.0` — Isaac Lab's task / ROS / RL utilities; the
+#     2.x line is the release paired with Isaac Sim 4.5.
 #   * `usd-core` — pure-Python USD runtime; used by the procedural scene
 #     builders even when Kit isn't booted.
 #
@@ -60,8 +66,8 @@ dependencies = [
 # wheel resolution step with NVIDIA's standard "Isaac Sim not detected"
 # message; that's the helpful failure mode the issue's DoD calls for.
 isaac = [
-    "isaacsim==5.*",
-    "isaaclab>=3.0,<4.0",
+    "isaacsim==4.5.*",
+    "isaaclab>=2.0,<3.0",
     "usd-core",
 ]
 # GPU boxes only — the Isaac backend in one shot. Kept as an alias of
