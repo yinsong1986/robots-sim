@@ -1586,7 +1586,7 @@ class IsaacSimulation(SimEngine):
         action: dict[str, Any] | np.ndarray | list,
         robot_name: str | None = None,
         n_substeps: int = 1,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Apply action and advance physics.
 
         Parameters
@@ -1597,25 +1597,53 @@ class IsaacSimulation(SimEngine):
             Robot to control.
         n_substeps : int
             Physics sub-steps after applying action. Default 1.
+
+        Returns
+        -------
+        dict
+            Standard ``{"status", "content": [{"text"}]}`` envelope, matching
+            the :class:`~strands_robots.simulation.base.SimEngine` contract so
+            :class:`~strands_robots.simulation.policy_runner.PolicyRunner` can
+            count action failures (it increments ``_action_errors`` when the
+            returned ``status`` is ``"error"``). When ``action`` is a dict and
+            some keys don't name a joint on ``robot_name``, the ``content`` list
+            carries a ``json`` block with ``unresolved_keys`` / ``applied`` so
+            callers can self-correct -- mirroring the MuJoCo backend.
         """
         with self._lock:
             if not self._world_created or self._world is None:
-                return
+                return {"status": "error", "content": [{"text": "No world created."}]}
 
             # Resolve robot
             if robot_name is None:
                 if len(self._robots) == 1:
                     robot_name = next(iter(self._robots))
+                elif not self._robots:
+                    return {"status": "error", "content": [{"text": "No robots in the world."}]}
                 else:
-                    return
+                    return {
+                        "status": "error",
+                        "content": [
+                            {
+                                "text": (
+                                    "Multiple robots present; specify robot_name. " f"Available: {sorted(self._robots)}"
+                                )
+                            }
+                        ],
+                    }
 
             if robot_name not in self._robots:
-                return
+                return {"status": "error", "content": [{"text": f"Robot '{robot_name}' not found."}]}
 
             robot = self._robots[robot_name]
 
-            # Convert action to array
+            # Convert action to array, tracking dict keys that don't name a
+            # joint so unresolved commands surface in the envelope rather than
+            # being silently dropped (parity with the MuJoCo backend).
+            unresolved: list[str] = []
             if isinstance(action, dict):
+                joint_set = set(robot.joint_names)
+                unresolved = [k for k in action if k not in joint_set]
                 action_array = np.zeros(len(robot.joint_names), dtype=np.float32)
                 for i, jname in enumerate(robot.joint_names):
                     if jname in action:
@@ -1635,12 +1663,37 @@ class IsaacSimulation(SimEngine):
                     # AttributeError on omni surface drift. Programming bugs
                     # (NameError, KeyError) propagate.
                     logger.debug("Failed to set joint targets: %s", e)
+                    return {
+                        "status": "error",
+                        "content": [{"text": f"Failed to set joint targets on '{robot_name}': {e}"}],
+                    }
 
             # Step physics
             for _ in range(n_substeps):
                 self._world.step(render=False)
                 self._sim_time += self._config.physics_dt
                 self._step_count += 1
+
+        if unresolved:
+            applied = [k for k in action if k not in unresolved]
+            return {
+                "status": "error",
+                "content": [
+                    {
+                        "text": (
+                            f"Action partially applied: keys {unresolved} could not be "
+                            f"resolved to joints on '{robot_name}'. Applied: {applied}. "
+                            f"Valid keys: {robot.joint_names}"
+                        )
+                    },
+                    {"json": {"unresolved_keys": unresolved, "applied": applied}},
+                ],
+            }
+
+        return {
+            "status": "success",
+            "content": [{"text": f"Action applied to '{robot_name}', {n_substeps} substeps."}],
+        }
 
     # --- SimEngine: Rendering -----------------------------------------------
 
