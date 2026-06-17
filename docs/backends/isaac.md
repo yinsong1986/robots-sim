@@ -2,8 +2,8 @@
 
 GPU-native photorealistic simulation backend for `strands-robots-sim` using
 NVIDIA Isaac Sim. This page is the **backend reference** — class layout,
-phase-1 / phase-2 status, configuration matrix, procedural builders,
-loaders, and tests.
+current status, configuration matrix, procedural builders, loaders, and
+tests.
 
 For introductory material, prefer:
 
@@ -26,8 +26,56 @@ For introductory material, prefer:
 - **Fleet replication**: parallel environments via `omni.isaac.cloner.Cloner`
 - **Isaac Lab integration**: GPU-accelerated RL environments
 
+!!! note "On the `omni.isaac.*` vs `isaacsim.*` namespaces"
+    Isaac Sim 4.5 ships every runtime extension under **two** namespaces:
+    the legacy `omni.isaac.*` tree (retained as Kit-extension deprecation
+    shims that resolve correctly post-bootstrap on the pinned
+    `nvcr.io/nvidia/isaac-sim:4.5.0` image) and the modern `isaacsim.*`
+    tree. This backend deliberately keeps the legacy `omni.isaac.*`
+    import paths for the core API (`omni.isaac.core.World`,
+    `omni.isaac.core.objects`, `omni.isaac.sensor.Camera`,
+    `omni.isaac.core.articulations.Articulation`, `omni.isaac.cloner`),
+    and uses the modern `isaacsim.*` path only where the legacy module
+    was removed in 4.5 — the `SimulationApp` entry point
+    (`isaacsim.SimulationApp`, with `omni.isaac.kit` as a fallback) and
+    the URDF importer (`isaacsim.asset.importer.urdf`). The
+    `omni.isaac.*` references on this page therefore match the shipping
+    code; see [PR #74](https://github.com/strands-labs/robots-sim/pull/74)
+    for the validation and the in-code policy note in `simulation.py`.
 
-> **Phase 1 status (skeleton).** This release ships the SimEngine-shaped surface, lazy-import scaffolding, the procedural-robot dataclass + builders (SO-100 / Panda / G1), the URDF / MJCF / USD loader module, and the Phase 2 `add_object` / `remove_object` data-plane wiring (shape primitives via `omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`). **Working today**: `IsaacConfig`, `IsaacSimulation.is_available()`, world / lifecycle (`create_world` / `destroy` / `cleanup`), procedural builders via `add_robot("so100" | "panda" | "unitree_g1")`, scene primitives via `add_object` / `remove_object`, cameras via `add_camera` / `remove_camera` (`omni.isaac.sensor.Camera` -- prim + look-at + FOV wired), `render`'s RTX frame-extraction path against an `add_camera` handle (real `get_rgba` / `get_depth` calls; falls back to blank frames in `headless` mode, when no camera is configured, or against a camera with no RTX handle attached), USD-loaded robots via `add_robot(name, usd_path=...)` and URDF-loaded robots via `add_robot(name, urdf_path=...)` (both construct the underlying `omni.isaac.core.articulations.Articulation` -- joints + `send_action` / `get_observation` work end-to-end; URDF→USD conversion runs through the direct `isaacsim.asset.importer.urdf` interface), and the `isaac.loaders.load_urdf` / `load_mjcf` / `load_usd` functions for ingesting external robot description files into a `ProceduralRobot` dataclass. **Still no-op in this phase**: the remaining data-plane wiring on `IsaacSimulation` itself — `replicate` and articulation-touching paths under `get_observation` / `send_action` for **procedural** robots specifically (the procedural builder branch of `add_robot` produces USD prims via the build-via-API flow but doesn't construct an `Articulation` handle, so the procedural-robot articulation chain stays silent until its own Phase 2 slice). USD- and URDF-loaded robots run end-to-end. Following the documented Quick Start with a procedural robot on a real Isaac Sim install will therefore observe `get_observation()` returning `{}` and `render()` returning blank frames -- no exception is raised. The remaining data-plane wiring (procedural-robot articulation, sensor / replicator integration) lands in subsequent Phase 2 slices and Phase 3+. Treat the Phase-1 surface as an integration contract for the still-no-op methods; the loaders module + `add_object` / `remove_object` + `add_camera` / `remove_camera` + `render` frame-path + USD- / URDF-loaded robots are the working paths today.
+> **Status.** The core simulation data-plane is wired and was validated
+> end-to-end on the pinned `nvcr.io/nvidia/isaac-sim:4.5.0` image in
+> [PR #74](https://github.com/strands-labs/robots-sim/pull/74) (full
+> lifecycle: `is_available` → `create_world` → `add_robot(usd_path=...)`
+> → `add_camera` → `step`). **Working today**: `IsaacConfig`,
+> `IsaacSimulation.is_available()`, world / lifecycle (`create_world` /
+> `destroy` / `cleanup`); procedural builders via
+> `add_robot("so100" | "panda" | "unitree_g1")`; scene primitives via
+> `add_object` / `remove_object` (shape primitives through
+> `omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`);
+> cameras via `add_camera` / `remove_camera` (`omni.isaac.sensor.Camera`
+> — prim + look-at + FOV wired); `render`'s RTX frame-extraction path
+> against an `add_camera` handle (real `get_rgba` / `get_depth` calls;
+> returns blank frames in `headless` mode, when no camera is configured,
+> or against a camera with no RTX handle attached); USD-loaded robots via
+> `add_robot(name, usd_path=...)` and URDF-loaded robots via
+> `add_robot(name, urdf_path=...)` (both construct the underlying
+> `omni.isaac.core.articulations.Articulation` — joints + `send_action` /
+> `get_observation` work end-to-end; URDF→USD conversion runs through the
+> direct `isaacsim.asset.importer.urdf` interface); and the
+> `isaac.loaders.load_urdf` / `load_mjcf` / `load_usd` functions for
+> ingesting external robot description files into a `ProceduralRobot`
+> dataclass. **Genuinely still no-op**: `replicate` (fleet replication),
+> and the articulation-touching paths under `get_observation` /
+> `send_action` for **procedural** robots specifically — the procedural
+> branch of `add_robot` authors USD prims via the build-via-API flow but
+> does not construct an `Articulation` handle, so a procedural robot's
+> `get_observation()` returns `{}` and no joint state is read; no
+> exception is raised. **USD- and URDF-loaded robots run end-to-end** —
+> use those (or load a real Franka USD) for any manipulation eval. For
+> the running benchmark caveat (`evaluate_benchmark` under Isaac Sim's
+> bundled Python) see [Examples → Overview](../examples/overview.md) and
+> the umbrella tracker [#8](https://github.com/strands-labs/robots-sim/issues/8).
 
 ## Installation
 
@@ -36,7 +84,7 @@ Isaac Sim is **not installable from PyPI**. It is an NVIDIA Omniverse Kit applic
 ### Option 1: NVIDIA Omniverse Launcher (recommended)
 
 1. Download [NVIDIA Omniverse Launcher](https://developer.nvidia.com/omniverse)
-2. Install **Isaac Sim 2024.x** (or newer) from the Exchange tab
+2. Install **Isaac Sim 4.5** (or newer) from the Exchange tab
 3. Install Python dependencies:
 
 ```bash
@@ -65,7 +113,7 @@ pip install 'strands-robots-sim[isaac]'
 
 - NVIDIA GPU (RTX 2070+ or A100/H100 for fleet training)
 - CUDA 12.0+
-- Isaac Sim 2024.x or newer
+- Isaac Sim 4.5 or newer (the repo pins/tests `nvcr.io/nvidia/isaac-sim:4.5.0`)
 - Linux (Ubuntu 22.04+ recommended)
 - Python 3.10+
 
@@ -229,9 +277,6 @@ strands_robots_sim/isaac/
     simulation.py       IsaacSimulation(SimEngine) -- main backend class
     procedural.py       SO-100 / Panda / G1 builders + kinematic-tree guard
     loaders.py          URDF / MJCF / USD -> ProceduralRobot loaders
-    stages.py           USD stage management (Phase 2)
-    sensors.py          RTX camera, LiDAR wrappers (Phase 3)
-    replicator.py       Domain randomization (Phase 3)
     tests/
         test_unit.py                          Mocked tests (no GPU)
         test_entrypoint.py                    Entry-point + lazy-import surface

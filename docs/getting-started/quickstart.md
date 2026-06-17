@@ -92,8 +92,9 @@ python examples/libero/run_isaac.py --policy mock --robot-usd /path/to/robot.usd
 python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 ```
 
-Both files print two grep-stable lines that the flagship `R15` matrix
-driver subprocess-and-parses for the side-by-side table:
+Both files print two grep-stable lines that the flagship
+`libero_backend_matrix.py` driver subprocess-and-parses for the
+side-by-side table:
 
 ```
 benchmark_name=libero-spatial-pick_up_the_red_cube

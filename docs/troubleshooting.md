@@ -73,11 +73,13 @@ sudo reboot
 
 ### `ImportError: cannot import name 'SimulationApp' from 'omni.isaac.kit'`
 
-**Cause:** Isaac Sim 4.5+ moved `SimulationApp` to `isaacsim`. The
-`strands-robots-sim` package handles both layouts; if you see this error,
-your Isaac Sim install is older than 2023.x.
+**Cause:** Isaac Sim 4.5 moved `SimulationApp` to the `isaacsim`
+namespace (`isaacsim.SimulationApp`). The `strands-robots-sim` package
+tries the modern path first and falls back to the legacy
+`omni.isaac.kit.SimulationApp`; seeing this error means neither resolved,
+which usually points at a partial / pre-4.x Isaac Sim install.
 
-**Fix:** Upgrade to Isaac Sim 4.x.
+**Fix:** Upgrade to the pinned Isaac Sim 4.5 (`nvcr.io/nvidia/isaac-sim:4.5.0`).
 
 ### `ModuleNotFoundError: No module named 'pxr'`
 
@@ -195,14 +197,19 @@ copy their default asset path or pass `--robot-usd PATH`.
 
 ### `success_rate = 0.0` in `examples/libero/run_isaac_agent.py`
 
-**Cause:** Phase-2 data-plane wiring is still in flight at time of
-writing — `run_isaac_agent.py` runs end-to-end but reports zero success
-until the procedural-articulation + Isaac-recorder slices land. Track
-the rollout in [`#15`](https://github.com/strands-labs/robots-sim/issues/15)
-and the umbrella [`#8`](https://github.com/strands-labs/robots-sim/issues/8).
+**Cause:** Procedural robots don't construct an `Articulation` handle, so
+a LIBERO eval driven against a procedural robot reads zero joint state.
+The lifecycle (`create_world` → `add_robot(usd_path=...)` → `add_camera`
+→ `step` → `render`) is validated end-to-end on Isaac Sim 4.5 (see
+[PR #74](https://github.com/strands-labs/robots-sim/pull/74)); the
+remaining gap is that `evaluate_benchmark` reaches the LIBERO suite
+loader under Isaac Sim's bundled Python before it can score episodes.
+Track the rollout in the umbrella
+[`#8`](https://github.com/strands-labs/robots-sim/issues/8).
 
-**Workaround:** Use `examples/libero/run_isaac.py` (programmatic) for
-matrix-quality numbers; the agent file is for demos.
+**Workaround:** Load the real Franka USD/URDF (not a procedural robot),
+and use `examples/libero/run_isaac.py` (programmatic) for matrix-quality
+numbers; the agent file is for demos.
 
 ## Where to file bugs
 

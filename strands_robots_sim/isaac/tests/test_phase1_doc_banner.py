@@ -1,13 +1,15 @@
-"""Documentation honesty pin: Phase 1 status banner in docs/backends/isaac.md.
+"""Documentation honesty pin: status banner in docs/backends/isaac.md.
 
-The Phase 1 skeleton silently no-ops the data plane: ``add_robot`` on
-the procedural branch, ``_load_usd_robot``, ``_load_urdf_robot``,
-``add_object``, ``add_camera``, and ``replicate`` all return
-``status: "success"`` without instantiating the underlying USD prim or
-articulation handle. ``docs/backends/isaac.md`` discloses this in a
-``Phase 1 status`` banner before the Installation section, so the
-disclosure precedes the documented call sequence rather than appearing
-after a user would have already executed the silent no-ops.
+The Isaac backend's data plane is mostly wired (validated end-to-end on
+``nvcr.io/nvidia/isaac-sim:4.5.0`` in PR #74), but two surfaces are
+genuinely still no-op: ``replicate`` (fleet replication) and the
+articulation-touching paths under ``get_observation`` / ``send_action``
+for **procedural** robots (the procedural branch of ``add_robot``
+authors USD prims but does not construct an ``Articulation`` handle).
+``docs/backends/isaac.md`` discloses this in a ``Status`` banner before
+the Installation section, so the disclosure precedes the documented
+call sequence rather than appearing after a user would have already
+executed the silent no-ops.
 
 This pin enforces three properties of the banner:
 
@@ -28,7 +30,7 @@ _ISAAC_DOCS = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "b
 
 
 class TestIsaacDocsPhase1Banner:
-    """Pin: ``docs/backends/isaac.md`` must disclose Phase 1 data-plane no-ops."""
+    """Pin: ``docs/backends/isaac.md`` must disclose the data-plane no-ops."""
 
     def test_isaac_docs_file_exists(self) -> None:
         assert _ISAAC_DOCS.is_file(), f"missing Isaac doc page at {_ISAAC_DOCS}"
@@ -45,42 +47,43 @@ class TestIsaacDocsPhase1Banner:
         # The banner must appear AND must appear before the Installation
         # section header (so the disclosure precedes any procedural docs the
         # user would otherwise execute).
-        banner_marker = "Phase 1 status"
+        banner_marker = "> **Status.**"
         install_marker = "## Installation"
 
         assert banner_marker in text, (
-            "docs/backends/isaac.md missing the Phase 1 status disclosure "
-            "banner. The doc's Quick Start otherwise executes a code path "
-            "that silently no-ops on a real Isaac Sim install -- so the "
-            "banner must precede the documented call sequence."
+            "docs/backends/isaac.md missing the status disclosure banner. "
+            "The doc's Quick Start otherwise executes a code path that "
+            "silently no-ops on a real Isaac Sim install (procedural-robot "
+            "articulation, replicate) -- so the banner must precede the "
+            "documented call sequence."
         )
         assert (
             install_marker in text
         ), "docs/backends/isaac.md missing the Installation section -- doc structure has changed; pin needs review."
         assert text.find(banner_marker) < text.find(install_marker), (
-            "Phase 1 banner must precede the Installation section so the "
+            "Status banner must precede the Installation section so the "
             "user sees the disclosure before following the install / quick-"
             "start steps."
         )
 
     def test_phase1_banner_names_the_silent_methods(self) -> None:
-        """Banner must enumerate the Phase-1 silent-success methods.
+        """Banner must enumerate the genuinely silent-success methods.
 
         Without naming the methods, a future maintainer who reads only the
         banner won't know which API surfaces are affected, and the disclosure
         becomes a vague hedge.
         """
         text = _ISAAC_DOCS.read_text(encoding="utf-8")
-        # Slice the banner block (`> **Phase 1 status...**` paragraph).
-        banner_start = text.find("Phase 1 status")
-        # Banner is one paragraph; cut at the next `## ` heading.
+        # Slice the banner block (`> **Status...**` paragraph).
+        banner_start = text.find("> **Status.**")
+        # Banner is one block-quote paragraph; cut at the next `## ` heading.
         banner_end = text.find("##", banner_start)
         assert banner_end > banner_start, "could not locate end of banner block"
         banner = text[banner_start:banner_end]
 
         for needed in ("add_robot", "replicate", "get_observation"):
             assert needed in banner, (
-                f"Phase 1 banner does not mention `{needed}`; the disclosure "
+                f"status banner does not mention `{needed}`; the disclosure "
                 f"must enumerate the silent-success methods so users know "
                 f"which call sites are affected."
             )

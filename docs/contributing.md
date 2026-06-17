@@ -46,9 +46,9 @@ STRANDS_GPU_TEST=1 pytest strands_robots_sim/isaac/tests/test_gpu_integ.py -v
 ```
 
 These require Isaac Sim installed on the host. They will not run in CI
-unless the `STRANDS_GPU_TEST` env var is set; the nightly GPU runner
-does this in
-[#17](https://github.com/strands-labs/robots-sim/issues/17).
+unless the `STRANDS_GPU_TEST` env var is set; the GPU runner wiring is
+tracked under the umbrella roadmap
+[#8](https://github.com/strands-labs/robots-sim/issues/8).
 
 Python 3.10+ required (mirroring Isaac Sim 4.5's bundled interpreter).
 
