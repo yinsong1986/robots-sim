@@ -4,8 +4,8 @@ Pins the three pieces of packaging surface that the Isaac backend
 relies on:
 
 1. The ``[isaac]`` extra is declared in ``pyproject.toml`` and pulls in
-   the pip-installable subset of Isaac Sim's runtime deps (``usd-core``,
-   ``warp-lang``, ``pytest``).
+   the pip-installable companion deps for the supported Isaac Sim 4.5.x
+   runtime (``isaacsim==4.5.*``, ``isaaclab>=2.0,<3.0``, ``usd-core``).
 2. The ``isaac`` and ``isaac_sim`` entry points under
    ``strands_robots.backends`` resolve to
    ``strands_robots_sim.isaac.simulation:IsaacSimulation``.
@@ -48,7 +48,7 @@ class TestEntryPointDeclaration:
         content = _PYPROJECT.read_text()
         assert "\nisaac = [" in content or "\nisaac=[" in content, (
             "Expected `isaac = [...]` under [project.optional-dependencies] declaring "
-            "the pip-installable subset of Isaac Sim's runtime deps (usd-core, warp-lang, pytest)."
+            "the pip-installable companion deps for Isaac Sim 4.5.x (isaacsim, isaaclab, usd-core)."
         )
 
     def test_isaac_extra_includes_isaacsim_and_isaaclab(self):
@@ -59,8 +59,8 @@ class TestEntryPointDeclaration:
         assert idx != -1, "[isaac] extras block not found"
         block_end = content.find("]", idx)
         block = content[idx:block_end]
-        assert "isaacsim==5.*" in block, "[isaac] extras must pin isaacsim==5.*"
-        assert "isaaclab" in block, "[isaac] extras must include isaaclab>=3.0,<4.0"
+        assert "isaacsim==4.5.*" in block, "[isaac] extras must pin isaacsim==4.5.* (matches the supported 4.5.x image)"
+        assert "isaaclab" in block, "[isaac] extras must include isaaclab>=2.0,<3.0"
         assert "usd-core" in block, "[isaac] extras must include usd-core"
 
     def test_entry_points_visible_via_importlib_metadata_when_installed(self):

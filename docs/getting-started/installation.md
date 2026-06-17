@@ -80,9 +80,11 @@ Use the same Python environment that Isaac Sim's `python.sh` /
 pip install 'strands-robots-sim[isaac]'
 ```
 
-The `[isaac]` extra pulls in `usd-core` (USD scene authoring) and
-`warp-lang` (a lightweight kernel runtime Isaac Sim uses internally for
-some sensor paths). `strands-robots` is pulled in transitively, which gives
+The `[isaac]` extra pulls in the pip-installable companion deps that match
+the documented Isaac Sim **4.5.x** image: `isaacsim==4.5.*` (the PyPI shim
+exposing Kit's Python API), `isaaclab>=2.0,<3.0` (Isaac Lab's task / RL
+utilities, the 2.x line paired with Isaac Sim 4.5), and `usd-core` (USD
+scene authoring). `strands-robots` is pulled in transitively, which gives
 you the upstream `Simulation` AgentTool, `create_simulation()` factory,
 and policy providers.
 
