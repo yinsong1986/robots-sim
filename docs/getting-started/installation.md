@@ -19,8 +19,8 @@ Order matters: install Isaac Sim **first**, then `pip install
 - **OS** — Ubuntu 22.04+ (Linux only; macOS / Apple Silicon are not
   supported by Isaac Sim).
 - **CUDA** — 12.0+, with a recent NVIDIA driver matching the Isaac Sim release.
-- **Python** — 3.10, 3.11, or 3.12 (Isaac Sim 4.5 ships its own 3.10
-  embedded interpreter; mirror that version in your venv).
+- **Python** — 3.12 (Isaac Sim 6.0 ships its own 3.12 embedded
+  interpreter; mirror that version in your venv).
 - **Disk** — ~30 GB for the Isaac Sim SDK on first run, plus ~5 GB for
   the cached USD assets.
 
@@ -36,10 +36,10 @@ Pick one of three paths.
 
     1. Download the [NVIDIA Omniverse Launcher](https://developer.nvidia.com/omniverse).
     2. Sign in with an NVIDIA developer account.
-    3. From the **Exchange** tab, install **Isaac Sim 4.x**.
+    3. From the **Exchange** tab, install **Isaac Sim 6.0**.
     4. Optionally launch the app once to confirm it boots.
 
-    The launcher places Isaac Sim under `~/.local/share/ov/pkg/isaac-sim-4.x/`.
+    The launcher places Isaac Sim under `~/.local/share/ov/pkg/isaac-sim-6.0/`.
 
 === "Isaac Lab"
 
@@ -61,11 +61,11 @@ Pick one of three paths.
     cloud / CI runners:
 
     ```bash
-    docker pull nvcr.io/nvidia/isaac-sim:4.5.0
+    docker pull nvcr.io/nvidia/isaac-sim:6.0
     docker run --gpus all -it --rm \
         -e ACCEPT_EULA=Y \
         -v /tmp/.X11-unix:/tmp/.X11-unix \
-        nvcr.io/nvidia/isaac-sim:4.5.0
+        nvcr.io/nvidia/isaac-sim:6.0
     ```
 
     Inside the container, Isaac Sim is at `/isaac-sim/` with a Python
@@ -81,9 +81,9 @@ pip install 'strands-robots-sim[isaac]'
 ```
 
 The `[isaac]` extra pulls in the pip-installable companion deps that match
-the documented Isaac Sim **4.5.x** image: `isaacsim==4.5.*` (the PyPI shim
-exposing Kit's Python API), `isaaclab>=2.0,<3.0` (Isaac Lab's task / RL
-utilities, the 2.x line paired with Isaac Sim 4.5), and `usd-core` (USD
+the documented Isaac Sim **6.0** image: `isaacsim>=6.0` (the PyPI shim
+exposing Kit's Python API), `isaaclab>=3.0,<4.0` (Isaac Lab's task / RL
+utilities, the 3.x line paired with Isaac Sim 6.0), and `usd-core` (USD
 scene authoring). `strands-robots` is pulled in transitively, which gives
 you the upstream `Simulation` AgentTool, `create_simulation()` factory,
 and policy providers.

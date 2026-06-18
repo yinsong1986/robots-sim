@@ -749,7 +749,7 @@ class TestCreateWorldGravityScalarApi:
 
 
 def _patched_isaac_objects_module() -> MagicMock:
-    """Build a MagicMock that stands in for ``omni.isaac.core.objects``.
+    """Build a MagicMock that stands in for ``isaacsim.core.api.objects``.
 
     Each constructor (``DynamicCuboid`` etc.) is itself a ``MagicMock``
     that returns a unique handle; tests can assert on which class was
@@ -794,7 +794,7 @@ class TestAddObjectPhase2:
     """Phase 2 wiring (#14) for ``IsaacSimulation.add_object``.
 
     Pins the eight (shape, is_static) combinations onto their respective
-    ``omni.isaac.core.objects`` constructors plus the structured success
+    ``isaacsim.core.api.objects`` constructors plus the structured success
     envelope (json payload, prim path, registry side-effects).
     """
 
@@ -811,7 +811,7 @@ class TestAddObjectPhase2:
 
     def test_returns_error_on_unknown_shape(self) -> None:
         """Unknown shape returns the structured error envelope and does
-        not call into the omni.isaac.core.objects module.
+        not call into the isaacsim.core.api.objects module.
         """
         sim, scene = _make_simulation_with_world()
         result = sim.add_object("test", shape="dodecahedron")
@@ -826,7 +826,7 @@ class TestAddObjectPhase2:
         """
         sim, scene = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             r1 = sim.add_object("cube", shape="box")
             r2 = sim.add_object("cube", shape="box")
         assert r1["status"] == "success"
@@ -842,7 +842,7 @@ class TestAddObjectPhase2:
         """
         sim, scene = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("cube", shape="box", position=[1, 2, 3])
         assert result["status"] == "success"
         fake_objects.DynamicCuboid.assert_called_once()
@@ -855,7 +855,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("anchor", shape="box", is_static=True, mass=5.0)
         fake_objects.FixedCuboid.assert_called_once()
         fake_objects.DynamicCuboid.assert_not_called()
@@ -876,7 +876,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             r1 = sim.add_object("a", shape="box", size=[0.10])
             r2 = sim.add_object("b", shape="box", size=[0.10, 0.20])
             r3 = sim.add_object("c", shape="box", size=[0.10, 0.20, 0.30])
@@ -897,7 +897,7 @@ class TestAddObjectPhase2:
         """``shape="sphere"`` uses the ``radius=`` kwarg, not ``scale=``."""
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("ball", shape="sphere", size=[0.07])
         fake_objects.DynamicSphere.assert_called_once()
         kwargs = fake_objects.DynamicSphere.call_args.kwargs
@@ -912,7 +912,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("can_a", shape="cylinder", size=[0.04, 0.20])
             sim.add_object("can_b", shape="cylinder")  # default size
         kwargs_a = fake_objects.DynamicCylinder.call_args_list[0].kwargs
@@ -926,7 +926,7 @@ class TestAddObjectPhase2:
         """``shape="capsule"`` uses the same (radius, height) shape as cylinder."""
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("pill", shape="capsule", size=[0.03, 0.08])
         kwargs = fake_objects.DynamicCapsule.call_args.kwargs
         assert kwargs["radius"] == 0.03
@@ -958,7 +958,7 @@ class TestAddObjectPhase2:
         """
         sim, scene = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("cube", shape="cuboid", position=[1, 2, 3])
         assert result["status"] == "success"
         fake_objects.DynamicCuboid.assert_called_once()
@@ -988,7 +988,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("cube", shape="box", scale=[0.10, 0.20, 0.30])
         assert result["status"] == "success"
         assert result["content"][0]["json"]["size"] == [0.10, 0.20, 0.30]
@@ -999,7 +999,7 @@ class TestAddObjectPhase2:
         """``scale=`` alias also works for non-box shapes (e.g. sphere)."""
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("ball", shape="sphere", scale=[0.07])
         kwargs = fake_objects.DynamicSphere.call_args.kwargs
         assert kwargs["radius"] == 0.07
@@ -1008,7 +1008,7 @@ class TestAddObjectPhase2:
         """If both ``size`` and ``scale`` are passed, ``size`` wins."""
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object(
                 "cube",
                 shape="box",
@@ -1026,7 +1026,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object(
                 "block",
                 shape="cuboid",
@@ -1049,7 +1049,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("red_cube", shape="box", color=[1.0, 0.0, 0.0, 0.5])
         kwargs = fake_objects.DynamicCuboid.call_args.kwargs
         # numpy array, length 3, alpha dropped.
@@ -1062,7 +1062,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("dropped", shape="box")
         assert result["content"][0]["json"]["position"] == [0.0, 0.0, 0.5]
         kwargs = fake_objects.DynamicCuboid.call_args.kwargs
@@ -1072,7 +1072,7 @@ class TestAddObjectPhase2:
         """Default orientation is ``[1, 0, 0, 0]`` (identity quaternion, w-first)."""
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("aligned", shape="box")
         assert result["content"][0]["json"]["orientation"] == [1.0, 0.0, 0.0, 0.0]
 
@@ -1082,7 +1082,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object(
                 "cube",
                 shape="box",
@@ -1106,7 +1106,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("anchor", shape="box", is_static=True, mass=5.0)
         info = result["content"][0]["json"]
         assert info["mass"] == 0.0
@@ -1119,7 +1119,7 @@ class TestAddObjectPhase2:
         sim, scene = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
         fake_objects.DynamicCuboid.side_effect = RuntimeError("USD prim collision")
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("cube", shape="box")
         assert result["status"] == "error"
         assert "USD prim collision" in result["content"][0]["text"]
@@ -1132,7 +1132,7 @@ class TestAddObjectPhase2:
         sim, scene = _make_simulation_with_world()
         scene.add.side_effect = RuntimeError("scene already replicated")
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             result = sim.add_object("cube", shape="box")
         assert result["status"] == "error"
         assert "scene already replicated" in result["content"][0]["text"]
@@ -1146,7 +1146,7 @@ class TestAddObjectPhase2:
         """
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("cube", shape="box")
         assert "cube" in sim._objects
         assert sim._objects["cube"].prim_path == "/World/Objects/cube"
@@ -1166,7 +1166,7 @@ class TestRemoveObjectPhase2:
     def _add_a_cube(self) -> "tuple[object, MagicMock]":
         sim, scene = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("cube", shape="box")
         scene.reset_mock()  # so subsequent assertions see only remove activity
         return sim, scene
@@ -1233,7 +1233,7 @@ class TestDestroyAndGetStateSurfaceObjects:
     def test_get_state_includes_num_objects(self) -> None:
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("a", shape="box")
             sim.add_object("b", shape="sphere")
         result = sim.get_state()
@@ -1245,7 +1245,7 @@ class TestDestroyAndGetStateSurfaceObjects:
     def test_destroy_releases_objects_and_reports_count(self) -> None:
         sim, _ = _make_simulation_with_world()
         fake_objects = _patched_isaac_objects_module()
-        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
             sim.add_object("a", shape="box")
             sim.add_object("b", shape="cylinder")
         result = sim.destroy()
@@ -1265,7 +1265,7 @@ class TestRenderFramePathPhase2:
     json. Pairs with the Phase 2 ``add_camera`` slice; the RTX path
     only lights up when the camera in ``self._cameras`` carries a
     non-``None`` ``handle``, which Phase 2 ``add_camera`` populates
-    via ``omni.isaac.sensor.Camera``.
+    via ``isaacsim.sensors.camera.Camera``.
     """
 
     def _make_sim(self, render_mode: str = "rtx_realtime") -> object:
@@ -1454,11 +1454,11 @@ def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, M
     Returns
     -------
     sensor_mod, viewports_mod, stage_mod, camera_handle
-        ``sensor_mod`` stands in for ``omni.isaac.sensor`` (its
+        ``sensor_mod`` stands in for ``isaacsim.sensors.camera`` (its
         ``.Camera`` attribute returns a fresh handle MagicMock).
         ``viewports_mod`` stands in for
-        ``omni.isaac.core.utils.viewports`` (``.set_camera_view``).
-        ``stage_mod`` stands in for ``omni.isaac.core.utils.prims``
+        ``isaacsim.core.utils.viewports`` (``.set_camera_view``).
+        ``stage_mod`` stands in for ``isaacsim.core.utils.prims``
         (``.delete_prim``). ``camera_handle`` is the MagicMock the
         ``Camera()`` constructor returns -- tests can assert on
         ``.initialize`` / ``.set_focal_length`` calls on it.
@@ -1492,7 +1492,7 @@ def _make_simulation_with_world_for_camera() -> object:
 class TestAddCameraPhase2:
     """Phase 2 wiring (#14) for ``IsaacSimulation.add_camera``.
 
-    Pins the underlying ``omni.isaac.sensor.Camera`` constructor + FOV /
+    Pins the underlying ``isaacsim.sensors.camera.Camera`` constructor + FOV /
     look-at wiring + the structured success envelope.
     """
 
@@ -1510,8 +1510,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             r1 = sim.add_camera("front")
@@ -1532,8 +1532,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             sim.add_camera("cam0", position=[1, 2, 3], width=320, height=240)
@@ -1558,8 +1558,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             result = sim.add_camera("cam_default", fov=60.0)
@@ -1585,8 +1585,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             r45 = sim.add_camera("narrow", fov=45.0)
@@ -1608,8 +1608,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             sim.add_camera(
@@ -1632,8 +1632,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             sim.add_camera("free")
@@ -1648,8 +1648,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             result = sim.add_camera("default")
@@ -1671,8 +1671,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             result = sim.add_camera("broken")
@@ -1693,8 +1693,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             result = sim.add_camera("late_fail")
@@ -1712,8 +1712,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             sim.add_camera("front")
@@ -1728,8 +1728,8 @@ class TestAddCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
             },
         ):
             sim.add_camera("front", width=160, height=120)
@@ -1752,9 +1752,9 @@ class TestRemoveCameraPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.sensor": sensor,
-                "omni.isaac.core.utils.viewports": viewports,
-                "omni.isaac.core.utils.prims": stage,
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
+                "isaacsim.core.utils.prims": stage,
             },
         ):
             sim.add_camera("front")
@@ -1768,14 +1768,14 @@ class TestRemoveCameraPhase2:
 
     def test_calls_delete_prim_with_prim_path(self) -> None:
         sim, stage = self._add_a_camera()
-        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+        with patch.dict("sys.modules", {"isaacsim.core.utils.prims": stage}):
             result = sim.remove_camera("front")
         assert result["status"] == "success"
         stage.delete_prim.assert_called_once_with("/World/Cameras/front")
 
     def test_prunes_cameras_dict_and_prim_registry_on_success(self) -> None:
         sim, stage = self._add_a_camera()
-        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+        with patch.dict("sys.modules", {"isaacsim.core.utils.prims": stage}):
             sim.remove_camera("front")
         assert "front" not in sim._cameras
         assert "/World/Cameras/front" not in sim._prim_registry
@@ -1786,7 +1786,7 @@ class TestRemoveCameraPhase2:
         """
         sim, stage = self._add_a_camera()
         stage.delete_prim.side_effect = RuntimeError("stage closed")
-        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+        with patch.dict("sys.modules", {"isaacsim.core.utils.prims": stage}):
             result = sim.remove_camera("front")
         assert result["status"] == "error"
         assert "stage closed" in result["content"][0]["text"]
@@ -1799,7 +1799,7 @@ class TestRemoveCameraPhase2:
         """
         sim, stage = self._add_a_camera()
         sim._world = None
-        with patch.dict("sys.modules", {"omni.isaac.core.utils.prims": stage}):
+        with patch.dict("sys.modules", {"isaacsim.core.utils.prims": stage}):
             result = sim.remove_camera("front")
         assert result["status"] == "success"
         assert "front" not in sim._cameras
@@ -1817,9 +1817,9 @@ def _patched_isaac_articulation_modules() -> "tuple[MagicMock, MagicMock, MagicM
     -------
     articulations_mod, stage_mod, art_handle
         ``articulations_mod`` stands in for
-        ``omni.isaac.core.articulations`` (its ``.Articulation``
+        ``isaacsim.core.api.articulations`` (its ``.Articulation``
         constructor returns ``art_handle``). ``stage_mod`` stands in
-        for ``omni.isaac.core.utils.stage`` (``.add_reference_to_stage``).
+        for ``isaacsim.core.utils.stage`` (``.add_reference_to_stage``).
         ``art_handle`` is the Articulation MagicMock the constructor
         returns -- tests can assert on ``.initialize`` /
         ``.set_world_pose`` / ``.dof_names`` patterns.
@@ -1858,8 +1858,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             sim._load_usd_robot(
@@ -1882,8 +1882,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             sim._load_usd_robot(
@@ -1904,8 +1904,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             sim._load_usd_robot(
@@ -1922,8 +1922,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             joints, art = sim._load_usd_robot(
@@ -1945,8 +1945,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             joints, _ = sim._load_usd_robot(
@@ -1965,8 +1965,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             sim._load_usd_robot(
@@ -1983,8 +1983,8 @@ class TestLoadUsdRobotPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             sim._load_usd_robot(
@@ -2022,8 +2022,8 @@ class TestAddRobotUsdBranchPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             result = sim.add_robot(name="my_panda", usd_path="/path/to/panda.usd")
@@ -2047,8 +2047,8 @@ class TestAddRobotUsdBranchPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             result = sim.add_robot(
@@ -2075,8 +2075,8 @@ class TestAddRobotUsdBranchPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             result = sim.add_robot(name="ghost", usd_path="/missing.usd")
@@ -2098,8 +2098,8 @@ class TestAddRobotUsdBranchPhase2:
         with patch.dict(
             "sys.modules",
             {
-                "omni.isaac.core.articulations": articulations,
-                "omni.isaac.core.utils.stage": stage,
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
             },
         ):
             result = sim.add_robot(name="bad", usd_path="/bad.usd")
@@ -2143,7 +2143,7 @@ def _patched_isaac_urdf_modules() -> "tuple[MagicMock, MagicMock, MagicMock, Mag
         set, and ``urdf_importer_mod._urdf.acquire_urdf_interface()``
         returns ``urdf_iface_mod``.
         ``articulations_mod`` stands in for
-        ``omni.isaac.core.articulations`` (returns ``art_handle``).
+        ``isaacsim.core.api.articulations`` (returns ``art_handle``).
         ``art_handle`` is the Articulation MagicMock with
         ``dof_names = ["j1", "j2"]`` by default.
         ``import_config`` is the MagicMock that ``ImportConfig()``
@@ -2185,8 +2185,8 @@ def _patched_urdf_sys_modules(
         # tries this first and falls back to ``omni.importer.urdf``.
         "isaacsim.asset.importer.urdf": urdf_importer_mod,
         "omni.importer.urdf": urdf_importer_mod,
-        "omni.isaac.core.articulations": articulations_mod,
-        "omni.isaac.core.utils.stage": stage_mod,
+        "isaacsim.core.api.articulations": articulations_mod,
+        "isaacsim.core.utils.stage": stage_mod,
     }
 
 
@@ -2314,7 +2314,7 @@ class TestLoadUrdfRobotPhase2:
             )
         # add_reference_to_stage stub exists in the patched modules
         # but should NOT be called.
-        stage = sys_modules["omni.isaac.core.utils.stage"]
+        stage = sys_modules["isaacsim.core.utils.stage"]
         stage.add_reference_to_stage.assert_not_called()
 
     def test_load_urdf_robot_no_op_when_command_returns_empty_path(self) -> None:

@@ -255,22 +255,79 @@ def _get_or_create_simulation_app(
 # Dual-namespace import note
 # ----------------------------------------------------------------------------
 #
-# Isaac Sim 4.5+ ships every runtime extension under TWO namespaces:
-# the legacy ``omni.isaac.*`` tree (still present as Kit-extension shims
-# under ``extsDeprecated/`` -- imports work post-SimulationApp boot but
-# emit deprecation warnings) and the modern ``isaacsim.*`` tree (the
-# supported path going forward). On the canonical Isaac Sim 4.5 docker
-# image (see ``_install.ISAAC_SIM_DOCKER_IMAGE`` for the pinned tag) every
-# ``omni.isaac.*`` lazy import in this file resolves correctly post-boot
-# via the deprecation shim, EXCEPT ``omni.importer.urdf`` which was
-# removed in 4.5 and replaced wholesale by ``isaacsim.asset.importer.urdf``
-# (the existing ``_load_urdf_robot`` already handles that pair via
-# try/except). Other lazy imports keep their legacy paths because the
-# 4.5 deprecation shims work, and downstream unit tests
-# ``patch.dict("sys.modules", {"omni.isaac.*": fake})`` to inject mocks --
-# a transparent dual-path resolves those mocks via ``importlib.import_module``
-# anyway, but inline call sites are easier to grep for during a future
-# Isaac Sim namespace cleanup.
+# Isaac Sim ships every runtime extension under TWO namespaces: the legacy
+# ``omni.isaac.*`` tree (the 4.x path, still present as Kit-extension shims
+# under ``extsDeprecated/`` on 4.5/5.x -- imports work post-SimulationApp
+# boot but emit deprecation warnings) and the modern ``isaacsim.*`` tree
+# (the supported path on Isaac Sim 6.0). This file targets Isaac Sim 6.0 /
+# Python 3.12 (see ``_install.ISAAC_SIM_MIN_VERSION``): every lazy import
+# now tries the ``isaacsim.*`` location first and falls back to the
+# ``omni.isaac.*`` path via ``try: ... except ImportError:`` so 4.x
+# installs aren't hard-broken during the transition. The namespace map
+# applied across this module:
+#
+#   omni.isaac.core.World              -> isaacsim.core.api.World
+#   omni.isaac.core.objects.*          -> isaacsim.core.api.objects.*
+#   omni.isaac.sensor.Camera           -> isaacsim.sensors.camera.Camera
+#   omni.isaac.core.articulations.*    -> isaacsim.core.prims.SingleArticulation
+#                                         (see ``_import_articulation_cls``)
+#   omni.isaac.core.utils.{prims,
+#       stage,viewports}               -> isaacsim.core.utils.{prims,stage,viewports}
+#   omni.importer.urdf                 -> isaacsim.asset.importer.urdf
+#
+# ``import omni.usd`` is NOT renamed (it stays under ``omni.*`` on 6.0).
+# Downstream unit tests ``patch.dict("sys.modules", {"isaacsim.*": fake})``
+# to inject mocks; the modern-first dual-path resolves those mocks while
+# still degrading gracefully on a legacy box.
+
+
+def _import_articulation_cls() -> Any:
+    """Resolve the single-prim articulation wrapper across Isaac versions.
+
+    Isaac Sim 6.0 relocated the single-articulation view. The 4.x path
+    was ``omni.isaac.core.articulations.Articulation``; on 6.0 the
+    high-level wrapper is ``isaacsim.core.api.articulations.Articulation``
+    and the lower-level single-prim view lives in ``isaacsim.core.prims``
+    as ``SingleArticulation`` (some builds also keep an ``Articulation``
+    alias). Probe modern locations first, fall back to the legacy 4.x
+    path so transitional installs keep working.
+
+    Returns the class object. Raises ``ImportError`` only if no known
+    location resolves (the caller's cleanup-clause tuple catches it).
+    """
+    # 1. Isaac Sim 6.0 high-level API (keeps the ``Articulation`` name).
+    try:
+        from isaacsim.core.api.articulations import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+
+        return Articulation
+    except ImportError:
+        pass
+    # 2. Isaac Sim 6.0 single-prim view: isaacsim.core.prims.SingleArticulation
+    try:
+        from isaacsim.core.prims import (  # type: ignore[import-not-found]
+            SingleArticulation,
+        )
+
+        return SingleArticulation
+    except ImportError:
+        pass
+    # 3. Some 6.0 builds keep an ``Articulation`` alias under core.prims.
+    try:
+        from isaacsim.core.prims import (  # type: ignore[import-not-found]
+            Articulation,
+        )
+
+        return Articulation
+    except ImportError:
+        pass
+    # 4. Legacy 4.x fallback.
+    from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
+        Articulation,
+    )
+
+    return Articulation
 
 
 class _RobotState:
@@ -578,8 +635,14 @@ class IsaacSimulation(SimEngine):
                 # Create/get SimulationApp singleton
                 self._app = _get_or_create_simulation_app(headless=self._config.headless)
 
-                # Now safe to import Isaac core modules
-                from omni.isaac.core import World  # type: ignore[import-not-found]
+                # Now safe to import Isaac core modules. Isaac Sim 6.0
+                # exposes ``World`` under ``isaacsim.core.api``; the legacy
+                # 4.x path was ``omni.isaac.core``. Try modern first, fall
+                # back so 4.x installs keep working during the transition.
+                try:
+                    from isaacsim.core.api import World  # type: ignore[import-not-found]
+                except ImportError:
+                    from omni.isaac.core import World  # type: ignore[import-not-found]
 
                 dt = timestep if timestep is not None else self._config.physics_dt
                 grav = gravity if gravity is not None else list(self._config.gravity)
@@ -1325,21 +1388,37 @@ class IsaacSimulation(SimEngine):
         applied per shape) so :meth:`add_object` can surface the
         actually-used dimensions in its structured json payload.
 
-        Lazy-imports ``omni.isaac.core.objects`` so the module loads
+        Lazy-imports the Isaac object constructors so the module loads
         cleanly without Isaac Sim installed (the call site only ever
         runs after :meth:`create_world` has booted ``SimulationApp``).
+        Isaac Sim 6.0 exposes these under ``isaacsim.core.api.objects``;
+        the legacy 4.x path was ``omni.isaac.core.objects``. Try modern
+        first, fall back so 4.x installs keep working.
         """
         import numpy as np  # type: ignore[import-not-found]
-        from omni.isaac.core.objects import (  # type: ignore[import-not-found]
-            DynamicCapsule,
-            DynamicCuboid,
-            DynamicCylinder,
-            DynamicSphere,
-            FixedCapsule,
-            FixedCuboid,
-            FixedCylinder,
-            FixedSphere,
-        )
+
+        try:
+            from isaacsim.core.api.objects import (  # type: ignore[import-not-found]
+                DynamicCapsule,
+                DynamicCuboid,
+                DynamicCylinder,
+                DynamicSphere,
+                FixedCapsule,
+                FixedCuboid,
+                FixedCylinder,
+                FixedSphere,
+            )
+        except ImportError:
+            from omni.isaac.core.objects import (  # type: ignore[import-not-found]
+                DynamicCapsule,
+                DynamicCuboid,
+                DynamicCylinder,
+                DynamicSphere,
+                FixedCapsule,
+                FixedCuboid,
+                FixedCylinder,
+                FixedSphere,
+            )
 
         common: dict[str, Any] = {
             "prim_path": prim_path,
@@ -2087,9 +2166,14 @@ class IsaacSimulation(SimEngine):
             # retry.
             try:
                 if self._world is not None:
-                    from omni.isaac.core.utils.prims import (  # type: ignore[import-not-found]
-                        delete_prim,
-                    )
+                    try:
+                        from isaacsim.core.utils.prims import (  # type: ignore[import-not-found]
+                            delete_prim,
+                        )
+                    except ImportError:
+                        from omni.isaac.core.utils.prims import (  # type: ignore[import-not-found]
+                            delete_prim,
+                        )
 
                     delete_prim(prim_path)
             except (RuntimeError, ValueError, OSError, AttributeError, TypeError, ImportError) as e:
@@ -2120,22 +2204,28 @@ class IsaacSimulation(SimEngine):
         height: int,
         fov_deg: float,
     ) -> tuple[Any, float]:
-        """Construct the omni.isaac.sensor.Camera prim + apply look-at + FOV.
+        """Construct the Isaac camera prim + apply look-at + FOV.
 
         Returns the camera handle plus the resolved focal length in mm
         so :meth:`add_camera` can surface the actually-used focal length
         in its structured json payload.
 
-        Lazy-imports both ``omni.isaac.sensor.Camera`` and
-        ``omni.isaac.core.utils.viewports.set_camera_view`` so the
-        module loads cleanly without Isaac Sim installed (the call
-        site only runs after :meth:`create_world` has booted
-        ``SimulationApp``).
+        Lazy-imports both the ``Camera`` sensor and
+        ``set_camera_view`` so the module loads cleanly without Isaac
+        Sim installed (the call site only runs after :meth:`create_world`
+        has booted ``SimulationApp``). Isaac Sim 6.0 exposes ``Camera``
+        under ``isaacsim.sensors.camera``; the legacy 4.x path was
+        ``omni.isaac.sensor``. Try modern first, fall back so 4.x
+        installs keep working.
         """
         import math
 
         import numpy as np  # type: ignore[import-not-found]
-        from omni.isaac.sensor import Camera  # type: ignore[import-not-found]
+
+        try:
+            from isaacsim.sensors.camera import Camera  # type: ignore[import-not-found]
+        except ImportError:
+            from omni.isaac.sensor import Camera  # type: ignore[import-not-found]
 
         camera = Camera(
             prim_path=prim_path,
@@ -2200,9 +2290,14 @@ class IsaacSimulation(SimEngine):
         # is correctly oriented at the target. ``set_camera_view`` works
         # on any USD camera prim by path; no Camera-specific API.
         if target is not None:
-            from omni.isaac.core.utils.viewports import (  # type: ignore[import-not-found]
-                set_camera_view,
-            )
+            try:
+                from isaacsim.core.utils.viewports import (  # type: ignore[import-not-found]
+                    set_camera_view,
+                )
+            except ImportError:
+                from omni.isaac.core.utils.viewports import (  # type: ignore[import-not-found]
+                    set_camera_view,
+                )
 
             set_camera_view(eye=position, target=target, camera_prim_path=prim_path)
 
@@ -2295,12 +2390,22 @@ class IsaacSimulation(SimEngine):
         structured error envelope rather than blowing up the agent.
         """
         import numpy as np  # type: ignore[import-not-found]
-        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
-            Articulation,
-        )
-        from omni.isaac.core.utils.stage import (  # type: ignore[import-not-found]
-            add_reference_to_stage,
-        )
+
+        # Isaac Sim 6.0 renamed the single-articulation wrapper. The 4.x
+        # path was ``omni.isaac.core.articulations.Articulation``; on 6.0
+        # the single-prim view lives in ``isaacsim.core.prims`` as
+        # ``SingleArticulation`` (some builds keep an ``Articulation``
+        # alias). Probe the modern locations first, fall back to legacy.
+        Articulation = _import_articulation_cls()  # noqa: N806
+
+        try:
+            from isaacsim.core.utils.stage import (  # type: ignore[import-not-found]
+                add_reference_to_stage,
+            )
+        except ImportError:
+            from omni.isaac.core.utils.stage import (  # type: ignore[import-not-found]
+                add_reference_to_stage,
+            )
 
         # Step 1: stage reference. The USD's default prim becomes a child
         # of ``prim_path``; subsequent Articulation lookups walk that path.
@@ -2385,9 +2490,11 @@ class IsaacSimulation(SimEngine):
         TypeError, ImportError)``.
         """
         import numpy as np  # type: ignore[import-not-found]
-        from omni.isaac.core.articulations import (  # type: ignore[import-not-found]
-            Articulation,
-        )
+
+        # Isaac Sim 6.0 renamed the single-articulation wrapper (see
+        # ``_import_articulation_cls`` / ``_load_usd_robot``). Probe the
+        # modern ``isaacsim.*`` locations first, fall back to legacy.
+        Articulation = _import_articulation_cls()  # noqa: N806
 
         # Isaac Sim's URDF importer module path varies across releases:
         # * 4.5+ uses ``isaacsim.asset.importer.urdf._urdf.ImportConfig``

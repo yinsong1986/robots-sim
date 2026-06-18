@@ -21,12 +21,13 @@ from __future__ import annotations
 
 #: Lowest Isaac Sim major.minor we attempt to support. Surfaced in
 #: error messages so a user on an older Omniverse Launcher install knows
-#: to upgrade.
-ISAAC_SIM_MIN_VERSION: str = "2024.x"
+#: to upgrade. 6.0 is the floor because it's the only Isaac Sim release
+#: targeting Python 3.12, which ``strands-robots>=0.4.0`` requires (#98).
+ISAAC_SIM_MIN_VERSION: str = "6.0"
 
 #: Pinned NVIDIA NGC docker image. Bump when CI / docs validate a newer
 #: tag (security patches, kit-sdk minor bumps, etc.).
-ISAAC_SIM_DOCKER_IMAGE: str = "nvcr.io/nvidia/isaac-sim:4.5.0"
+ISAAC_SIM_DOCKER_IMAGE: str = "nvcr.io/nvidia/isaac-sim:6.0"
 
 #: One-liner to bootstrap an Isaac Lab checkout. Kept as a single
 #: string so callers don't have to assemble it.

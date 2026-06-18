@@ -25,9 +25,9 @@ install hint from `_install.py`.
 **Fix:** Follow [Getting Started → Installation](getting-started/installation.md).
 Pick one of:
 
-- Omniverse Launcher → install Isaac Sim 4.x → activate `setup_python_env.sh`.
+- Omniverse Launcher → install Isaac Sim 6.0 → activate `setup_python_env.sh`.
 - Isaac Lab → `./isaaclab.sh -i` → `source _isaac_sim/setup_python_env.sh`.
-- NGC Docker → `docker run --gpus all nvcr.io/nvidia/isaac-sim:4.5.0`.
+- NGC Docker → `docker run --gpus all nvcr.io/nvidia/isaac-sim:6.0`.
 
 `pip install 'strands-robots-sim[isaac]'` alone is **not** sufficient —
 Isaac Sim itself is not on PyPI.
@@ -44,7 +44,7 @@ environment that doesn't have Isaac Sim's site-packages on
 **Fix:** Run the script with Isaac Sim's bundled Python:
 
 ```bash
-~/.local/share/ov/pkg/isaac-sim-4.x/python.sh script.py
+~/.local/share/ov/pkg/isaac-sim-6.0/python.sh script.py
 # or, inside the docker container:
 /isaac-sim/python.sh script.py
 ```
@@ -57,7 +57,7 @@ an interactive shell.
 
 **Symptom:** `(False, "CUDA driver version is insufficient for the CUDA runtime version")`
 
-**Cause:** Isaac Sim 4.5 needs CUDA 12.0+ and a recent NVIDIA driver
+**Cause:** Isaac Sim 6.0 needs CUDA 12.0+ and a recent NVIDIA driver
 (>=535 for Ubuntu 22.04 stock).
 
 **Fix:** Upgrade the NVIDIA driver, **then** the CUDA runtime if needed.
@@ -73,13 +73,13 @@ sudo reboot
 
 ### `ImportError: cannot import name 'SimulationApp' from 'omni.isaac.kit'`
 
-**Cause:** Isaac Sim 4.5 moved `SimulationApp` to the `isaacsim`
+**Cause:** Isaac Sim 6.0 serves `SimulationApp` from the `isaacsim`
 namespace (`isaacsim.SimulationApp`). The `strands-robots-sim` package
 tries the modern path first and falls back to the legacy
 `omni.isaac.kit.SimulationApp`; seeing this error means neither resolved,
-which usually points at a partial / pre-4.x Isaac Sim install.
+which usually points at a partial / pre-6.0 Isaac Sim install.
 
-**Fix:** Upgrade to the pinned Isaac Sim 4.5 (`nvcr.io/nvidia/isaac-sim:4.5.0`).
+**Fix:** Upgrade to the pinned Isaac Sim 6.0 (`nvcr.io/nvidia/isaac-sim:6.0`).
 
 ### `ModuleNotFoundError: No module named 'pxr'`
 
@@ -202,7 +202,7 @@ copy their default asset path or pass `--robot-usd PATH`.
 **Cause:** Procedural robots don't construct an `Articulation` handle, so
 a LIBERO eval driven against a procedural robot reads zero joint state.
 The lifecycle (`create_world` → `add_robot(usd_path=...)` → `add_camera`
-→ `step` → `render`) is validated end-to-end on Isaac Sim 4.5 (see
+→ `step` → `render`) is validated end-to-end on Isaac Sim 6.0 (see
 [PR #74](https://github.com/strands-labs/robots-sim/pull/74)); the
 remaining gap is that `evaluate_benchmark` reaches the LIBERO suite
 loader under Isaac Sim's bundled Python before it can score episodes.

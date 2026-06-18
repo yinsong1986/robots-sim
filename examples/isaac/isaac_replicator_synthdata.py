@@ -59,9 +59,10 @@ System requirements
   don't accelerate it and fall back to a slow CPU-emulated path that
   isn't usable for SDG at scale.
 - **Driver / CUDA**: NVIDIA driver >= 535, CUDA 12.x.
-- **Isaac Sim**: 4.5 or newer (Replicator API surface stabilised in
-  4.x). Install via the Omniverse Launcher / Isaac Lab / NGC Docker
-  image; ``omni.isaac.kit`` and ``omni.replicator.core`` must be
+- **Isaac Sim**: 6.0 or newer (Replicator API surface stabilised in
+  the 4.x line, modern namespace on 6.0). Install via the Omniverse
+  Launcher / Isaac Lab / NGC Docker image; ``isaacsim`` (or the legacy
+  ``omni.isaac.kit``) and ``omni.replicator.core`` must be
   importable in the active Python environment.
 - **OS**: Ubuntu 22.04+ (Replicator's RTX backend doesn't support macOS
   / Windows-WSL). Headless mode is supported (no X server needed).
@@ -201,8 +202,20 @@ def _resolve_default_robot_usd() -> str | None:
     ``create_world`` has booted ``SimulationApp``. Returns ``None`` if the
     assets root can't be resolved (no internet + no Nucleus); callers
     should surface a structured error in that case.
+
+    Tries the modern ``isaacsim.storage.native`` namespace first (Isaac
+    Sim 6.0 supported path) and falls back to the legacy
+    ``omni.isaac.nucleus`` shim -- matches the dual-path policy in
+    ``strands_robots_sim/isaac/simulation.py``.
     """
-    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+    try:
+        from isaacsim.storage.native import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
+    except ImportError:
+        from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
 
     assets_root = get_assets_root_path()
     if not assets_root:

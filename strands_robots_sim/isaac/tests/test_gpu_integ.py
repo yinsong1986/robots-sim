@@ -2,7 +2,7 @@
 
 These tests require:
   - NVIDIA GPU with CUDA
-  - Isaac Sim 2024.x+ installed
+  - Isaac Sim 6.0+ installed (Python 3.12)
   - Environment variable: STRANDS_GPU_TEST=1
 
 Gated behind @pytest.mark.gpu -- skipped in CI by default.
@@ -155,7 +155,7 @@ class TestIsaacGPUIntegration:
         # Resolve the bundled-asset URL via the modern-then-legacy
         # fallback so this test mirrors what the example scripts'
         # ``_resolve_robot_asset`` does. Both namespaces are imported
-        # lazily; either resolves on Isaac Sim 4.5+ post-bootstrap.
+        # lazily; either resolves on Isaac Sim 6.0 post-bootstrap.
         sim = IsaacSimulation(IsaacConfig(num_envs=1, headless=True))
         try:
             r = sim.create_world()
