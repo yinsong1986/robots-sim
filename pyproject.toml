@@ -68,6 +68,19 @@ dependencies = [
 #      images already bundle a complete, bootable Kit, so the extra only
 #      needs to carry the genuinely pip-installable helper(s).
 #
+# `isaaclab` is likewise NOT pinned here. Besides being provided by the
+# out-of-band Isaac Lab / Isaac Sim install (the fleet-RL path is a
+# source install: `git clone IsaacLab && ./isaaclab.sh -i`, documented in
+# docs/getting-started/installation.md), the only `isaaclab` distribution
+# on the index is the pre-release `3.0.0b2`. Per PEP 440, a `>=3.0,<4.0`
+# pin excludes pre-releases by default, so the old pin made the *entire*
+# `[isaac]` extra unsatisfiable — `pip install 'strands-robots-sim[isaac]'`
+# failed with "Could not find a version that satisfies the requirement
+# isaaclab<4.0,>=3.0". The core quickstart (create_world → add_robot →
+# add_object → add_camera → step → render → destroy) needs only Isaac Sim;
+# Isaac Lab is required only for the fleet-RL path, which installs from
+# source. See #107.
+#
 # Why Isaac Sim **6.0** specifically (not 5.0/5.1)? `strands-robots>=0.4.0`
 # requires Python >=3.12, and Isaac Sim 6.0 is the only release whose
 # embedded interpreter targets 3.12 (the 5.x line is 3.11) (#98). Keep

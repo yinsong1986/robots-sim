@@ -138,8 +138,11 @@ class TestEntryPointDeclaration:
         )
         assert "isaaclab" not in block, (
             "[isaac] extras must NOT pin `isaaclab` — it is provided by the "
-            "out-of-band Isaac Lab / Isaac Sim install, not by this pip extra. "
-            "See #108."
+            "out-of-band Isaac Lab / Isaac Sim install (the fleet-RL path is a "
+            "source install: `./isaaclab.sh -i`), not by this pip extra. Also, "
+            "the only `isaaclab` on the index is the pre-release `3.0.0b2`, so a "
+            "`>=3.0,<4.0` pin made the whole [isaac] extra unsatisfiable (PEP 440 "
+            "excludes pre-releases by default). See #108 and #107."
         )
 
     def test_entry_points_visible_via_importlib_metadata_when_installed(self):
