@@ -33,15 +33,26 @@ classifiers = [
 # strands-robots-sim is a *plugin* of strands-robots: the SimEngine ABC,
 # factory, model registry, LIBERO/MuJoCo backend, GR00T policy client, and
 # LeRobot recording adapter all live upstream. The only runtime dep this
-# package ships with is strands-robots itself (>=0.4.0 — the version that
-# walks `[project.entry-points."strands_robots.backends"]` to discover
-# pluggable backends like the Isaac one registered below).
+# package ships with is strands-robots itself.
+#
+# Python-floor constraint (issue #98): the supported runtime is Isaac Sim
+# 4.5.x, whose bundled interpreter is Python 3.10 — that's what
+# `requires-python = ">=3.10"`, the docs, and
+# strands_robots_sim/isaac/_install.py (isaac-sim:4.5.0) all target. The
+# `strands-robots` floor must therefore stay on a release that is
+# installable on Python 3.10: `strands-robots 0.4.0` declares
+# `Requires-Python: >=3.12` and cannot be installed into the Isaac Sim 4.5
+# interpreter, so the floor is capped below it. `0.3.8` is the last
+# `strands-robots` release that ships wheels for Python 3.10. Keep this
+# upper bound in lockstep with `requires-python`, the `[isaac]` isaacsim
+# pin, and the Isaac Sim version in _install.py — bumping any one of them
+# without the others reintroduces the install-vs-docs contradiction.
 #
 # GPU-only backend dependencies (Isaac Sim) live behind the `[isaac]`
 # extra; pip-install with no extras keeps the runtime tiny and lets
 # users layer the GPU bits on per-host.
 dependencies = [
-    "strands-robots>=0.4.0",
+    "strands-robots>=0.3.8,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -119,13 +130,12 @@ packages = ["strands_robots_sim"]
 
 [tool.hatch.envs.default]
 # `skip-install = true` keeps hatch from re-installing the project (and
-# its `strands-robots>=0.4.0` dep) into a fresh venv on every `hatch run`
-# invocation -- the >=0.4.0 pin can't resolve from PyPI until upstream U2
-# (entry-point walker) ships and the strands-labs/robots repo cuts a
-# matching release. Until then, contributors should `pip install -e .`
-# from a system Python that already has `strands-robots` installed from
-# a local checkout. The deps below are purely the lint + test toolchain
-# we want hatch to manage in its venv.
+# its `strands-robots>=0.3.8,<0.4` dep) into a fresh venv on every
+# `hatch run` invocation. Contributors should `pip install -e .` from a
+# Python 3.10/3.11 interpreter (matching Isaac Sim 4.5's bundled 3.10)
+# that already has a compatible `strands-robots` installed. The deps
+# below are purely the lint + test toolchain we want hatch to manage in
+# its venv.
 skip-install = true
 dependencies = [
     "black",
