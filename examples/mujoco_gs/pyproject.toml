@@ -12,7 +12,12 @@ name = "mujoco-gs-example"
 version = "0.0.1"
 description = "MuJoCo + 3D Gaussian Splatting hybrid render demo for strands-robots"
 readme = "README.md"
-requires-python = ">=3.10"
+# MuJoCo-only example (no Isaac / `strands-robots-sim` dependency), so it
+# technically runs on Python 3.10+. Pinned to >=3.12 to match the
+# project-wide floor after the Isaac Sim 6.0 / Python 3.12 migration
+# (`isaacsim>=6.0` requires Python 3.12), keeping every example installable
+# in a single 3.12 environment.
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
     "strands-agents",

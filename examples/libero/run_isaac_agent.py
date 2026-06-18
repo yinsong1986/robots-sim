@@ -12,8 +12,13 @@ in a single ``@tool``-decorated function and passes that to the agent.
 
 Status (as of 2026-06)
 ----------------------
-Validated end-to-end on the canonical Isaac Sim 4.5 NGC docker image
-(``nvcr.io/nvidia/isaac-sim:4.5.0``, RTX/L4 GPU, headless): the script
+Target runtime is the Isaac Sim 6.0 NGC docker image
+(``nvcr.io/nvidia/isaac-sim:6.0``, Python 3.12, RTX/L4 GPU, headless),
+matching the ``isaacsim>=6.0`` / ``requires-python>=3.12`` migration.
+The end-to-end lifecycle was previously validated on the Isaac Sim 4.5
+image (``nvcr.io/nvidia/isaac-sim:4.5.0``); the dual-path
+``isaacsim.*`` / ``omni.isaac.*`` imports keep the same code path
+working on both. The script
 runs past ``IsaacSimulation.is_available`` → ``create_world`` →
 ``add_robot`` (real Franka USD over the Omniverse CDN) → ``add_camera``,
 and the agent invokes ``evaluate_isaac_benchmark`` on a one-tool
@@ -30,7 +35,7 @@ PRs `#61 <https://github.com/strands-labs/robots-sim/pull/61>`_ /
 camera + Articulation Phase-2 wiring; with both merged on ``main``,
 the procedural / real-asset robot load + camera frames are now wired
 correctly. End-to-end ``--policy=groot`` numbers still need a host
-that satisfies all of: Isaac Sim 4.5+, libero (BDDL files),
+that satisfies all of: Isaac Sim 6.0+, libero (BDDL files),
 ``strands-robots`` under Isaac's Python (#71), and a GR00T inference
 container.
 
@@ -105,7 +110,7 @@ Usage
     #    orchestrates the GR00T inference container (idempotent). Pre-
     #    condition: HF token at `~/.cache/huggingface/token` (gated
     #    Cosmos-Reason2-2B backbone) + Docker + an NVIDIA GPU + Isaac
-    #    Sim 4.5+ installed.
+    #    Sim 6.0+ installed.
     python examples/libero/run_isaac_agent.py --policy groot --port 8000 --n-episodes 5
 
 Requires
@@ -115,8 +120,8 @@ Requires
   via AWS Bedrock -- see https://strandsagents.com/ for setup. Without
   one the ``Agent(...)`` call below raises an authentication /
   configuration error pointing at the SDK setup docs.
-- Isaac Sim 4.5+ installed via Omniverse Launcher / Isaac Lab / NGC
-  Docker image. Pure-Python ``pip install`` doesn't suffice.
+- Isaac Sim 6.0+ installed via Omniverse Launcher / Isaac Lab / NGC
+  Docker image (Python 3.12). Pure-Python ``pip install`` doesn't suffice.
 - For ``--policy=groot``: Docker + an NVIDIA GPU + ~30 GB free disk
   for the GR00T checkpoint (cached across re-runs).
 
@@ -442,9 +447,9 @@ def main() -> None:
     if not available:
         raise RuntimeError(
             f"Isaac Sim is not available on this host: {reason}. "
-            "Install Isaac Sim 4.5+ via the Omniverse Launcher / Isaac Lab / NGC "
-            "Docker image and ensure `omni.isaac.kit` (legacy) or `isaacsim` "
-            "(4.5+ supported) is importable in this Python environment."
+            "Install Isaac Sim 6.0+ via the Omniverse Launcher / Isaac Lab / NGC "
+            "Docker image and ensure `isaacsim` (6.0+, Python 3.12) or the legacy "
+            "`omni.isaac.kit` is importable in this Python environment."
         )
 
     # Build the policy-config phrase the agent will paste into its
