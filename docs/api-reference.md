@@ -118,14 +118,13 @@ sim.robot_joint_names(robot_name: str) -> list[str]
 
 sim.add_object(
     name: str,
-    *,
-    shape: str,                             # "cuboid" / "sphere" / "cylinder" / "capsule"
-    position: list[float],
-    scale: list[float] | None = None,
-    radius: float | None = None,
-    mass: float | None = None,
-    is_static: bool = False,
+    shape: str = "box",                     # "box" (alias: "cuboid") / "sphere" / "cylinder" / "capsule"
+    position: list[float] | None = None,
+    orientation: list[float] | None = None,
+    size: list[float] | None = None,        # alias: scale=
     color: list[float] | None = None,
+    mass: float = 0.1,
+    is_static: bool = False,
 ) -> dict
 
 sim.remove_object(name: str) -> dict

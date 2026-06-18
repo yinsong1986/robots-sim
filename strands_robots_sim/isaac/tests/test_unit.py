@@ -932,6 +932,114 @@ class TestAddObjectPhase2:
         assert kwargs["radius"] == 0.03
         assert kwargs["height"] == 0.08
 
+    def test_accepted_shapes_are_exactly_the_documented_set(self) -> None:
+        """Pin the accepted ``shape`` values so docs and code can't drift.
+
+        Locks the canonical valid set plus the accepted aliases (issue
+        #88). If a future change adds / removes a shape or an alias, this
+        test must be updated in lockstep with the docstring,
+        ``api-reference.md``, and the README -- which is the whole point.
+        """
+        from strands_robots_sim.isaac.simulation import _SHAPE_ALIASES
+
+        # Canonical names accepted by the public API.
+        canonical = {"box", "sphere", "capsule", "cylinder"}
+        # Aliases accepted in addition, normalized to a canonical name.
+        assert _SHAPE_ALIASES == {"cuboid": "box"}
+        # Every alias target must itself be a canonical shape.
+        assert set(_SHAPE_ALIASES.values()) <= canonical
+
+    def test_cuboid_alias_normalizes_to_box(self) -> None:
+        """``shape="cuboid"`` is accepted as an alias for ``"box"``.
+
+        Mirrors Isaac's ``DynamicCuboid`` class name and the docs
+        vocabulary (issue #88). It must construct a ``DynamicCuboid`` and
+        report the canonical ``"box"`` shape back in the result json.
+        """
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("cube", shape="cuboid", position=[1, 2, 3])
+        assert result["status"] == "success"
+        fake_objects.DynamicCuboid.assert_called_once()
+        # The canonical name is reported, not the alias.
+        assert result["content"][0]["json"]["shape"] == "box"
+        scene.add.assert_called_once_with(fake_objects.DynamicCuboid.return_value)
+
+    def test_unknown_shape_error_lists_cuboid_alias(self) -> None:
+        """The unknown-shape error envelope advertises the ``cuboid``
+        alias alongside the canonical set so a user mistyping ``shape``
+        sees every accepted value.
+        """
+        sim, _ = _make_simulation_with_world()
+        result = sim.add_object("test", shape="dodecahedron")
+        assert result["status"] == "error"
+        text = result["content"][0]["text"]
+        assert "cuboid" in text
+        assert "box" in text
+
+    def test_scale_alias_maps_to_size_for_box(self) -> None:
+        """``scale=`` is accepted as an alias for ``size=`` (issue #88).
+
+        Pre-fix, ``scale=`` was swallowed by ``**kwargs`` and silently
+        ignored, so the object got default dimensions. It must now flow
+        through to the underlying ``DynamicCuboid(scale=...)`` exactly as
+        ``size=`` would.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object("cube", shape="box", scale=[0.10, 0.20, 0.30])
+        assert result["status"] == "success"
+        assert result["content"][0]["json"]["size"] == [0.10, 0.20, 0.30]
+        kwargs = fake_objects.DynamicCuboid.call_args.kwargs
+        assert list(kwargs["scale"]) == [0.10, 0.20, 0.30]
+
+    def test_scale_alias_maps_to_size_for_sphere(self) -> None:
+        """``scale=`` alias also works for non-box shapes (e.g. sphere)."""
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            sim.add_object("ball", shape="sphere", scale=[0.07])
+        kwargs = fake_objects.DynamicSphere.call_args.kwargs
+        assert kwargs["radius"] == 0.07
+
+    def test_explicit_size_wins_over_scale_alias(self) -> None:
+        """If both ``size`` and ``scale`` are passed, ``size`` wins."""
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object(
+                "cube",
+                shape="box",
+                size=[0.10, 0.10, 0.10],
+                scale=[0.99, 0.99, 0.99],
+            )
+        assert result["content"][0]["json"]["size"] == [0.10, 0.10, 0.10]
+        kwargs = fake_objects.DynamicCuboid.call_args.kwargs
+        assert list(kwargs["scale"]) == [0.10, 0.10, 0.10]
+
+    def test_cuboid_with_scale_quickstart_snippet(self) -> None:
+        """The headline docs snippet ``add_object(shape="cuboid",
+        scale=[...])`` runs without error and produces the intended
+        dimensions (issue #88 acceptance criterion).
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"omni.isaac.core.objects": fake_objects}):
+            result = sim.add_object(
+                "block",
+                shape="cuboid",
+                position=[0.4, 0.0, 0.05],
+                scale=[0.05, 0.05, 0.05],
+                color=[1.0, 0.0, 0.0],
+            )
+        assert result["status"] == "success"
+        assert result["content"][0]["json"]["shape"] == "box"
+        assert result["content"][0]["json"]["size"] == [0.05, 0.05, 0.05]
+        kwargs = fake_objects.DynamicCuboid.call_args.kwargs
+        assert list(kwargs["scale"]) == [0.05, 0.05, 0.05]
+
     def test_rgba_color_truncates_to_rgb(self) -> None:
         """A 4-vector ``[r, g, b, a]`` color is truncated to ``[r, g, b]``.
 
