@@ -52,6 +52,18 @@ The camera / video path rides on:
   -- both merged. ``--policy=mock`` works fully (doesn't read images);
   ``--policy=groot`` will read from the camera handle.
 
+Rollout video (MP4)
+-------------------
+At parity with ``run_mujoco.py``: this script wraps the eval in an
+``IsaacSimulation.start_cameras_recording`` /
+``stop_cameras_recording`` pair, producing a real
+``rollouts/<date>/{rec_name}__image.mp4`` (one frame per applied
+control step, captured on the eval thread via ``evaluate_benchmark``'s
+``on_frame=`` hook). The ``videos=`` line below points at the file
+that gets written, matching MuJoCo's ``{name}__{camera}.mp4`` filename
+convention so the R15 backend-matrix glob picks up Isaac rows. See
+strands-labs/robots-sim#112.
+
 Tracks `#15 <https://github.com/strands-labs/robots-sim/issues/15>`_
 (R8 — example file). Filename is ``run_isaac.py`` rather than the
 issue's pre-rescope ``libero_isaac.py`` to match the post-rescope
@@ -466,12 +478,11 @@ def main() -> None:
         # camera uses on MuJoCo (`agentview` ≈ [2, 0, 1.5] looking at
         # origin).
         #
-        # Once #61 (add_camera Phase 2) merges, this constructs an
-        # actual ``omni.isaac.sensor.Camera`` and ``render()`` returns
-        # non-blank frames keyed off it. Pre-#61, this call silently
-        # registers the path in the in-Python registry and ``render``
-        # returns blank frames -- enough for ``--policy=mock`` (which
-        # doesn't read images), insufficient for ``--policy=groot``.
+        # With #61 (add_camera Phase 2) + #62 (render frame-path) merged,
+        # this constructs an actual ``isaacsim.sensors.camera.Camera`` and
+        # ``render(camera_name="image")`` returns real RGB frames keyed off
+        # it. Those frames feed both ``--policy=groot`` (which reads images)
+        # and the rollout-video recorder wired below.
         result = sim.add_camera(
             name="image",
             position=[2.0, 0.0, 1.5],
@@ -501,25 +512,42 @@ def main() -> None:
             f"--seed={args.seed}--policy={args.policy}--backend=isaac"
         )
         video_dir = _date_dir()
-        # Pre-#61, ``render()`` returns blank frames -- the recorder
-        # would write all-black MP4s. Document the placeholder path
-        # so post-eval analysis tools see the filename without
-        # mistaking it for a successful capture. Once #61 lands +
-        # the sibling-repo recorder integrates an Isaac-aware path
-        # (separate slice), this becomes a real video filename.
-        video_path = os.path.join(video_dir, f"{rec_name}__image.mp4.placeholder")
+        recording_camera = "image"
+
+        # Arm the synchronous Isaac recorder. Unlike MuJoCo's daemon-thread
+        # recorder, IsaacSimulation captures frames on the eval thread via
+        # the `on_frame` closure threaded into `evaluate_benchmark` -- the
+        # RTX renderer + Camera.get_rgba are bound to the thread that booted
+        # SimulationApp, so a background recorder would deadlock. On stop,
+        # the buffers flush to `{rec_name}__{camera}.mp4` under the same
+        # `rollouts/<date>/` layout MuJoCo uses (see
+        # strands_robots_sim/isaac/simulation.py:start_cameras_recording).
+        rec = sim.start_cameras_recording(
+            cameras=[recording_camera],
+            output_dir=video_dir,
+            name=rec_name,
+        )
+        if rec.get("status") != "success":
+            raise RuntimeError(f"start_cameras_recording failed: {rec}")
+        on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+        video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
 
         t0 = time.time()
-        result = sim.evaluate_benchmark(
-            benchmark_name=resolved_task,
-            # robot_name omitted for the same reason run_mujoco.py
-            # omits it: the benchmark's on_episode_start may rename /
-            # reload the robot; ``evaluate_benchmark`` auto-picks the
-            # single robot when there's only one.
-            n_episodes=args.n_episodes,
-            seed=args.seed,
-            **policy_kwargs,
-        )
+        try:
+            result = sim.evaluate_benchmark(
+                benchmark_name=resolved_task,
+                # robot_name omitted for the same reason run_mujoco.py
+                # omits it: the benchmark's on_episode_start may rename /
+                # reload the robot; ``evaluate_benchmark`` auto-picks the
+                # single robot when there's only one.
+                n_episodes=args.n_episodes,
+                seed=args.seed,
+                on_frame=on_frame,
+                **policy_kwargs,
+            )
+        finally:
+            stop = sim.stop_cameras_recording()
+            print(f"[recording] {stop['content'][0]['text']}")
         wall_time = time.time() - t0
 
         if result.get("status") != "success":

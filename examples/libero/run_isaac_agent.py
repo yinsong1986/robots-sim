@@ -88,10 +88,16 @@ from prompt context); the script owns:
   viewport cameras the way MuJoCo's ``mjData`` does, so the camera
   prim has to land on the stage before any ``render`` / recorder
   pulls from it.
-* MP4 recording is intentionally skipped here (the Isaac-side
-  recorder integration is a separate slice). The agent's printed
-  summary documents the absence rather than crashing on a
-  ``start_cameras_recording`` that doesn't exist on the Isaac side.
+* Rollout-video MP4 recording, at parity with
+  ``run_mujoco_agent.py``: the script arms
+  ``IsaacSimulation.start_cameras_recording`` before the agent runs and
+  flushes via ``stop_cameras_recording`` after. Because Isaac's RTX
+  renderer is thread-bound, capture is synchronous -- the recorder's
+  ``on_frame`` closure (stashed at module scope so it can cross the
+  ``@tool`` boundary) is threaded into ``evaluate_benchmark`` and grabs
+  one ``render()`` frame per control step on the eval thread. Produces a
+  real ``rollouts/<date>/{rec_name}__image.mp4``. See
+  strands-labs/robots-sim#112.
 
 Owned by the agent: the single ``evaluate_isaac_benchmark(...)`` call
 with ``benchmark_name`` + ``n_episodes`` + ``seed`` + ``policy_provider`` +
@@ -130,10 +136,10 @@ Notes
 - Output is non-deterministic by design (LLM-generated summary); the
   R15 backend matrix consumes ``run_isaac.py`` (sibling file) for
   grep-stable numbers.
-- No video recording in this scaffold (Isaac-side recorder
-  integration is a separate slice). Once that lands, this file gains
-  a ``start_cameras_recording`` block matching the MuJoCo agent's
-  shape.
+- Rollout video is recorded via the synchronous Isaac recorder (one
+  ``render()`` frame per control step), producing a real
+  ``rollouts/<date>/{rec_name}__image.mp4`` at parity with the MuJoCo
+  agent.
 """
 
 from __future__ import annotations
@@ -158,6 +164,17 @@ from strands_robots_sim.isaac import IsaacConfig, IsaacSimulation
 # module attribute is the cleanest stopgap until the Isaac AgentTool
 # wrapper lands and the indirection goes away.
 _sim: IsaacSimulation | None = None
+
+# Module-level rollout-video capture hook. Set in main() from the
+# recorder's start_cameras_recording result and consumed by the tool
+# wrapper below. It lives at module scope (not in the tool's signature)
+# for the same reason ``_sim`` does: the closure isn't JSON-castable, so
+# it can't cross @tool's OpenAPI-schema boundary. Threading it through
+# module scope lets the synchronous Isaac recorder capture frames on the
+# eval thread even though the eval is dispatched from a Strands tool
+# call. See strands-labs/robots#191 for the closure-vs-tool-boundary
+# rationale on the MuJoCo side.
+_on_frame: Any = None
 
 
 def _date_dir(date_root: str = "rollouts") -> str:
@@ -331,6 +348,10 @@ def evaluate_isaac_benchmark(
         policy_provider=policy_provider,
         policy_config=policy_config,
         instruction=instruction,
+        # Thread the module-scoped rollout-video capture hook into the
+        # eval. ``_on_frame`` is None until main() arms the recorder, so
+        # this is a no-op for callers that don't want video.
+        on_frame=_on_frame,
     )
 
 
@@ -433,7 +454,7 @@ def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | N
 
 
 def main() -> None:
-    global _sim
+    global _sim, _on_frame
 
     args = _build_parser().parse_args()
     if args.robot_usd is not None and args.robot_urdf is not None:
@@ -490,9 +511,9 @@ def main() -> None:
             raise RuntimeError(f"add_robot failed: {result}")
 
         # Phase-2 RTX camera at the same over-the-shoulder vantage
-        # LIBERO's `agentview` uses on MuJoCo. Pre-#61 the call
-        # silently registers a stub camera; post-#61 it's a real
-        # `omni.isaac.sensor.Camera`.
+        # LIBERO's `agentview` uses on MuJoCo. With #61 + #62 merged it's
+        # a real `isaacsim.sensors.camera.Camera` whose frames feed both
+        # `--policy=groot` and the rollout-video recorder armed below.
         result = _sim.add_camera(name="image", position=[2.0, 0.0, 1.5], target=[0.0, 0.0, 0.5], fov=60.0)
         if result.get("status") != "success":
             raise RuntimeError(f"add_camera failed: {result}")
@@ -524,11 +545,33 @@ def main() -> None:
                 )
         resolved_task = args.task
 
-        # NB: no `start_cameras_recording` here -- the Isaac-side
-        # recorder integration is a separate slice. Once that lands,
-        # this block gains a `_sim.start_cameras_recording(...)` /
-        # `_sim.stop_cameras_recording()` pair matching the MuJoCo
-        # agent's shape.
+        # Arm the synchronous Isaac recorder BEFORE the agent runs, so the
+        # `evaluate_isaac_benchmark` tool call captures a real MP4 -- at
+        # parity with run_mujoco_agent.py's start/stop_cameras_recording
+        # pair. The recorder returns an `on_frame` closure; we stash it at
+        # module scope (`_on_frame`) because it can't cross @tool's
+        # JSON-schema boundary (see #191). The tool wrapper threads it into
+        # `evaluate_benchmark(on_frame=...)` so frames are captured on the
+        # eval thread (Isaac's RTX renderer is thread-bound). On stop the
+        # buffers flush to `rollouts/<date>/{rec_name}__image.mp4`, matching
+        # MuJoCo's `{name}__{camera}.mp4` convention. See
+        # strands-labs/robots-sim#112.
+        ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        rec_name = (
+            f"{ts}--task={resolved_task}--n_eps={args.n_episodes}"
+            f"--seed={args.seed}--policy={args.policy}--backend=isaac--agent"
+        )
+        video_dir = _date_dir()
+        recording_camera = "image"
+        rec = _sim.start_cameras_recording(
+            cameras=[recording_camera],
+            output_dir=video_dir,
+            name=rec_name,
+        )
+        if rec.get("status") != "success":
+            raise RuntimeError(f"start_cameras_recording failed: {rec}")
+        _on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+        video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
 
         # Hand the agent a 1-tool surface (`evaluate_isaac_benchmark`)
         # and a prompt that fills the eval kwargs from --task /
@@ -538,28 +581,23 @@ def main() -> None:
         # AgentTool. See module docstring for migration plan.
         agent = Agent(tools=[evaluate_isaac_benchmark])
         t0 = time.time()
-        result = agent(
-            f"Make exactly one tool call: invoke `evaluate_isaac_benchmark` "
-            f"with `benchmark_name='{resolved_task}'`, "
-            f"`n_episodes={args.n_episodes}`, `seed={args.seed}`, "
-            f"{policy_phrase}. Do not call any other action -- the world, "
-            f"robot, and camera have already been set up. When the call "
-            f"returns, parse the `success_rate` field from the JSON "
-            f"payload and report it as a percentage of the {args.n_episodes} "
-            f"episodes."
-        )
+        try:
+            result = agent(
+                f"Make exactly one tool call: invoke `evaluate_isaac_benchmark` "
+                f"with `benchmark_name='{resolved_task}'`, "
+                f"`n_episodes={args.n_episodes}`, `seed={args.seed}`, "
+                f"{policy_phrase}. Do not call any other action -- the world, "
+                f"robot, and camera have already been set up. When the call "
+                f"returns, parse the `success_rate` field from the JSON "
+                f"payload and report it as a percentage of the {args.n_episodes} "
+                f"episodes."
+            )
+        finally:
+            stop = _sim.stop_cameras_recording()
+            print(f"[recording] {stop['content'][0]['text']}")
         wall_time = time.time() - t0
         print(result)
 
-        ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        rec_name = (
-            f"{ts}--task={resolved_task}--n_eps={args.n_episodes}"
-            f"--seed={args.seed}--policy={args.policy}--backend=isaac--agent"
-        )
-        # Placeholder until the Isaac recorder integration lands; the
-        # filename's still useful for matrix-driver bookkeeping even
-        # when no MP4 is produced.
-        video_path = os.path.join(_date_dir(), f"{rec_name}__image.mp4.placeholder")
         # Echo the CLI-requested task (replayable) plus the resolved one.
         print(
             f"[agent-eval] policy={args.policy} task={requested_task} "
@@ -572,6 +610,7 @@ def main() -> None:
         except Exception:
             pass
         _sim = None
+        _on_frame = None
         if server_handle is not None:
             gr00t_inference(action="lifecycle", lifecycle="teardown", container_name=args.container)
 
