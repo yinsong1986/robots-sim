@@ -254,8 +254,8 @@ versions = update one constant.
 isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 ```
 
-`create_simulation("isaac", ...)`
-upstream does:
+Once an upstream `strands-robots` release walks the
+`strands_robots.backends` group, `create_simulation("isaac", ...)` will do:
 
 ```python
 import importlib.metadata
@@ -264,6 +264,18 @@ ep = next(e for e in importlib.metadata.entry_points(group="strands_robots.backe
 cls = ep.load()
 return cls(**kwargs)
 ```
+
+Until then (the pinned floor is `strands-robots>=0.3.8,<0.4`, which has no
+such walker), construct the backend directly:
+
+```python
+from strands_robots_sim.isaac import IsaacSimulation, IsaacConfig
+
+sim = IsaacSimulation(IsaacConfig(**kwargs))
+```
+
+See [`strands-labs/robots#131`](https://github.com/strands-labs/robots/issues/131)
+for the upstream discovery work.
 
 ## See also
 

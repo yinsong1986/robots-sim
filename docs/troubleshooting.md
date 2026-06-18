@@ -102,8 +102,10 @@ process; spawn subprocesses for distinct configs:
 ```python
 import multiprocessing as mp
 
+from strands_robots_sim.isaac import IsaacSimulation, IsaacConfig
+
 def child(headless: bool):
-    sim = create_simulation("isaac", headless=headless)
+    sim = IsaacSimulation(IsaacConfig(headless=headless))
     ...
 
 mp.set_start_method("spawn")

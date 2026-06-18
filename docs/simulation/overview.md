@@ -47,9 +47,13 @@ cfg = IsaacConfig(
 sim = IsaacSimulation(cfg)
 ```
 
-`create_simulation("isaac", headless=True, render_mode="rtx_realtime")`
-upstream is shorthand for the same thing — kwargs are forwarded into
-`IsaacConfig`.
+`IsaacSimulation(IsaacConfig(headless=True, render_mode="rtx_realtime"))` is
+the supported way to construct the backend today. Once an upstream
+`strands-robots` release walks the `strands_robots.backends` entry-point
+group, `create_simulation("isaac", headless=True, render_mode="rtx_realtime")`
+will be shorthand for the same thing — kwargs are forwarded into
+`IsaacConfig` either way (tracked in
+[`strands-labs/robots#131`](https://github.com/strands-labs/robots/issues/131)).
 
 ### Environment-variable overrides
 
@@ -115,14 +119,15 @@ Five hard rules:
 that conditionally creates an Isaac sim:
 
 ```python
-from strands_robots_sim.isaac import IsaacSimulation
+from strands_robots.simulation import create_simulation
+from strands_robots_sim.isaac import IsaacSimulation, IsaacConfig
 
 ok, reason = IsaacSimulation.is_available()
 if not ok:
     print(f"Isaac Sim not available — falling back. Reason: {reason}")
     sim = create_simulation("mujoco")            # graceful degradation
 else:
-    sim = create_simulation("isaac", headless=True)
+    sim = IsaacSimulation(IsaacConfig(headless=True))
 ```
 
 The reason string is structured (which `omni.*` import failed, expected
