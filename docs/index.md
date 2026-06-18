@@ -120,7 +120,10 @@ pip install 'strands-robots-sim[isaac]'
 
 Isaac Sim itself is **not on PyPI** — it is an Omniverse Kit application
 that must be installed separately via the Omniverse Launcher, Isaac Lab, or
-the NGC Docker image. Full instructions in
+the NGC Docker image. The `[isaac]` extra above installs only the
+pip-installable helper (`usd-core`) plus `strands-robots`; it does **not**
+pull in Isaac Sim. Full instructions, including a "verify your install
+boots" snippet, in
 [Getting Started → Installation](getting-started/installation.md).
 
 ## Quickstart

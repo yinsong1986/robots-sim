@@ -4,8 +4,10 @@ Pins the three pieces of packaging surface that the Isaac backend
 relies on:
 
 1. The ``[isaac]`` extra is declared in ``pyproject.toml`` and pulls in
-   the pip-installable companion deps for the supported Isaac Sim 6.0
-   runtime (``isaacsim>=6.0``, ``isaaclab>=3.0,<4.0``, ``usd-core``).
+   only the genuinely pip-installable companion dep (``usd-core``) for
+   the supported Isaac Sim 6.0 runtime. Isaac Sim itself is installed
+   out-of-band (Launcher / Isaac Lab / NGC Docker), so the extra must
+   **not** pin ``isaacsim`` / ``isaaclab`` (see #108).
 2. The ``isaac`` entry point under ``strands_robots.backends``
    resolves to ``strands_robots_sim.isaac.simulation:IsaacSimulation``.
    ``isaac`` is the *only* backend name declared; the docs must not
@@ -101,22 +103,44 @@ class TestEntryPointDeclaration:
         content = _PYPROJECT.read_text()
         assert "\nisaac = [" in content or "\nisaac=[" in content, (
             "Expected `isaac = [...]` under [project.optional-dependencies] declaring "
-            "the pip-installable companion deps for Isaac Sim 6.0 (isaacsim, isaaclab, usd-core)."
+            "the pip-installable companion dep for Isaac Sim 6.0 (usd-core)."
         )
 
-    def test_isaac_extra_includes_isaacsim_and_isaaclab(self):
-        """``[isaac]`` ships the pip-installable Isaac Sim companion deps."""
+    def test_isaac_extra_pins_only_pip_installable_helpers(self):
+        """``[isaac]`` ships only the genuinely pip-installable companion deps.
+
+        Option A of #108: Isaac Sim is installed out-of-band (Omniverse
+        Launcher / Isaac Lab / NGC Docker image), which ships a complete,
+        bootable Kit. The extra therefore carries only ``usd-core`` and must
+        NOT pin the ``isaacsim`` PyPI metapackage (nor ``isaaclab``):
+
+          * Pinning ``isaacsim`` contradicted every other surface (README,
+            docs/, _install.py) that says Isaac Sim is "not on PyPI".
+          * NVIDIA's ``isaacsim[all]`` metapackage is incomplete on its own
+            (omits the ``isaacsim-extscache-*`` packages), so ``SimulationApp``
+            aborts at boot with an ``omni.ext`` dependency-resolution error.
+
+        This pins the extra to the Option-A contract so the contradiction
+        cannot drift back in.
+        """
         content = _PYPROJECT.read_text()
         # crude but durable: locate the [isaac] block and check its body
         idx = content.find("\nisaac = [")
         assert idx != -1, "[isaac] extras block not found"
         block_end = content.find("]", idx)
         block = content[idx:block_end]
-        assert (
-            "isaacsim>=6.0" in block
-        ), "[isaac] extras must pin isaacsim>=6.0 (matches the supported Isaac Sim 6.0 image)"
-        assert "isaaclab" in block, "[isaac] extras must include isaaclab>=3.0,<4.0"
-        assert "usd-core" in block, "[isaac] extras must include usd-core"
+        assert "usd-core" in block, "[isaac] extras must include usd-core (the pip-installable USD runtime)"
+        assert "isaacsim" not in block, (
+            "[isaac] extras must NOT pin `isaacsim` — Isaac Sim is installed "
+            "out-of-band (Launcher / Isaac Lab / NGC Docker), and the PyPI "
+            "`isaacsim` metapackage is incomplete (omits isaacsim-extscache-*), "
+            "so SimulationApp won't boot. See #108."
+        )
+        assert "isaaclab" not in block, (
+            "[isaac] extras must NOT pin `isaaclab` — it is provided by the "
+            "out-of-band Isaac Lab / Isaac Sim install, not by this pip extra. "
+            "See #108."
+        )
 
     def test_entry_points_visible_via_importlib_metadata_when_installed(self):
         """If the package is pip-installed in this env, entry points are discoverable."""

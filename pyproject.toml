@@ -43,35 +43,41 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Isaac Sim is NOT installable from PyPI — it's an Omniverse Kit app.
-# Users install it separately via NVIDIA Omniverse Launcher, Isaac Lab,
-# or the nvcr.io/nvidia/isaac-sim docker image. The pins below are the
-# pip-installable companion deps an Isaac Sim runtime expects to find,
-# and they must match the supported Isaac Sim **6.0** image / launcher
-# build documented in README.md, docs/, and
-# strands_robots_sim/isaac/_install.py (ISAAC_SIM_DOCKER_IMAGE =
-# nvcr.io/nvidia/isaac-sim:6.0). Keep this major.minor in lockstep with
-# those surfaces — see issues #90 / #98.
+# Isaac Sim itself is NOT installed by this extra. It is an Omniverse Kit
+# application that must be provisioned out-of-band — via the NVIDIA
+# Omniverse Launcher, Isaac Lab (`./isaaclab.sh -i`), or the NGC docker
+# image (`nvcr.io/nvidia/isaac-sim:6.0`). Those images/launchers ship a
+# complete, bootable Kit (Python 3.12 interpreter + the full
+# `isaacsim-*` / `isaacsim-extscache-*` extension set that `SimulationApp`
+# needs to resolve its dependency graph and boot).
 #
-# Why 6.0 specifically (not 5.0/5.1)? `strands-robots>=0.4.0` requires
-# Python >=3.12. Per PyPI `Requires-Python`, only `isaacsim==6.0.*`
-# targets `==3.12.*`; the 5.x line is `==3.11.*` and would conflict.
-# Isaac Sim 6.0 is therefore the only release whose interpreter
-# satisfies `strands-robots>=0.4.0` (#98).
+# This was a deliberate decision documented in the README, docs/, and
+# strands_robots_sim/isaac/_install.py: the supported install path is
+# "Isaac Sim out-of-band, helpers via pip" (Option A in #108). We do NOT
+# pin `isaacsim` here, for two reasons:
 #
-#   * `isaacsim>=6.0` — the PyPI shim that exposes Kit's Python API on
-#     hosts where Isaac Sim 6.0 is installed alongside.
-#   * `isaaclab>=3.0,<4.0` — Isaac Lab's task / ROS / RL utilities; the
-#     3.x line is the release paired with Isaac Sim 6.0.
+#   1. Internal consistency. Every other surface says Isaac Sim is "not
+#      on PyPI / installed separately"; pinning the `isaacsim` PyPI
+#      metapackage here contradicted that and sent users down a path the
+#      prose says isn't supported (#108).
+#   2. The PyPI `isaacsim[all]` metapackage is *incomplete* on its own:
+#      it pulls the `isaacsim-*` packages but NOT the
+#      `isaacsim-extscache-*` packages, so `SimulationApp` aborts with an
+#      `omni.ext` "Failed to resolve extension dependencies" error and
+#      `create_world()` never boots (#108). The Launcher/Docker/Isaac Lab
+#      images already bundle a complete, bootable Kit, so the extra only
+#      needs to carry the genuinely pip-installable helper(s).
+#
+# Why Isaac Sim **6.0** specifically (not 5.0/5.1)? `strands-robots>=0.4.0`
+# requires Python >=3.12, and Isaac Sim 6.0 is the only release whose
+# embedded interpreter targets 3.12 (the 5.x line is 3.11) (#98). Keep
+# that major.minor in lockstep with ISAAC_SIM_DOCKER_IMAGE in
+# strands_robots_sim/isaac/_install.py and the docs (#90 / #98).
+#
 #   * `usd-core` — pure-Python USD runtime; used by the procedural scene
-#     builders even when Kit isn't booted.
-#
-# `pip install -e '.[isaac]'` on a non-GPU host will fail at the isaacsim
-# wheel resolution step with NVIDIA's standard "Isaac Sim not detected"
-# message; that's the helpful failure mode the issue's DoD calls for.
+#     builders / loaders even when Kit isn't booted. This is the one
+#     genuinely pip-installable companion dep, so it's the only pin here.
 isaac = [
-    "isaacsim>=6.0",
-    "isaaclab>=3.0,<4.0",
     "usd-core",
 ]
 # GPU boxes only — the heavy backend in one shot.
