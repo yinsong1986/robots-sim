@@ -103,9 +103,22 @@ isaac = "strands_robots_sim.isaac.simulation:IsaacSimulation"
 ```
 
 When `strands-robots-sim` is installed, `importlib.metadata.entry_points`
-sees the `isaac` name. `create_simulation("isaac", ...)` upstream walks the
-`strands_robots.backends` group, finds the `isaac` entry, imports the
-target string, and instantiates it.
+sees the `isaac` name. The intended flow is that `create_simulation("isaac", ...)`
+upstream walks the `strands_robots.backends` group, finds the `isaac` entry,
+imports the target string, and instantiates it.
+
+!!! warning "Discovery is not live in the pinned upstream yet"
+
+    No released `strands-robots` (this package pins `>=0.3.8,<0.4`) walks the
+    `strands_robots.backends` group from its `create_simulation` factory, so
+    `create_simulation("isaac")` currently raises
+    `ValueError: Unknown simulation backend: 'isaac'`. Until the upstream
+    walker ships
+    ([`strands-labs/robots#131`](https://github.com/strands-labs/robots/issues/131)),
+    construct the backend directly with
+    `IsaacSimulation(IsaacConfig(...))`. The entry-point declaration here is
+    forward-compatible plumbing: once upstream walks the group, no change to
+    this package is required.
 
 This is the same pattern other packages use to extend `strands-robots`
 (future cuRobo / MoveIt2 backends, custom user backends). The upstream
