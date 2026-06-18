@@ -120,8 +120,11 @@ no-op stub on a stock `main` build. **Draft until they land.**
 
 ## GPU-validated
 
-Run on Isaac Sim 4.5 (`nvcr.io/nvidia/isaac-sim:4.5.0`, NVIDIA L4) against a
-local integration of #61 + #62 + #63:
+Target runtime is Isaac Sim 6.0 (`nvcr.io/nvidia/isaac-sim:6.0`, Python 3.12,
+NVIDIA L4), matching the `isaacsim>=6.0` / `requires-python>=3.12` migration.
+The frame below was validated on Isaac Sim 4.5 (`nvcr.io/nvidia/isaac-sim:4.5.0`)
+against a local integration of #61 + #62 + #63; the library's dual-path
+`isaacsim.*` / `omni.isaac.*` imports keep the same code path working on both:
 
 ```
 Scene built: robot=robot (9 joints), camera=front, objects=['cube']

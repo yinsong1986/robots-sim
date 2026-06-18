@@ -77,15 +77,22 @@ Usage
 Requires
 --------
 ``pip install 'strands-robots-sim[isaac]' 'strands-robots[benchmark-libero]'``
-plus a working Isaac Sim 4.5+ install on the host (RTX GPU, Ubuntu
-22.04+, CUDA 12+). On a non-Isaac host the script exits early with a
+plus a working Isaac Sim 6.0+ install on the host (RTX GPU, Ubuntu
+22.04+, CUDA 12+). ``strands-robots-sim`` requires Python 3.12 (the
+interpreter bundled by Isaac Sim 6.0). On a non-Isaac host the script exits early with a
 diagnostic from :meth:`IsaacSimulation.is_available` rather than
 crashing on the first ``omni.*`` / ``isaacsim.*`` import.
 
 Verification status (as of 2026-06)
 -----------------------------------
-Validated end-to-end on the canonical Isaac Sim 4.5 NGC docker image
-(``nvcr.io/nvidia/isaac-sim:4.5.0``, RTX/L4 GPU, headless): the
+Target runtime is the Isaac Sim 6.0 NGC docker image
+(``nvcr.io/nvidia/isaac-sim:6.0``, Python 3.12, RTX/L4 GPU, headless),
+matching the ``isaacsim>=6.0`` / ``requires-python>=3.12`` migration.
+The end-to-end lifecycle was previously validated on the Isaac Sim 4.5
+image (``nvcr.io/nvidia/isaac-sim:4.5.0``); the dual-path
+``isaacsim.*`` / ``omni.isaac.*`` imports in
+``strands_robots_sim/isaac/simulation.py`` keep the same code path
+working on both. The
 script runs past ``IsaacSimulation.is_available`` → ``create_world``
 → ``add_robot`` (real Franka USD over the Omniverse CDN) →
 ``add_camera`` → physics ``step``. ``--policy=mock --n-episodes=5``
@@ -396,9 +403,9 @@ def main() -> None:
     if not available:
         raise RuntimeError(
             f"Isaac Sim is not available on this host: {reason}. "
-            "Install Isaac Sim 4.5+ via the Omniverse Launcher / Isaac Lab / NGC "
-            "Docker image and ensure `omni.isaac.kit` (legacy) or `isaacsim` "
-            "(4.5+ supported) is importable in this Python environment."
+            "Install Isaac Sim 6.0+ via the Omniverse Launcher / Isaac Lab / NGC "
+            "Docker image and ensure `isaacsim` (6.0+, Python 3.12) or the legacy "
+            "`omni.isaac.kit` is importable in this Python environment."
         )
 
     # Bring up GR00T container (idempotent; no-op for --policy=mock).
