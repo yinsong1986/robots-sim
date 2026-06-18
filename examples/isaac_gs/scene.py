@@ -100,6 +100,72 @@ def _add_lighting(sim: "object") -> None:
     logger.info("Added key + dome lights (ground-plane lighting unavailable with ground_plane=False)")
 
 
+# Default Franka Panda USD sub-paths relative to the Isaac assets root.
+# NVIDIA relocated the asset under a vendor folder in Isaac Sim 6.0, so the
+# layout differs across releases. Probe the 6.0 path first (the current
+# target runtime), then fall back to the legacy 4.x path. See
+# strands-labs/robots-sim#110.
+_FRANKA_USD_SUBPATHS: tuple[str, ...] = (
+    # Isaac Sim 6.0+ (vendor folder).
+    "Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",
+    # Isaac Sim 4.x and earlier.
+    "Isaac/Robots/Franka/franka.usd",
+)
+
+
+def _asset_exists(url: str) -> "bool | None":
+    """Best-effort HEAD-probe for an asset URL.
+
+    Returns ``True`` / ``False`` when the probe is conclusive, or
+    ``None`` when it can't be determined (non-HTTP URL, e.g. an
+    ``omniverse://`` Nucleus path, or a network error). A ``None`` result
+    means "don't use this to rule a candidate in or out" so we degrade to
+    the first candidate rather than failing on a transient hiccup.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            return 200 <= resp.status < 400
+    except urllib.error.HTTPError as exc:
+        return exc.code < 400
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_franka_usd(assets_root: str) -> str:
+    """Pick the Franka USD candidate that exists under ``assets_root``.
+
+    HEAD-probes each candidate in :data:`_FRANKA_USD_SUBPATHS` order and
+    returns the first that resolves. If no probe is conclusive (e.g. a
+    Nucleus ``omniverse://`` root that can't be HEAD-probed over HTTP),
+    falls back to the first (6.0) candidate. Raises with an actionable
+    hint only when every HTTP candidate definitively 404s.
+    """
+    candidates = [f"{assets_root}/{sub}" for sub in _FRANKA_USD_SUBPATHS]
+    saw_definitive_miss = False
+    for url in candidates:
+        exists = _asset_exists(url)
+        if exists is True:
+            return url
+        if exists is False:
+            saw_definitive_miss = True
+    if saw_definitive_miss:
+        raise RuntimeError(
+            "Default Franka USD not found under the Isaac assets root "
+            f"({assets_root}); tried {candidates}. The asset layout changed "
+            "between Isaac Sim 4.x and 6.0 -- pass robot_usd=... with an "
+            "explicit asset path."
+        )
+    # Inconclusive (non-HTTP root / network hiccup): assume the current
+    # 6.0 layout and let add_robot surface a clear error if it's wrong.
+    return candidates[0]
+
+
 def _default_franka_usd(sim: "object") -> str:
     """Resolve Isaac's bundled Franka Panda USD from the assets root.
 
@@ -108,7 +174,9 @@ def _default_franka_usd(sim: "object") -> str:
 
     Tries the modern ``isaacsim.storage.native`` namespace first (Isaac
     Sim 6.0 supported path) and falls back to the legacy
-    ``omni.isaac.nucleus`` shim.
+    ``omni.isaac.nucleus`` shim. The asset sub-path moved under a vendor
+    folder in Isaac Sim 6.0, so :func:`_resolve_franka_usd` HEAD-probes
+    the 6.0 and legacy 4.x layouts and returns whichever exists.
     """
     try:
         from isaacsim.storage.native import (  # type: ignore[import-not-found]
@@ -124,7 +192,7 @@ def _default_franka_usd(sim: "object") -> str:
         raise RuntimeError(
             "Could not resolve the Isaac assets root for the default Franka USD. " "Pass robot_usd=... explicitly."
         )
-    return f"{root}/Isaac/Robots/Franka/franka.usd"
+    return _resolve_franka_usd(root)
 
 
 def build_default_scene(

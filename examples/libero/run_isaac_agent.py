@@ -396,18 +396,79 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _asset_exists(url: str) -> "bool | None":
+    """Best-effort HEAD-probe for an asset URL.
+
+    Returns ``True`` / ``False`` when the probe is conclusive, or ``None``
+    when it can't be determined (non-HTTP URL such as an ``omniverse://``
+    Nucleus path, or a network error).
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            return 200 <= resp.status < 400
+    except urllib.error.HTTPError as exc:
+        return exc.code < 400
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# Default Franka Panda USD sub-paths relative to the Isaac assets root.
+# NVIDIA relocated the asset under a vendor folder in Isaac Sim 6.0; probe
+# the 6.0 path first, then fall back to the legacy 4.x path. See
+# strands-labs/robots-sim#110.
+_FRANKA_USD_SUBPATHS = (
+    "Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",  # Isaac Sim 6.0+
+    "Isaac/Robots/Franka/franka.usd",  # Isaac Sim 4.x and earlier
+)
+
+
+def _resolve_default_franka_usd(assets_root: str) -> str:
+    """Pick the Franka USD candidate that exists under ``assets_root``.
+
+    HEAD-probes each candidate in :data:`_FRANKA_USD_SUBPATHS` order and
+    returns the first that resolves. Falls back to the first (6.0)
+    candidate when no probe is conclusive; raises with an actionable hint
+    only when every HTTP candidate definitively 404s.
+    """
+    candidates = [f"{assets_root}/{sub}" for sub in _FRANKA_USD_SUBPATHS]
+    saw_definitive_miss = False
+    for url in candidates:
+        exists = _asset_exists(url)
+        if exists is True:
+            return url
+        if exists is False:
+            saw_definitive_miss = True
+    if saw_definitive_miss:
+        raise RuntimeError(
+            "Default Franka USD not found under the Isaac assets root "
+            f"({assets_root}); tried {candidates}. The asset layout changed "
+            "between Isaac Sim 4.x and 6.0 -- pass --robot-usd / --robot-urdf "
+            "with an explicit asset path."
+        )
+    return candidates[0]
+
+
 def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | None]":
     """Resolve which robot asset to load → ``(usd_path, urdf_path)``.
 
     Same contract as ``run_isaac.py._resolve_robot_asset``: ``--robot-urdf``
-    > ``--robot-usd`` > default Franka Panda USD from the assets root
-    (``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``). Loads a
-    *real* robot rather than the procedural stick-figure (see
-    ``run_isaac.py`` for the rationale). ``get_assets_root_path`` is
-    imported lazily (only resolvable after ``create_world``) and tries
-    the modern ``isaacsim.storage.native`` namespace first, falling back
-    to the legacy ``omni.isaac.nucleus`` shim -- matches the dual-path
-    policy in ``strands_robots_sim/isaac/simulation.py``.
+    > ``--robot-usd`` > default Franka Panda USD from the assets root. The
+    asset sub-path moved under a vendor folder in Isaac Sim 6.0
+    (``Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd``) from the legacy
+    4.x layout (``Isaac/Robots/Franka/franka.usd``); the resolver
+    HEAD-probes both and uses whichever exists. Loads a *real* robot rather
+    than the procedural stick-figure (see ``run_isaac.py`` for the
+    rationale). ``get_assets_root_path`` is imported lazily (only resolvable
+    after ``create_world``) and tries the modern ``isaacsim.storage.native``
+    namespace first, falling back to the legacy ``omni.isaac.nucleus`` shim
+    -- matches the dual-path policy in
+    ``strands_robots_sim/isaac/simulation.py``.
     """
     if args.robot_urdf is not None:
         return None, args.robot_urdf
@@ -429,7 +490,7 @@ def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | N
             "Pass --robot-usd / --robot-urdf with an explicit asset path, or configure "
             "a Nucleus server / internet access for the Omniverse CDN."
         )
-    return f"{assets_root}/Isaac/Robots/Franka/franka.usd", None
+    return _resolve_default_franka_usd(assets_root), None
 
 
 def main() -> None:
