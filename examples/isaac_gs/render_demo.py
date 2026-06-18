@@ -45,6 +45,7 @@ import argparse
 import datetime as _dt
 import logging
 import os
+import sys
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -184,4 +185,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Isaac's SimulationApp installs a fast-shutdown path (``simulation_app
+    # .close()`` / ``os._exit``-style teardown) that can swallow a non-zero
+    # process exit even when ``main`` raised -- so a failed
+    # ``build_default_scene`` would otherwise exit 0 and hide the failure
+    # from CI / scripts (see strands-labs/robots-sim#110). Catch any
+    # exception here, log it, and force a non-zero exit *after* the
+    # SimulationApp teardown via ``os._exit`` so the status survives.
+    try:
+        main()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("render_demo failed")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
