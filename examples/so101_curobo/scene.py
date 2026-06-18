@@ -124,7 +124,7 @@ def make_sim(backend: str = "mujoco", **isaac_kwargs: Any):
         except Exception as exc:  # noqa: BLE001 - runtime missing / not wired
             raise RuntimeError(
                 f"Could not create the Isaac Sim backend ({type(exc).__name__}: {exc}). "
-                "The Isaac Sim runtime (Python 3.10 venv with `isaacsim`) is required; "
+                "The Isaac Sim runtime (Python 3.12 venv with `isaacsim`) is required; "
                 "install it via the NGC docker image or NVIDIA Omniverse Launcher. "
                 "Falling back to MuJoCo is recommended on boxes without it."
             ) from exc

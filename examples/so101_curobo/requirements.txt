@@ -18,5 +18,7 @@ numpy
 #   git clone https://github.com/NVlabs/curobo && cd curobo
 #   uv venv --python 3.11 && source .venv/bin/activate && uv pip install .[cu12-torch]
 #
-# Isaac Sim runtime (~30 GB; backend registration is issue #67 T1):
-#   Omniverse Launcher / Isaac Lab / docker nvcr.io/nvidia/isaac-sim:4.5.0
+# Isaac Sim runtime (~30 GB; backend registration is issue #67 T1).
+# Targets Isaac Sim 6.0 (Python 3.12) — the interpreter `strands-robots>=0.4.0`
+# requires; see #98 / #101 / PR #102:
+#   Omniverse Launcher / Isaac Lab / docker nvcr.io/nvidia/isaac-sim:6.0
