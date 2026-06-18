@@ -50,7 +50,7 @@ unless the `STRANDS_GPU_TEST` env var is set; the GPU runner wiring is
 tracked under the umbrella roadmap
 [#8](https://github.com/strands-labs/robots-sim/issues/8).
 
-Python 3.10+ required (mirroring Isaac Sim 4.5's bundled interpreter).
+Python 3.12 required (mirroring Isaac Sim 6.0's bundled interpreter).
 
 ## Conventions
 

@@ -203,7 +203,7 @@ python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 > **Status (landing):** Phase-2 data-plane slices (`add_camera`, render
 > frame-path, USD-load, URDF-load) are merged on `main`. End-to-end
 > validation of `run_isaac.py` + `run_isaac_agent.py` against an Isaac
-> Sim 4.5 install — including the `is_available()` namespace-shim, the
+> Sim 6.0 install — including the `is_available()` namespace-shim, the
 > port from `omni.isaac.*` to `isaacsim.*`, and the matrix wall-time @
 > success-rate number above — landed in
 > [PR #74](https://github.com/strands-labs/robots-sim/pull/74). On a

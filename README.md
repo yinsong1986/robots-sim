@@ -8,7 +8,7 @@
     <a href="https://github.com/strands-labs/robots-sim"><img alt="GitHub stars" src="https://img.shields.io/github/stars/strands-labs/robots-sim"/></a>
     <a href="https://github.com/strands-labs/robots-sim/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/strands-labs/robots-sim"/></a>
     <a href="https://strands-labs.github.io/robots-sim/"><img alt="Docs" src="https://img.shields.io/badge/docs-strands--labs.github.io%2Frobots--sim-blue"/></a>
-    <a href="https://developer.nvidia.com/isaac-sim"><img alt="Isaac Sim" src="https://img.shields.io/badge/Isaac%20Sim-4.x-76B900?logo=nvidia"/></a>
+    <a href="https://developer.nvidia.com/isaac-sim"><img alt="Isaac Sim" src="https://img.shields.io/badge/Isaac%20Sim-6.0-76B900?logo=nvidia"/></a>
   </div>
 
   <p>
@@ -100,16 +100,16 @@ ships that walker yet, so today you construct `IsaacSimulation` directly (see
 
 ## Installation
 
-System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+, Isaac Sim 4.x**.
+System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+, Isaac Sim 6.0 (Python 3.12)**.
 macOS / Apple Silicon contributors should install
 [`strands-robots`](https://github.com/strands-labs/robots) directly and
 skip this repo.
 
 ```bash
 # Step 1 — install Isaac Sim itself (NOT on PyPI):
-#   - Omniverse Launcher → Isaac Sim 4.x, OR
+#   - Omniverse Launcher → Isaac Sim 6.0, OR
 #   - Isaac Lab: git clone IsaacLab && ./isaaclab.sh -i, OR
-#   - NGC Docker: docker pull nvcr.io/nvidia/isaac-sim:4.5.0
+#   - NGC Docker: docker pull nvcr.io/nvidia/isaac-sim:6.0
 
 # Step 2 — install the Python plugin:
 pip install 'strands-robots-sim[isaac]'
@@ -273,7 +273,7 @@ mkdocs serve                 # live-reload at http://127.0.0.1:8000
 mkdocs build --strict        # CI's check
 ```
 
-Python 3.10+ required (mirroring Isaac Sim 4.5's bundled interpreter).
+Python 3.12 required (mirroring Isaac Sim 6.0's bundled interpreter).
 See [Contributing](https://strands-labs.github.io/robots-sim/contributing/) for the full guide.
 
 ## Security

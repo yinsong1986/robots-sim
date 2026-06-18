@@ -27,40 +27,40 @@ For introductory material, prefer:
 - **Isaac Lab integration**: GPU-accelerated RL environments
 
 !!! note "On the `omni.isaac.*` vs `isaacsim.*` namespaces"
-    Isaac Sim 4.5 ships every runtime extension under **two** namespaces:
-    the legacy `omni.isaac.*` tree (retained as Kit-extension deprecation
-    shims that resolve correctly post-bootstrap on the pinned
-    `nvcr.io/nvidia/isaac-sim:4.5.0` image) and the modern `isaacsim.*`
-    tree. This backend deliberately keeps the legacy `omni.isaac.*`
-    import paths for the core API (`omni.isaac.core.World`,
-    `omni.isaac.core.objects`, `omni.isaac.sensor.Camera`,
-    `omni.isaac.core.articulations.Articulation`, `omni.isaac.cloner`),
-    and uses the modern `isaacsim.*` path only where the legacy module
-    was removed in 4.5 — the `SimulationApp` entry point
-    (`isaacsim.SimulationApp`, with `omni.isaac.kit` as a fallback) and
-    the URDF importer (`isaacsim.asset.importer.urdf`). The
-    `omni.isaac.*` references on this page therefore match the shipping
-    code; see [PR #74](https://github.com/strands-labs/robots-sim/pull/74)
-    for the validation and the in-code policy note in `simulation.py`.
+    This backend targets **Isaac Sim 6.0 (Python 3.12)** and uses the
+    modern `isaacsim.*` namespace on the runtime path. Every Isaac import
+    tries the `isaacsim.*` location first and falls back to the legacy
+    `omni.isaac.*` path via `try: ... except ImportError:` so Isaac Sim
+    4.x installs aren't hard-broken during the transition. The mapping:
+    `isaacsim.core.api.World`, `isaacsim.core.api.objects`,
+    `isaacsim.sensors.camera.Camera`,
+    `isaacsim.core.api.articulations.Articulation` (with
+    `isaacsim.core.prims.SingleArticulation` as a secondary location),
+    `isaacsim.core.utils.{prims,stage,viewports}`, the `SimulationApp`
+    entry point (`isaacsim.SimulationApp`, with `omni.isaac.kit` as a
+    fallback), and the URDF importer (`isaacsim.asset.importer.urdf`).
+    `import omni.usd` stays under `omni.*` (not renamed on 6.0). See
+    [PR #74](https://github.com/strands-labs/robots-sim/pull/74) for the
+    original validation and the in-code policy note in `simulation.py`.
 
 > **Status.** The core simulation data-plane is wired and was validated
-> end-to-end on the pinned `nvcr.io/nvidia/isaac-sim:4.5.0` image in
-> [PR #74](https://github.com/strands-labs/robots-sim/pull/74) (full
+> end-to-end on the pinned `nvcr.io/nvidia/isaac-sim:6.0` image
+> (full
 > lifecycle: `is_available` → `create_world` → `add_robot(usd_path=...)`
 > → `add_camera` → `step`). **Working today**: `IsaacConfig`,
 > `IsaacSimulation.is_available()`, world / lifecycle (`create_world` /
 > `destroy` / `cleanup`); procedural builders via
 > `add_robot("so100" | "panda" | "unitree_g1")`; scene primitives via
 > `add_object` / `remove_object` (shape primitives through
-> `omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`);
-> cameras via `add_camera` / `remove_camera` (`omni.isaac.sensor.Camera`
+> `isaacsim.core.api.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`);
+> cameras via `add_camera` / `remove_camera` (`isaacsim.sensors.camera.Camera`
 > — prim + look-at + FOV wired); `render`'s RTX frame-extraction path
 > against an `add_camera` handle (real `get_rgba` / `get_depth` calls;
 > returns blank frames in `headless` mode, when no camera is configured,
 > or against a camera with no RTX handle attached); USD-loaded robots via
 > `add_robot(name, usd_path=...)` and URDF-loaded robots via
 > `add_robot(name, urdf_path=...)` (both construct the underlying
-> `omni.isaac.core.articulations.Articulation` — joints + `send_action` /
+> `isaacsim.core.api.articulations.Articulation` — joints + `send_action` /
 > `get_observation` work end-to-end; URDF→USD conversion runs through the
 > direct `isaacsim.asset.importer.urdf` interface); and the
 > `isaac.loaders.load_urdf` / `load_mjcf` / `load_usd` functions for
@@ -84,7 +84,7 @@ Isaac Sim is **not installable from PyPI**. It is an NVIDIA Omniverse Kit applic
 ### Option 1: NVIDIA Omniverse Launcher (recommended)
 
 1. Download [NVIDIA Omniverse Launcher](https://developer.nvidia.com/omniverse)
-2. Install **Isaac Sim 4.5** (or newer) from the Exchange tab
+2. Install **Isaac Sim 6.0** (or newer) from the Exchange tab
 3. Install Python dependencies:
 
 ```bash
@@ -103,8 +103,8 @@ pip install 'strands-robots-sim[isaac]'
 ### Option 3: Docker
 
 ```bash
-docker pull nvcr.io/nvidia/isaac-sim:4.5.0
-docker run --gpus all -it nvcr.io/nvidia/isaac-sim:4.5.0
+docker pull nvcr.io/nvidia/isaac-sim:6.0
+docker run --gpus all -it nvcr.io/nvidia/isaac-sim:6.0
 # Inside container:
 pip install 'strands-robots-sim[isaac]'
 ```
@@ -113,9 +113,9 @@ pip install 'strands-robots-sim[isaac]'
 
 - NVIDIA GPU (RTX 2070+ or A100/H100 for fleet training)
 - CUDA 12.0+
-- Isaac Sim 4.5 or newer (the repo pins/tests `nvcr.io/nvidia/isaac-sim:4.5.0`)
+- Isaac Sim 6.0 or newer (the repo pins/tests `nvcr.io/nvidia/isaac-sim:6.0`)
 - Linux (Ubuntu 22.04+ recommended)
-- Python 3.10+
+- Python 3.12
 
 ## Quick Start
 

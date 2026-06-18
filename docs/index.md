@@ -109,7 +109,7 @@ See [Architecture](architecture.md) for the full plugin contract.
 
 ## Install
 
-System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+, Isaac Sim 4.x**.
+System requirements: **NVIDIA RTX GPU, Ubuntu 22.04+, CUDA 12+, Isaac Sim 6.0 (Python 3.12)**.
 macOS / Apple Silicon contributors should install
 [`strands-robots`](https://github.com/strands-labs/robots) directly and skip
 this repo.

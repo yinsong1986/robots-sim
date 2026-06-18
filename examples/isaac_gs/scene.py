@@ -105,8 +105,19 @@ def _default_franka_usd(sim: "object") -> str:
 
     Reachable over HTTPS from the Omniverse CDN (no local Nucleus
     required). Same default as ``examples/libero/run_isaac.py``.
+
+    Tries the modern ``isaacsim.storage.native`` namespace first (Isaac
+    Sim 6.0 supported path) and falls back to the legacy
+    ``omni.isaac.nucleus`` shim.
     """
-    from omni.isaac.nucleus import get_assets_root_path  # type: ignore[import-not-found]
+    try:
+        from isaacsim.storage.native import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
+    except ImportError:
+        from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+            get_assets_root_path,
+        )
 
     root = get_assets_root_path()
     if not root:

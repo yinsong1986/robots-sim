@@ -11,7 +11,7 @@ name = "strands-robots-sim"
 dynamic = ["version"]
 description = "GPU-accelerated NVIDIA simulation backend (Isaac Sim) for strands-robots — registered as entry-point plugins."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "AWS", email = "opensource@amazon.com"},
@@ -23,8 +23,6 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -49,16 +47,22 @@ dependencies = [
 # Users install it separately via NVIDIA Omniverse Launcher, Isaac Lab,
 # or the nvcr.io/nvidia/isaac-sim docker image. The pins below are the
 # pip-installable companion deps an Isaac Sim runtime expects to find,
-# and they must match the supported Isaac Sim **4.5.x** image / launcher
+# and they must match the supported Isaac Sim **6.0** image / launcher
 # build documented in README.md, docs/, and
 # strands_robots_sim/isaac/_install.py (ISAAC_SIM_DOCKER_IMAGE =
-# nvcr.io/nvidia/isaac-sim:4.5.0). Keep this major.minor in lockstep with
-# those surfaces — see issue #90.
+# nvcr.io/nvidia/isaac-sim:6.0). Keep this major.minor in lockstep with
+# those surfaces — see issues #90 / #98.
 #
-#   * `isaacsim==4.5.*` — the PyPI shim that exposes Kit's Python API on
-#     hosts where Isaac Sim 4.5.x is installed alongside.
-#   * `isaaclab>=2.0,<3.0` — Isaac Lab's task / ROS / RL utilities; the
-#     2.x line is the release paired with Isaac Sim 4.5.
+# Why 6.0 specifically (not 5.0/5.1)? `strands-robots>=0.4.0` requires
+# Python >=3.12. Per PyPI `Requires-Python`, only `isaacsim==6.0.*`
+# targets `==3.12.*`; the 5.x line is `==3.11.*` and would conflict.
+# Isaac Sim 6.0 is therefore the only release whose interpreter
+# satisfies `strands-robots>=0.4.0` (#98).
+#
+#   * `isaacsim>=6.0` — the PyPI shim that exposes Kit's Python API on
+#     hosts where Isaac Sim 6.0 is installed alongside.
+#   * `isaaclab>=3.0,<4.0` — Isaac Lab's task / ROS / RL utilities; the
+#     3.x line is the release paired with Isaac Sim 6.0.
 #   * `usd-core` — pure-Python USD runtime; used by the procedural scene
 #     builders even when Kit isn't booted.
 #
@@ -66,8 +70,8 @@ dependencies = [
 # wheel resolution step with NVIDIA's standard "Isaac Sim not detected"
 # message; that's the helpful failure mode the issue's DoD calls for.
 isaac = [
-    "isaacsim==4.5.*",
-    "isaaclab>=2.0,<3.0",
+    "isaacsim>=6.0",
+    "isaaclab>=3.0,<4.0",
     "usd-core",
 ]
 # GPU boxes only — the heavy backend in one shot.
@@ -154,7 +158,7 @@ format = [
 
 [tool.black]
 line-length = 120
-target-version = ['py310']
+target-version = ['py312']
 include = '\.pyi?$'
 
 [tool.isort]

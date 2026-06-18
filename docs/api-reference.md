@@ -235,7 +235,7 @@ runs at every builder's construction, fail-first.
 
 ```python
 from strands_robots_sim.isaac._install import (
-    DOCKER_IMAGE_TAG,                       # "nvcr.io/nvidia/isaac-sim:4.5.0"
+    DOCKER_IMAGE_TAG,                       # "nvcr.io/nvidia/isaac-sim:6.0"
     OMNIVERSE_LAUNCHER_HINT,
     ISAAC_LAB_BOOTSTRAP_HINT,
     INSTALL_HELP,                           # full multiline help string
