@@ -109,14 +109,28 @@ image (``nvcr.io/nvidia/isaac-sim:4.5.0``); the dual-path
 working on both. The
 script runs past ``IsaacSimulation.is_available`` → ``create_world``
 → ``add_robot`` (real Franka USD over the Omniverse CDN) →
-``add_camera`` → physics ``step``. ``--policy=mock --n-episodes=5``
-exercises the full lifecycle except for ``evaluate_benchmark``, which
-additionally depends on the LIBERO benchmark suite being importable
-inside Isaac's bundled Python (``strands-robots`` interpreter
-constraint -- see `#71 <https://github.com/strands-labs/robots-sim/issues/71>`_).
+``add_camera`` → physics ``step``.
 On a non-Isaac host (no GPU, no Omniverse) ``is_available()`` still
 short-circuits cleanly with the install-hint reason string, so this
 file remains safe to import / lint on CPU-only CI runners.
+
+LIBERO benchmark on Isaac is NOT yet runnable end-to-end
+--------------------------------------------------------
+``evaluate_benchmark`` cannot complete on the Isaac backend yet:
+``LiberoAdapter.on_episode_start`` calls ``sim.load_scene(...)`` to
+realize each task's scene, and ``IsaacSimulation.load_scene`` is not
+implemented (realizing a LIBERO/BDDL scene as USD prims on the Isaac
+stage is the substantive remaining work for LIBERO-on-Isaac -- tracked
+in `#116 <https://github.com/strands-labs/robots-sim/issues/116>`_).
+Until that lands, ``--policy=mock`` / ``--policy=groot`` runs of this
+driver **abort at episode 0 and exit non-zero** with a clear message;
+the ``__main__`` guard below forces ``os._exit(1)`` so Isaac's
+SimulationApp fast-shutdown can't swallow the failure into exit 0
+(``#116`` secondary). Use ``examples/libero/run_mujoco.py`` for an
+end-to-end LIBERO benchmark today, or drive the Isaac backend directly
+via the manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
+``add_camera`` -> ``step`` -> ``render`` quickstart in ``docs/index.md``
+(which works end-to-end on Isaac Sim 6.0).
 """
 
 from __future__ import annotations
@@ -646,4 +660,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Force a non-zero exit on failure even when Isaac Sim's SimulationApp
+    # fast-shutdown has registered an atexit/_exit hook that would
+    # otherwise swallow the interpreter's normal non-zero status into a
+    # misleading exit 0 (#116 secondary). ``os._exit(1)`` bypasses atexit
+    # handlers (including SimulationApp's), so a failed eval -- e.g. the
+    # current ``IsaacSimulation.load_scene`` fail-fast that aborts the
+    # LIBERO benchmark at episode 0 -- is visible to the exit status / CI.
+    import sys
+    import traceback
+
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: BLE001 - top-level: log + force non-zero exit
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)

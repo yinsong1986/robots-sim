@@ -1476,6 +1476,64 @@ class IsaacSimulation(SimEngine):
         # raise loudly if a future caller bypasses that guard.
         raise ValueError(f"Unknown shape: {shape!r}")
 
+    # --- SimEngine: Scene loading -------------------------------------------
+
+    def load_scene(self, scene_path: str) -> dict[str, Any]:
+        """Load a complete scene from file -- NOT yet supported on Isaac.
+
+        The ``SimEngine`` contract lets each backend realize a complete
+        scene (objects, poses, fixtures) from a file. The MuJoCo backend
+        overrides this to parse a LIBERO/BDDL-generated MJCF and recompile
+        the live spec; ``LiberoAdapter.on_episode_start`` relies on it to
+        instantiate every task's scene.
+
+        Isaac realizes scenes as USD prims on the stage, which requires a
+        BDDL/MJCF -> USD translation layer that does not exist yet. Until
+        that lands (the substantive remaining work for LIBERO-on-Isaac --
+        see `#116 <https://github.com/strands-labs/robots-sim/issues/116>`_),
+        this method **fails fast** with a clear, structured error rather
+        than silently no-op'ing or rendering an empty scene.
+
+        Why a structured error envelope (not ``raise``): every other Isaac
+        backend entry point returns ``{"status": "error", "content": [...]}``
+        on a recoverable failure, and ``LiberoAdapter.on_episode_start``
+        already converts an error envelope from ``load_scene`` into a
+        descriptive ``RuntimeError`` -- so the LIBERO driver surfaces this
+        message verbatim instead of an opaque ``NotImplementedError`` from
+        the base ``SimEngine`` stub.
+
+        Parameters
+        ----------
+        scene_path : str
+            Path to the scene file the caller wanted to load. Echoed back
+            in the error text so the abort is traceable to a specific
+            task scene.
+
+        Returns
+        -------
+        dict
+            ``{"status": "error", "content": [...]}`` envelope explaining
+            that Isaac scene loading is not yet implemented and pointing at
+            the supported alternatives (the MuJoCo LIBERO driver, or the
+            manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
+            ``add_camera`` quickstart which works end-to-end on Isaac).
+        """
+        msg = (
+            "LIBERO scene loading not yet supported on the Isaac backend "
+            "(IsaacSimulation.load_scene is unimplemented). Realizing a "
+            "LIBERO/BDDL task scene as USD prims on the Isaac stage is the "
+            "substantive remaining work for LIBERO-on-Isaac -- tracked in "
+            "strands-labs/robots-sim#116. "
+            f"(requested scene_path={scene_path!r}). "
+            "Workarounds: run the LIBERO benchmark on the MuJoCo backend "
+            "(examples/libero/run_mujoco.py), or use the Isaac backend "
+            "directly via the manual create_world -> add_robot -> add_object "
+            "-> add_camera -> step -> render quickstart (docs/index.md), "
+            "which works end-to-end on Isaac Sim 6.0."
+        )
+        logger.error("IsaacSimulation.load_scene: %s", msg)
+        return {"status": "error", "content": [{"text": msg}]}
+
     # --- SimEngine: Introspection / Removal ---------------------------------
 
     def list_robots(self) -> list[str]:
