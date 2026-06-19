@@ -147,6 +147,52 @@ def _suite_for_task(task: str) -> str:
     return f"libero_{parts[1]}"
 
 
+def _default_checkpoint_dir() -> str:
+    """Default ``--checkpoint-dir`` that clears ``gr00t_inference``'s mount guard.
+
+    ``gr00t_inference`` (strands-robots >= 0.4.0) downloads to
+    ``~/.strands_robots/checkpoints/`` by default, but its ``start_container``
+    step refuses to bind-mount any path under ``/home`` (a "protected host
+    path" guard), so the OOTB ``--policy groot`` lifecycle aborts
+    (strands-labs/robots-sim#125). Default to a non-``/home`` cache: honor an
+    explicit ``STRANDS_ROBOTS_CHECKPOINT_DIR`` override, then fall back to
+    ``$XDG_CACHE_HOME`` only when it lives outside ``/home``, else
+    ``/tmp/strands_robots/checkpoints``.
+    """
+    override = os.environ.get("STRANDS_ROBOTS_CHECKPOINT_DIR")
+    if override:
+        return override
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg and not os.path.realpath(xdg).startswith("/home"):
+        return os.path.join(xdg, "strands_robots", "checkpoints")
+    return "/tmp/strands_robots/checkpoints"
+
+
+def _explain_lifecycle_failure(result: dict, checkpoint_dir: str, container: str) -> str:
+    """Turn a ``gr00t_inference`` lifecycle failure into an actionable message.
+
+    Surfaces the two most common OOTB blockers with a concrete next step:
+    the ``/home`` "protected host path" mount guard
+    (strands-labs/robots-sim#125), and a stale ``gr00t-libero-*`` container
+    that ``start_container`` won't recreate without ``force=True``.
+    """
+    blob = repr(result)
+    hint = ""
+    if "protected host path" in blob:
+        hint = (
+            "\n\nHINT: the checkpoint dir is under a path `gr00t_inference` refuses to "
+            "bind-mount (the `/home` mount guard). Pass `--checkpoint-dir` (or set "
+            f"$STRANDS_ROBOTS_CHECKPOINT_DIR) to a non-`/home` path; current value: {checkpoint_dir!r}."
+        )
+    elif "already in use" in blob or "Conflict" in blob or "is already" in blob:
+        hint = (
+            f"\n\nHINT: a stale container named {container!r} is blocking `start_container` "
+            f"(it won't recreate an existing one without force=True). Remove it with "
+            f"`docker rm -f {container}` and retry."
+        )
+    return f"gr00t_inference lifecycle=full failed: {result}{hint}"
+
+
 def _configure_gr00t_image(image: str) -> None:
     """Point ``gr00t_inference`` at *image* via operator env config.
 
@@ -188,6 +234,13 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
 
     _configure_gr00t_image(args.image)
 
+    # Default the checkpoint cache to a non-`/home` path so the downloaded
+    # checkpoint clears `gr00t_inference`'s `start_container` mount guard
+    # (strands-labs/robots-sim#125). Explicit `--checkpoint-dir` wins.
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = _default_checkpoint_dir()
+    print(f"[setup] checkpoint dir: {args.checkpoint_dir}")
+
     hf_token_path = Path("~/.cache/huggingface/token").expanduser()
     if not hf_token_path.is_file():
         raise RuntimeError(
@@ -209,7 +262,7 @@ def _bring_up_gr00t_server(args: argparse.Namespace, suite: str) -> dict | None:
         port=args.port,
     )
     if result.get("status") != "success":
-        raise RuntimeError(f"gr00t_inference lifecycle=full failed: {result}")
+        raise RuntimeError(_explain_lifecycle_failure(result, args.checkpoint_dir, args.container))
     print(f"[setup] {result.get('message')}")
 
     # Same readiness wait as run_mujoco.py — the lifecycle tool returns
@@ -290,7 +343,11 @@ def main() -> None:
         "--checkpoint-dir",
         default=None,
         help="(--auto-server only) Where to cache the HF checkpoint. "
-        "Default: `~/.cache/strands_robots/checkpoints/`.",
+        "Default: a non-`/home` path (`$STRANDS_ROBOTS_CHECKPOINT_DIR`, an "
+        "outside-`/home` `$XDG_CACHE_HOME/strands_robots/checkpoints`, or "
+        "`/tmp/strands_robots/checkpoints`). This avoids `gr00t_inference`'s "
+        "`start_container` mount guard, which refuses to bind-mount any path "
+        "under `/home` (see strands-labs/robots-sim#125).",
     )
     args = p.parse_args()
 
