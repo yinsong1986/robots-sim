@@ -114,23 +114,26 @@ On a non-Isaac host (no GPU, no Omniverse) ``is_available()`` still
 short-circuits cleanly with the install-hint reason string, so this
 file remains safe to import / lint on CPU-only CI runners.
 
-LIBERO benchmark on Isaac is NOT yet runnable end-to-end
---------------------------------------------------------
-``evaluate_benchmark`` cannot complete on the Isaac backend yet:
+LIBERO benchmark on Isaac (scene loading implemented)
+-----------------------------------------------------
+``evaluate_benchmark`` runs on the Isaac backend:
 ``LiberoAdapter.on_episode_start`` calls ``sim.load_scene(...)`` to
-realize each task's scene, and ``IsaacSimulation.load_scene`` is not
-implemented (realizing a LIBERO/BDDL scene as USD prims on the Isaac
-stage is the substantive remaining work for LIBERO-on-Isaac -- tracked
-in `#116 <https://github.com/strands-labs/robots-sim/issues/116>`_).
-Until that lands, ``--policy=mock`` / ``--policy=groot`` runs of this
-driver **abort at episode 0 and exit non-zero** with a clear message;
-the ``__main__`` guard below forces ``os._exit(1)`` so Isaac's
-SimulationApp fast-shutdown can't swallow the failure into exit 0
-(``#116`` secondary). Use ``examples/libero/run_mujoco.py`` for an
-end-to-end LIBERO benchmark today, or drive the Isaac backend directly
-via the manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
-``add_camera`` -> ``step`` -> ``render`` quickstart in ``docs/index.md``
-(which works end-to-end on Isaac Sim 6.0).
+realize each task's scene, and ``IsaacSimulation.load_scene`` now
+translates the LIBERO/BDDL-compiled MJCF into USD prims on the Isaac
+stage (the substantive LIBERO-on-Isaac work -- implemented in
+`#129 <https://github.com/strands-labs/robots-sim/issues/129>`_, which
+superseded the fail-fast stub PR #117 shipped for the closed #116).
+``--policy=mock`` / ``--policy=groot`` runs of this driver complete
+end-to-end and the #112 recorder writes a real rollout MP4 (at MuJoCo
+parity). The ``__main__`` guard below still forces ``os._exit(1)`` on a
+genuine failure so Isaac's SimulationApp fast-shutdown can't swallow a
+non-zero exit into 0. A *meaningful* (non-zero) ``success_rate`` also
+needs the articulation-control fix (#123); scene loading is the
+prerequisite this driver depended on. ``examples/libero/run_mujoco.py``
+remains the CPU-friendly reference path, and the Isaac backend can also
+be driven directly via the manual ``create_world`` -> ``add_robot`` ->
+``add_object`` -> ``add_camera`` -> ``step`` -> ``render`` quickstart in
+``docs/index.md``.
 """
 
 from __future__ import annotations
@@ -752,10 +755,9 @@ if __name__ == "__main__":
     # Force a non-zero exit on failure even when Isaac Sim's SimulationApp
     # fast-shutdown has registered an atexit/_exit hook that would
     # otherwise swallow the interpreter's normal non-zero status into a
-    # misleading exit 0 (#116 secondary). ``os._exit(1)`` bypasses atexit
-    # handlers (including SimulationApp's), so a failed eval -- e.g. the
-    # current ``IsaacSimulation.load_scene`` fail-fast that aborts the
-    # LIBERO benchmark at episode 0 -- is visible to the exit status / CI.
+    # misleading exit 0. ``os._exit(1)`` bypasses atexit handlers
+    # (including SimulationApp's), so a failed eval is visible to the exit
+    # status / CI (scene loading itself is now implemented, #129).
     import sys
     import traceback
 

@@ -482,6 +482,11 @@ class IsaacSimulation(SimEngine):
         self._cameras: dict[str, _CameraState] = {}
         self._objects: dict[str, _ObjectState] = {}
         self._prim_registry: list[str] = []  # track all created prims for cleanup
+        # Names of objects realized by load_scene (LIBERO/BDDL scene). Kept
+        # separate from _objects so a per-episode load_scene can clear only
+        # the prior scene's prims (idempotent reload) without disturbing
+        # objects added manually via add_object.
+        self._scene_objects: set[str] = set()
         # Per-camera output size (RTX cameras render at >= _MIN_RENDER_PX
         # wide so DLSS doesn't ghost a moving arm; captured frames are
         # downscaled to the size the caller asked for before return).
@@ -1479,60 +1484,127 @@ class IsaacSimulation(SimEngine):
     # --- SimEngine: Scene loading -------------------------------------------
 
     def load_scene(self, scene_path: str) -> dict[str, Any]:
-        """Load a complete scene from file -- NOT yet supported on Isaac.
+        """Realize a LIBERO/BDDL task scene as USD prims on the Isaac stage.
 
         The ``SimEngine`` contract lets each backend realize a complete
         scene (objects, poses, fixtures) from a file. The MuJoCo backend
-        overrides this to parse a LIBERO/BDDL-generated MJCF and recompile
-        the live spec; ``LiberoAdapter.on_episode_start`` relies on it to
-        instantiate every task's scene.
+        parses a LIBERO/BDDL-generated MJCF and recompiles the live spec;
+        ``LiberoAdapter.on_episode_start`` relies on this to instantiate
+        each task's scene. This Isaac override translates the same
+        robosuite-compiled MJCF into Isaac stage prims so the LIBERO eval
+        runs end-to-end on the Isaac backend (closes the substantive
+        LIBERO-on-Isaac gap that PR #117 deferred with a fail-fast stub --
+        see `#129 <https://github.com/strands-labs/robots-sim/issues/129>`_).
 
-        Isaac realizes scenes as USD prims on the stage, which requires a
-        BDDL/MJCF -> USD translation layer that does not exist yet. Until
-        that lands (the substantive remaining work for LIBERO-on-Isaac --
-        see `#116 <https://github.com/strands-labs/robots-sim/issues/116>`_),
-        this method **fails fast** with a clear, structured error rather
-        than silently no-op'ing or rendering an empty scene.
+        Translation layer (BDDL/MJCF -> USD):
+            * The ``scene_path`` is a robosuite-compiled LIBERO MJCF XML
+              (e.g. ``~/.strands_robots/scene_cache/libero/<sha>.xml``).
+            * :func:`load_mjcf_scene_objects` walks the ``<worldbody>``,
+              skips the floor (the ground plane is created by
+              :meth:`create_world`) and the Panda robot (the adapter loads
+              it separately via :meth:`add_robot`), and returns one
+              :class:`SceneObject` per task object / fixture.
+            * LIBERO object meshes aren't portable to the Isaac stage, so
+              each object is approximated by a box primitive sized to the
+              axis-aligned bounding box of its collision geoms and placed
+              at its MJCF body pose. That's faithful enough for
+              rollout-video parity with the MuJoCo driver.
+            * Each object is realized via :meth:`add_object` (static
+              fixtures -> ``Fixed*``; movable objects -> ``Dynamic*``).
 
-        Why a structured error envelope (not ``raise``): every other Isaac
-        backend entry point returns ``{"status": "error", "content": [...]}``
-        on a recoverable failure, and ``LiberoAdapter.on_episode_start``
-        already converts an error envelope from ``load_scene`` into a
-        descriptive ``RuntimeError`` -- so the LIBERO driver surfaces this
-        message verbatim instead of an opaque ``NotImplementedError`` from
-        the base ``SimEngine`` stub.
+        Idempotency: a fresh ``load_scene`` first removes any objects left
+        over from a prior episode's scene (tracked in ``_scene_objects``)
+        so per-episode reloads don't accumulate duplicate prims or hit the
+        "object already exists" guard in :meth:`add_object`.
 
         Parameters
         ----------
         scene_path : str
-            Path to the scene file the caller wanted to load. Echoed back
-            in the error text so the abort is traceable to a specific
-            task scene.
+            Path to the compiled LIBERO MJCF scene file.
 
         Returns
         -------
         dict
-            ``{"status": "error", "content": [...]}`` envelope explaining
-            that Isaac scene loading is not yet implemented and pointing at
-            the supported alternatives (the MuJoCo LIBERO driver, or the
-            manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
-            ``add_camera`` quickstart which works end-to-end on Isaac).
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. On success ``json`` carries the realized object
+            count and names so ``LiberoAdapter.on_episode_start`` proceeds.
+            On a recoverable failure (no world, missing/malformed file)
+            returns ``{"status": "error", ...}``; the adapter converts that
+            into a descriptive ``RuntimeError``.
         """
-        msg = (
-            "LIBERO scene loading not yet supported on the Isaac backend "
-            "(IsaacSimulation.load_scene is unimplemented). Realizing a "
-            "LIBERO/BDDL task scene as USD prims on the Isaac stage is the "
-            "substantive remaining work for LIBERO-on-Isaac -- tracked in "
-            "strands-labs/robots-sim#116. "
-            f"(requested scene_path={scene_path!r}). "
-            "Workarounds: run the LIBERO benchmark on the MuJoCo backend "
-            "(examples/libero/run_mujoco.py), or use the Isaac backend "
-            "directly via the manual create_world -> add_robot -> add_object "
-            "-> add_camera -> step -> render quickstart (docs/index.md), "
-            "which works end-to-end on Isaac Sim 6.0."
-        )
-        logger.error("IsaacSimulation.load_scene: %s", msg)
-        return {"status": "error", "content": [{"text": msg}]}
+        from strands_robots_sim.isaac.loaders import load_mjcf_scene_objects
+
+        with self._lock:
+            if not self._world_created:
+                msg = "Cannot load scene: no world created. Call create_world() " f"before load_scene({scene_path!r})."
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            if not scene_path or not os.path.exists(scene_path):
+                msg = f"Scene file not found: {scene_path!r}"
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            # Parse the MJCF -> a backend-agnostic list of SceneObjects.
+            try:
+                scene_objects = load_mjcf_scene_objects(scene_path)
+            except (FileNotFoundError, ValueError) as e:
+                msg = f"Failed to parse LIBERO scene {scene_path!r}: {e}"
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            # Clear any objects realized by a prior load_scene so per-episode
+            # reloads are idempotent (no duplicate prims / no "already exists").
+            for prior_name in list(self._scene_objects):
+                if prior_name in self._objects:
+                    self.remove_object(prior_name)
+                self._scene_objects.discard(prior_name)
+
+            realized: list[str] = []
+            skipped: list[dict[str, Any]] = []
+            for obj in scene_objects:
+                # ``add_object`` rejects duplicate names; if a manually-added
+                # object shadows a scene object, skip it rather than abort.
+                if obj.name in self._objects:
+                    skipped.append({"name": obj.name, "reason": "name already in use"})
+                    continue
+                result = self.add_object(
+                    name=obj.name,
+                    shape="box",
+                    position=list(obj.position),
+                    orientation=list(obj.quat),
+                    size=list(obj.size),
+                    mass=0.1,
+                    is_static=obj.is_static,
+                )
+                if result.get("status") == "success":
+                    realized.append(obj.name)
+                    self._scene_objects.add(obj.name)
+                else:
+                    text = (result.get("content") or [{}])[0].get("text", "")
+                    skipped.append({"name": obj.name, "reason": text})
+
+            summary = (
+                f"Loaded LIBERO scene from {os.path.basename(scene_path)}: "
+                f"realized {len(realized)} object(s) as Isaac stage prims"
+            )
+            if skipped:
+                summary += f" ({len(skipped)} skipped)"
+            logger.info("IsaacSimulation.load_scene: %s", summary)
+            return {
+                "status": "success",
+                "content": [
+                    {
+                        "text": summary,
+                        "json": {
+                            "scene_path": scene_path,
+                            "realized": realized,
+                            "skipped": skipped,
+                            "object_count": len(realized),
+                        },
+                    }
+                ],
+            }
 
     # --- SimEngine: Introspection / Removal ---------------------------------
 
