@@ -80,15 +80,54 @@ Use the same Python environment that Isaac Sim's `python.sh` /
 pip install 'strands-robots-sim[isaac]'
 ```
 
-The `[isaac]` extra pulls in the pip-installable companion deps that match
-the documented Isaac Sim **6.0** image: `isaacsim>=6.0` (the PyPI shim
-exposing Kit's Python API), `isaaclab>=3.0,<4.0` (Isaac Lab's task / RL
-utilities, the 3.x line paired with Isaac Sim 6.0), and `usd-core` (USD
-scene authoring). `strands-robots` is pulled in transitively, which gives
-you the upstream `Simulation` AgentTool, `create_simulation()` factory,
-and policy providers.
+!!! info "The `[isaac]` extra does **not** install Isaac Sim"
 
-## Step 3 — verify the install
+    Isaac Sim itself is not on PyPI — it comes from the out-of-band install
+    you did in Step 1 (Launcher / Isaac Lab / NGC Docker), which ships a
+    complete, bootable Kit. The `[isaac]` extra therefore pulls in only the
+    genuinely pip-installable companion dep — `usd-core` (the pure-Python
+    USD runtime used by the procedural scene builders and loaders) — plus
+    `strands-robots` transitively (the upstream `Simulation` AgentTool,
+    `create_simulation()` factory, and policy providers).
+
+    Do **not** try to `pip install isaacsim` into the environment yourself
+    as a substitute for Step 1: NVIDIA's `isaacsim[all]` metapackage pulls
+    the `isaacsim-*` packages but **not** the `isaacsim-extscache-*`
+    packages, so `SimulationApp` aborts at boot with an `omni.ext`
+    "Failed to resolve extension dependencies" error and `create_world()`
+    never starts. The Launcher / Isaac Lab / Docker images bundle the
+    complete extension set; use one of those.
+
+## Step 3 — verify your install boots
+
+After Steps 1 and 2, confirm `SimulationApp` actually boots end-to-end —
+not just that the package imports. Run this with Isaac Sim's bundled Python
+(`python.sh` / `setup_python_env.sh`-activated venv):
+
+```python
+from strands_robots_sim.isaac import IsaacSimulation, IsaacConfig
+
+sim = IsaacSimulation(IsaacConfig(render_mode="rtx_realtime", headless=True))
+sim.create_world()                 # boots SimulationApp; resolves all extensions
+sim.add_robot("so100")
+sim.add_object(name="cube", shape="cuboid", position=[0.4, 0.0, 0.05])
+sim.add_camera(name="front", position=[1.2, 0.0, 0.6], target=[0.0, 0.0, 0.1])
+sim.step(120)
+frame = sim.render(camera_name="front")   # RTX RGBA + depth dict
+print("rgb:", frame["rgb"].shape)          # e.g. (480, 640, 3)
+sim.destroy()
+```
+
+If `create_world()` raises an `omni.ext` "Failed to resolve extension
+dependencies" error, your Isaac Sim install is incomplete (typically a
+bare `pip install isaacsim` without the `isaacsim-extscache-*` packages).
+Use a Launcher / Isaac Lab / NGC Docker install instead — see Step 1. The
+[Troubleshooting](../troubleshooting.md) page covers this and other
+common boot failures.
+
+## Step 4 — verify the package wiring
+
+If you'd rather check availability without booting a full `SimulationApp`:
 
 ```python
 import strands_robots_sim                      # registers entry points
