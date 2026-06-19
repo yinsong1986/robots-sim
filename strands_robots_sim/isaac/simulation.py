@@ -1825,15 +1825,26 @@ class IsaacSimulation(SimEngine):
             else:
                 action_array = np.array(action, dtype=np.float32)
 
-            # Apply to articulation
+            # Apply to articulation. Isaac Sim 6.0's articulation
+            # (``isaacsim.core.prims.SingleArticulation``) drives PD position
+            # targets via ``apply_action(ArticulationAction(joint_positions=...))``
+            # -- the pre-6.0 ``set_joint_position_targets`` method does not exist
+            # on the 6.0 class (the #101 ``omni.isaac.* -> isaacsim.*`` migration
+            # renamed imports but missed this articulation method). See
+            # ``set_joint_positions`` below for the teleport (non-PD) counterpart.
             if robot.articulation is not None:
                 try:
-                    robot.articulation.set_joint_position_targets(action_array)
-                except (RuntimeError, ValueError, AttributeError) as e:
-                    # set_joint_position_targets raises RuntimeError on a
-                    # torn-down articulation, ValueError on shape mismatch,
-                    # AttributeError on omni surface drift. Programming bugs
-                    # (NameError, KeyError) propagate.
+                    from isaacsim.core.utils.types import (  # type: ignore[import-not-found]
+                        ArticulationAction,
+                    )
+
+                    robot.articulation.apply_action(ArticulationAction(joint_positions=action_array))
+                except (RuntimeError, ValueError, AttributeError, ImportError) as e:
+                    # apply_action raises RuntimeError on a torn-down
+                    # articulation, ValueError on shape mismatch, AttributeError
+                    # on omni surface drift, ImportError if the isaacsim runtime
+                    # isn't importable. Programming bugs (NameError, KeyError)
+                    # propagate.
                     logger.debug("Failed to set joint targets: %s", e)
                     return {
                         "status": "error",

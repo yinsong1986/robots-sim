@@ -2533,6 +2533,23 @@ class TestSendActionReturnContract:
     action failure. These tests pin the envelope on each path.
     """
 
+    @staticmethod
+    def _stub_articulation_action():
+        """Patch the lazy ``isaacsim.core.utils.types`` import used by
+        ``send_action``.
+
+        On Isaac Sim 6.0 ``send_action`` drives PD position targets via
+        ``apply_action(ArticulationAction(joint_positions=...))`` (the pre-6.0
+        ``set_joint_position_targets`` method does not exist on the 6.0
+        ``SingleArticulation``). The isaacsim runtime isn't importable on the
+        CI box, so stub the module the same way the ``add_object`` tests stub
+        ``isaacsim.core.api.objects``. ``ArticulationAction`` is a passthrough
+        recording its kwargs so callers can assert on ``joint_positions``.
+        """
+        types_mod = MagicMock()
+        types_mod.ArticulationAction.side_effect = lambda **kw: ("ArticulationAction", kw)
+        return patch.dict("sys.modules", {"isaacsim.core.utils.types": types_mod})
+
     def _make_sim_with_robot(self, joint_names=("j0", "j1", "j2")):
         from strands_robots_sim.isaac.simulation import IsaacSimulation, _RobotState
 
@@ -2579,25 +2596,32 @@ class TestSendActionReturnContract:
 
     def test_success_returns_success_envelope(self):
         sim, art = self._make_sim_with_robot()
-        result = sim.send_action({"j0": 0.1, "j1": 0.2, "j2": 0.3}, n_substeps=2)
+        with self._stub_articulation_action():
+            result = sim.send_action({"j0": 0.1, "j1": 0.2, "j2": 0.3}, n_substeps=2)
         assert result["status"] == "success"
         assert "arm" in result["content"][0]["text"]
         assert "2 substeps" in result["content"][0]["text"]
-        art.set_joint_position_targets.assert_called_once()
+        # Isaac Sim 6.0 path: apply_action(ArticulationAction(joint_positions=...))
+        art.apply_action.assert_called_once()
+        (action_obj,) = art.apply_action.call_args.args
+        assert action_obj[0] == "ArticulationAction"
+        np.testing.assert_allclose(action_obj[1]["joint_positions"], [0.1, 0.2, 0.3])
         assert sim._world.step.call_count == 2
 
     def test_array_action_returns_success_envelope(self):
         sim, art = self._make_sim_with_robot()
-        result = sim.send_action(np.array([0.1, 0.2, 0.3], dtype=np.float32))
+        with self._stub_articulation_action():
+            result = sim.send_action(np.array([0.1, 0.2, 0.3], dtype=np.float32))
         assert result["status"] == "success"
-        art.set_joint_position_targets.assert_called_once()
+        art.apply_action.assert_called_once()
 
     def test_unresolved_keys_return_error_with_json_block(self):
         sim, art = self._make_sim_with_robot()
-        result = sim.send_action({"j0": 0.1, "bogus": 9.9})
+        with self._stub_articulation_action():
+            result = sim.send_action({"j0": 0.1, "bogus": 9.9})
         assert result["status"] == "error"
         # Resolvable keys are still applied (physics advanced)...
-        art.set_joint_position_targets.assert_called_once()
+        art.apply_action.assert_called_once()
         # ...but the unresolved key surfaces in a json block for self-correction.
         json_block = next(c["json"] for c in result["content"] if "json" in c)
         assert json_block["unresolved_keys"] == ["bogus"]
@@ -2605,8 +2629,9 @@ class TestSendActionReturnContract:
 
     def test_articulation_failure_returns_error_envelope(self):
         sim, art = self._make_sim_with_robot()
-        art.set_joint_position_targets.side_effect = RuntimeError("articulation torn down")
-        result = sim.send_action({"j0": 0.1})
+        art.apply_action.side_effect = RuntimeError("articulation torn down")
+        with self._stub_articulation_action():
+            result = sim.send_action({"j0": 0.1})
         assert result["status"] == "error"
         assert "articulation torn down" in result["content"][0]["text"]
         # Physics must not advance once the action couldn't be applied.

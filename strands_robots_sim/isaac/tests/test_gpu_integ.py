@@ -188,3 +188,69 @@ class TestIsaacGPUIntegration:
             assert r.get("status") == "success", f"step: {r}"
         finally:
             sim.destroy()
+
+    def test_send_action_on_real_usd_articulation(self):
+        """``send_action`` must drive a real USD articulation on Isaac Sim 6.0.
+
+        Regression smoke for
+        `#123 <https://github.com/strands-labs/robots-sim/issues/123>`_:
+        the pre-fix code called ``SingleArticulation.set_joint_position_targets``,
+        which does not exist on Isaac Sim 6.0's
+        ``isaacsim.core.prims.SingleArticulation`` -- every ``send_action``
+        returned ``{'status': 'error', ...: "... has no attribute
+        'set_joint_position_targets'"}``. The fix routes through
+        ``apply_action(ArticulationAction(joint_positions=...))``. This test
+        loads the bundled USD Franka, resets + steps (so it's not an
+        init-timing artefact), then exercises both the dict and list action
+        forms exactly as the issue reproduction does, asserting a success
+        envelope and a non-empty flat-dict observation.
+        """
+        from strands_robots_sim.isaac import IsaacConfig, IsaacSimulation
+
+        available, msg = IsaacSimulation.is_available()
+        if not available:
+            pytest.skip(f"Isaac Sim not available: {msg}")
+
+        sim = IsaacSimulation(IsaacConfig(num_envs=1, headless=True))
+        try:
+            r = sim.create_world()
+            assert r.get("status") == "success", f"create_world: {r}"
+
+            try:
+                from isaacsim.storage.native import (  # type: ignore[import-not-found]
+                    get_assets_root_path,
+                )
+            except ImportError:
+                from omni.isaac.nucleus import (  # type: ignore[import-not-found]
+                    get_assets_root_path,
+                )
+            assets_root = get_assets_root_path()
+            assert assets_root, "get_assets_root_path() returned empty"
+
+            franka_usd = f"{assets_root}/Isaac/Robots/Franka/franka.usd"
+            r = sim.add_robot(name="robot", usd_path=franka_usd)
+            assert r.get("status") == "success", f"add_robot: {r}"
+
+            # Reset + step so the articulation is fully initialised -- mirrors
+            # the issue's "reproduced after reset() + step(5)" note.
+            sim.reset()
+            sim.step(5)
+
+            joint_names = sim.robot_joint_names("robot")
+            assert isinstance(joint_names, list) and joint_names, f"joint names: {joint_names}"
+
+            # dict form -- the documented world-building loop.
+            r = sim.send_action({n: 0.0 for n in joint_names}, robot_name="robot")
+            assert r.get("status") == "success", f"send_action(dict): {r}"
+
+            # list form -- same path, flat array in joint order.
+            r = sim.send_action([0.0] * len(joint_names), robot_name="robot")
+            assert r.get("status") == "success", f"send_action(list): {r}"
+
+            # get_observation returns a flat {joint_name: position} dict.
+            obs = sim.get_observation(robot_name="robot")
+            assert isinstance(obs, dict) and obs, f"get_observation: {obs!r}"
+            assert set(obs) <= set(joint_names), f"unexpected obs keys: {sorted(obs)}"
+            assert all(isinstance(v, float) for v in obs.values()), f"obs values: {obs}"
+        finally:
+            sim.destroy()
