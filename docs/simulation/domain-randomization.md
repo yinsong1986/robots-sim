@@ -13,7 +13,7 @@ a parquet / image / json layout your training loop can ingest directly.
 !!! note "Status"
     The Replicator wiring lands as **R9 / [#16](https://github.com/strands-labs/robots-sim/issues/16)**.
     Today's `replicate(...)` is a Phase-2 stub; the runnable example
-    `examples/isaac_replicator_synthdata.py` ships with R9. Track progress
+    `examples/isaac/isaac_replicator_synthdata.py` ships with R9. Track progress
     on [#16](https://github.com/strands-labs/robots-sim/issues/16) and
     on the umbrella [#8](https://github.com/strands-labs/robots-sim/issues/8).
 
@@ -136,7 +136,7 @@ annotators run on the same RTX path even when you're not consuming RGB.
 When R9 lands, the runnable demo is:
 
 ```bash
-python examples/isaac_replicator_synthdata.py \
+python examples/isaac/isaac_replicator_synthdata.py \
     --robot-usd /path/to/franka.usda \
     --n-frames 1000 \
     --output-dir /data/synth/cube-pickup-1k

@@ -54,7 +54,7 @@ sim.add_robot(name="panda", usd_path="omniverse://localhost/NVIDIA/Assets/Isaac/
 ```
 
 The simulation parses the USD prim, instantiates an
-`omni.isaac.core.articulations.Articulation`, and wires `send_action` /
+`isaacsim.core.api.articulations.Articulation`, and wires `send_action` /
 `get_observation` against its joint set. This is the **recommended path**
 for LIBERO and most production scenes.
 
@@ -100,7 +100,7 @@ upstream LIBERO adapter consumes (`panda` / `iiwa` / `kinova3` / `jaco` /
 ## `add_object(...)`
 
 Authors a USD primitive and wraps it in
-`omni.isaac.core.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`:
+`isaacsim.core.api.objects.{Dynamic,Fixed}{Cuboid,Sphere,Cylinder,Capsule}`:
 
 ```python
 sim.add_object(name="cube", shape="cuboid",
@@ -123,7 +123,7 @@ is accepted as an alias for `size=`. The result `json` always reports the
 canonical `"box"`. Per-shape `size` conventions: box `[w, h, d]`, sphere
 `[radius]`, cylinder / capsule `[radius, height]`.
 
-| Shape | `omni.isaac.core.objects` |
+| Shape | `isaacsim.core.api.objects` |
 |---|---|
 | `"box"` / `"cuboid"` | `DynamicCuboid` / `FixedCuboid` |
 | `"sphere"` | `DynamicSphere` / `FixedSphere` |
@@ -141,12 +141,15 @@ sim.add_camera(
     position=[1.2, 0.0, 0.6],
     target=[0.0, 0.0, 0.1],
     width=1280, height=720,
-    horizontal_aperture_mm=20.955,    # Isaac default
-    focal_length_mm=18.0,
+    fov=60.0,    # horizontal field of view, degrees
 )
 ```
 
-A camera is an `omni.isaac.sensor.Camera` prim with look-at + FOV wired.
+A camera is an `isaacsim.sensors.camera.Camera` prim with look-at + FOV
+wired. The `fov` (horizontal field of view, in degrees) is mapped onto
+the camera's focal length using the standard pinhole relation against the
+USD-default 24 mm horizontal aperture — there is no separate
+`horizontal_aperture_mm` / `focal_length_mm` knob.
 `render(camera_name="front")` returns a dict with RGB, depth, and (if
 enabled) ground-truth segmentation:
 

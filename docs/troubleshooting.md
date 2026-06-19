@@ -167,15 +167,20 @@ cases (the engine returns blank frames intentionally rather than crashing):
    frame = sim.render(camera_name="front")
    ```
 
-If none of these apply and you still get black frames, dump the camera
-state:
+If none of these apply and you still get black frames, check how many
+cameras the simulation thinks it has via the state envelope:
 
 ```python
-print(sim.get_state()["cameras"])
-# [{"name": "front", "rtx_handle": "<...>", "ready": True/False, ...}]
+state = sim.get_state()["content"][0]["json"]
+print(state["num_cameras"])
+# e.g. 1  (the "front" camera you added above)
 ```
 
-`ready: False` means RTX is still initializing — give it more frames.
+`get_state()` returns the standard
+`{"status", "content": [{"text", "json": {...}}]}` envelope; the `json`
+payload carries scalar counts (`num_cameras`, `num_robots`, `num_objects`,
+…), not a per-camera list. A `num_cameras` of `0` means no camera was ever
+added — call `add_camera(...)` first.
 
 ## Adapter / LIBERO failures
 

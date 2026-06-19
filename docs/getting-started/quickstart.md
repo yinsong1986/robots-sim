@@ -49,7 +49,7 @@ What happened:
 3. `add_robot("so100")` runs the procedural SO-100 builder — no asset
    files needed, no Nucleus required.
 4. `add_object(...)` and `add_camera(...)` author scene primitives via
-   the `omni.isaac.core` API.
+   the `isaacsim.core.api` / `isaacsim.sensors.camera` API.
 5. `step(120)` advances PhysX 120 substeps.
 6. `render(...)` returns an RGBA frame plus depth from the configured RTX
    sensor.
@@ -93,7 +93,17 @@ full `add_robot` / `add_object` / `add_camera` reference.
 ```bash
 # Smoke test (mock policy, no GPU policy server):
 python examples/libero/run_isaac.py --policy mock --n-episodes 5
+```
 
+!!! warning "`run_isaac.py` smoke test is gated on #116"
+
+    The `--policy mock` smoke test currently fails inside
+    `evaluate_benchmark` (the LIBERO `load_scene` gap tracked in
+    [`#116`](https://github.com/strands-labs/robots-sim/issues/116)) and
+    exits non-zero. Treat the commands below as the intended invocation
+    shape; they will run clean once #116 lands.
+
+```bash
 # Bring your own robot asset:
 python examples/libero/run_isaac.py --policy mock --robot-usd /path/to/robot.usd
 
@@ -116,26 +126,50 @@ matrix and the LIBERO-specific gotchas.
 
 ## Driving from a Strands Agent
 
-The same `IsaacSimulation` instance plugs into the upstream `Simulation`
-AgentTool — call it with a method name from natural language, get back a
-`{"status", "content"}` payload:
+`IsaacSimulation` is **not** itself a Strands `AgentTool` yet — it has no
+`tool_spec` / `__call__`, so `Agent(tools=[sim])` registers **0 tools**
+(Strands logs `unrecognized tool specification` and the agent has nothing
+to call). Until `IsaacSimulation` becomes an AgentTool (Phase-3 work on
+[`#14`](https://github.com/strands-labs/robots-sim/issues/14)), wrap the
+operations you want the agent to drive in a `@tool`-decorated function
+that closes over the `sim` instance — the same pattern
+`examples/libero/run_isaac_agent.py` uses for `evaluate_benchmark`:
 
 ```python
-from strands import Agent
+from strands import Agent, tool
 from strands_robots_sim.isaac import IsaacSimulation, IsaacConfig
 
 sim = IsaacSimulation(IsaacConfig(render_mode="rtx_realtime", headless=True))
 sim.create_world()
 sim.add_robot("so100")
 
-agent = Agent(tools=[sim])
+
+@tool(
+    name="setup_camera_and_render",
+    description=(
+        "Add a camera at the given position looking at a target, step the "
+        "world, then render a frame. Returns the simulation status dicts."
+    ),
+)
+def setup_camera_and_render(
+    position: list[float],
+    target: list[float],
+    n_steps: int = 100,
+) -> dict:
+    sim.add_camera(name="agent_cam", position=position, target=target)
+    sim.step(n_steps)
+    return sim.render(camera_name="agent_cam")
+
+
+agent = Agent(tools=[setup_camera_and_render])
 agent("Add a top-down camera at z=1.5 looking at the origin, "
       "step 100 frames, then render it")
 ```
 
-The agent picks the right `add_camera`, `step`, and `render` actions out
-of the AgentTool's full action set; you never have to teach it the Isaac
-API explicitly.
+The agent picks `setup_camera_and_render` and fills its arguments from the
+prompt. Each underlying Isaac call returns the usual
+`{"status", "content"}` payload, which the wrapper forwards back through
+the tool boundary.
 
 ## Next
 
