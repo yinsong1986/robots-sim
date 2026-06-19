@@ -214,6 +214,9 @@ Plus visually-driven demos:
 python examples/libero/run_isaac.py --policy mock --n-episodes 5
 
 # Real eval against an NVIDIA GR00T checkpoint:
+# (the checkpoint is cached under a non-`/home` path by default —
+#  /tmp/strands_robots/checkpoints — so it clears gr00t_inference's
+#  start_container mount guard; override with --checkpoint-dir.)
 python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 ```
 

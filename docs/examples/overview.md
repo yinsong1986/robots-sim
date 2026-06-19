@@ -41,6 +41,16 @@ file's agent isn't asked to manage Docker / HF cache — those are brittle
 for an LLM and stay under Python control. Pass `--no-auto-server` to
 either file to reuse an already-running container instead.
 
+The checkpoint is cached under a **non-`/home`** path by default
+(`$STRANDS_ROBOTS_CHECKPOINT_DIR`, an outside-`/home`
+`$XDG_CACHE_HOME/strands_robots/checkpoints`, or
+`/tmp/strands_robots/checkpoints`). `gr00t_inference`'s `start_container`
+step refuses to bind-mount any path under `/home` (a "protected host
+path" guard), so a `/home` cache would abort the lifecycle; the non-`/home`
+default keeps `--policy groot` working out-of-the-box. Override with
+`--checkpoint-dir <path>` if you want the cache elsewhere (must also be
+outside `/home`).
+
 ## Backend matrix (LIBERO)
 
 Same task — `libero-spatial-pick_up_the_red_cube`, 10 episodes, seed 42 —

@@ -112,6 +112,13 @@ python examples/libero/run_isaac.py --policy mock --robot-usd /path/to/robot.usd
 python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 ```
 
+The GR00T checkpoint is cached under a **non-`/home`** path by default
+(`/tmp/strands_robots/checkpoints`, overridable via
+`$STRANDS_ROBOTS_CHECKPOINT_DIR` or `--checkpoint-dir`). This is required:
+`gr00t_inference`'s `start_container` step refuses to bind-mount any path
+under `/home`, so a `/home` cache would abort the lifecycle. The non-`/home`
+default keeps `--policy groot` working out-of-the-box.
+
 Both files print two grep-stable lines that the flagship
 `libero_backend_matrix.py` driver subprocess-and-parses for the
 side-by-side table:
