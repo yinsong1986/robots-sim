@@ -431,54 +431,202 @@ class TestIsaacSimulationContract:
         )
 
 
-class TestLoadSceneFailFast:
-    """Tests for IsaacSimulation.load_scene deferred fail-fast (#116).
+class TestLoadSceneLibero:
+    """Tests for IsaacSimulation.load_scene (LIBERO/BDDL -> USD), #129.
 
-    Full LIBERO/BDDL -> USD scene realization on the Isaac backend is
-    deferred; until it lands, ``load_scene`` must fail fast with a clear,
-    structured error so ``LiberoAdapter.on_episode_start`` (which calls
-    ``sim.load_scene(...)``) surfaces a descriptive abort instead of the
-    opaque ``NotImplementedError`` from the base ``SimEngine`` stub.
+    PR #117 (closing #116) shipped only a fail-fast ``load_scene`` stub;
+    #129 implements the real BDDL/MJCF -> USD translation so the LIBERO
+    eval runs end-to-end on the Isaac backend. These tests cover the error
+    paths (no world / missing file / malformed XML -> structured error so
+    ``LiberoAdapter.on_episode_start`` raises a descriptive abort) and the
+    success path (a compiled MJCF realizes one box prim per task object).
     """
 
-    def test_load_scene_returns_error_envelope(self):
-        """load_scene returns a structured error (not a raise / NotImplemented)."""
-        from strands_robots_sim.isaac.simulation import IsaacSimulation
+    # A minimal robosuite-shaped LIBERO MJCF: a floor plane, the robot
+    # base (both must be skipped), a static table fixture, and two movable
+    # task objects (one with <freejoint>, one with <joint type="free">).
+    _SCENE_XML = """<?xml version="1.0" ?>
+<mujoco model="libero_scene">
+  <worldbody>
+    <body name="floor" pos="0 0 0">
+      <geom type="plane" size="3 3 .125" group="0"/>
+    </body>
+    <body name="robot0_base" pos="-0.5 0 0.42">
+      <geom type="box" size="0.1 0.1 0.1" group="0"/>
+    </body>
+    <body name="living_room_table" pos="0 0 0" quat="1 0 0 0">
+      <body name="living_room_table_col" pos="0 0 0">
+        <geom type="box" size="0.2 0.4 0.4" pos="0 0 0.4" group="0"/>
+      </body>
+    </body>
+    <body name="mug_1_main" pos="0.1 0.2 0.8">
+      <freejoint name="mug_1_joint0"/>
+      <geom type="mesh" group="1" mesh="mug_vis"/>
+      <geom type="box" size="0.03 0.03 0.05" pos="0 0 0" group="0"/>
+    </body>
+    <body name="plate_1_main" pos="-0.1 0.2 0.8">
+      <joint name="plate_1_joint0" type="free"/>
+      <geom type="box" size="0.05 0.05 0.01" pos="0 0 0" group="0"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
 
-        sim = IsaacSimulation()
-        result = sim.load_scene("/tmp/some_libero_scene.xml")
-        assert isinstance(result, dict)
-        assert result["status"] == "error"
-
-    def test_load_scene_message_is_descriptive(self):
-        """Error text names the gap, the issue, and the workarounds."""
-        from strands_robots_sim.isaac.simulation import IsaacSimulation
-
-        sim = IsaacSimulation()
-        text = sim.load_scene("/tmp/some_libero_scene.xml")["content"][0]["text"]
-        # Names the unimplemented method + the tracking issue so the abort
-        # is traceable, and echoes the requested path for debuggability.
-        assert "load_scene" in text
-        assert "#116" in text
-        assert "/tmp/some_libero_scene.xml" in text
-        # Points at the supported alternatives (MuJoCo driver / manual
-        # Isaac quickstart) rather than leaving the caller stuck.
-        assert "run_mujoco.py" in text
-
-    def test_load_scene_does_not_raise_notimplemented(self):
-        """The base SimEngine stub raises NotImplementedError; the override must not."""
-        from strands_robots_sim.isaac.simulation import IsaacSimulation
-
-        sim = IsaacSimulation()
-        # Must not propagate the base-class NotImplementedError.
-        result = sim.load_scene("scene.xml")
-        assert result["status"] == "error"
+    def _write_scene(self, tmp_path) -> str:
+        p = tmp_path / "scene.xml"
+        p.write_text(self._SCENE_XML)
+        return str(p)
 
     def test_load_scene_overrides_base_stub(self):
         """IsaacSimulation defines its own load_scene (not the inherited stub)."""
         from strands_robots_sim.isaac.simulation import IsaacSimulation
 
         assert "load_scene" in IsaacSimulation.__dict__
+
+    def test_load_scene_without_world_returns_error(self):
+        """No create_world() -> structured error, not a raise / NotImplemented."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.load_scene("/tmp/some_libero_scene.xml")
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+        text = result["content"][0]["text"]
+        assert "create_world" in text
+        # Echoes the requested path for debuggability.
+        assert "/tmp/some_libero_scene.xml" in text
+
+    def test_load_scene_missing_file_returns_error(self):
+        """A non-existent scene path returns a clear 'not found' error."""
+        sim, _scene = _make_simulation_with_world()
+        result = sim.load_scene("/tmp/definitely-not-here-129.xml")
+        assert result["status"] == "error"
+        assert "not found" in result["content"][0]["text"]
+
+    def test_load_scene_malformed_xml_returns_error(self, tmp_path):
+        """Malformed MJCF returns a parse error (not an opaque traceback)."""
+        bad = tmp_path / "bad.xml"
+        bad.write_text("<mujoco><worldbody><body></mujoco")  # truncated / invalid
+        sim, _scene = _make_simulation_with_world()
+        result = sim.load_scene(str(bad))
+        assert result["status"] == "error"
+        assert "parse" in result["content"][0]["text"].lower()
+
+    def test_load_scene_does_not_raise_notimplemented(self):
+        """The base SimEngine stub raises NotImplementedError; the override must not."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.load_scene("scene.xml")
+        assert result["status"] == "error"
+
+    def test_load_scene_realizes_objects(self, tmp_path):
+        """A compiled MJCF realizes one box prim per task object/fixture.
+
+        Skips floor + robot; the table is a Fixed* prim and the two movable
+        objects are Dynamic* prims.
+        """
+        scene_path = self._write_scene(tmp_path)
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
+            result = sim.load_scene(scene_path)
+
+        assert result["status"] == "success"
+        realized = result["content"][0]["json"]["realized"]
+        # floor + robot0_base are skipped; the other three land.
+        assert set(realized) == {"living_room_table", "mug_1_main", "plate_1_main"}
+        assert result["content"][0]["json"]["object_count"] == 3
+        # The static table -> FixedCuboid; movable objects -> DynamicCuboid.
+        fake_objects.FixedCuboid.assert_called_once()
+        assert fake_objects.DynamicCuboid.call_count == 2
+        # Three prims registered on the stage.
+        assert scene.add.call_count == 3
+        # Tracked for idempotent reload.
+        assert sim._scene_objects == {"living_room_table", "mug_1_main", "plate_1_main"}
+
+    def test_load_scene_is_idempotent_on_reload(self, tmp_path):
+        """Re-loading the same scene clears the prior scene's prims first.
+
+        A per-episode reload must not accumulate duplicate prims or hit the
+        'object already exists' guard in add_object.
+        """
+        scene_path = self._write_scene(tmp_path)
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}):
+            r1 = sim.load_scene(scene_path)
+            r2 = sim.load_scene(scene_path)
+
+        assert r1["status"] == "success"
+        assert r2["status"] == "success"
+        # Second load realizes the same three objects (no duplicates, no skips).
+        assert set(r2["content"][0]["json"]["realized"]) == {
+            "living_room_table",
+            "mug_1_main",
+            "plate_1_main",
+        }
+        assert r2["content"][0]["json"]["skipped"] == []
+        assert len(sim._objects) == 3
+
+
+class TestLoadMjcfSceneObjects:
+    """Unit tests for the pure-stdlib MJCF scene-object extractor (#129).
+
+    Exercises load_mjcf_scene_objects on CPU-only CI (no Isaac / mujoco /
+    pxr): floor + robot skipping, static vs dynamic classification, and the
+    collision-geom AABB approximation.
+    """
+
+    _SCENE_XML = TestLoadSceneLibero._SCENE_XML
+
+    def _objs(self, tmp_path):
+        from strands_robots_sim.isaac.loaders import load_mjcf_scene_objects
+
+        p = tmp_path / "scene.xml"
+        p.write_text(self._SCENE_XML)
+        return {o.name: o for o in load_mjcf_scene_objects(str(p))}
+
+    def test_skips_floor_and_robot(self, tmp_path):
+        objs = self._objs(tmp_path)
+        assert "floor" not in objs
+        assert "robot0_base" not in objs
+
+    def test_table_is_static_object_is_dynamic(self, tmp_path):
+        objs = self._objs(tmp_path)
+        assert objs["living_room_table"].is_static is True
+        assert objs["mug_1_main"].is_static is False  # has <freejoint>
+        assert objs["plate_1_main"].is_static is False  # <joint type="free">
+
+    def test_object_aabb_from_collision_geom(self, tmp_path):
+        objs = self._objs(tmp_path)
+        # mug collision box half-extents (0.03,0.03,0.05) -> full size doubled.
+        mug = objs["mug_1_main"]
+        assert mug.size[0] == pytest.approx(0.06, abs=1e-6)
+        assert mug.size[2] == pytest.approx(0.10, abs=1e-6)
+        # body pos (0.1,0.2,0.8) + geom-local center (0,0,0).
+        assert mug.position == pytest.approx((0.1, 0.2, 0.8), abs=1e-6)
+
+    def test_nested_fixture_geometry_captured(self, tmp_path):
+        objs = self._objs(tmp_path)
+        # table collision box is in a nested body; full size 0.4 x 0.8 x 0.8.
+        table = objs["living_room_table"]
+        assert table.size[0] == pytest.approx(0.4, abs=1e-6)
+        assert table.size[1] == pytest.approx(0.8, abs=1e-6)
+
+    def test_missing_file_raises(self):
+        from strands_robots_sim.isaac.loaders import load_mjcf_scene_objects
+
+        with pytest.raises(FileNotFoundError):
+            load_mjcf_scene_objects("/tmp/nope-129-scene.xml")
+
+    def test_malformed_xml_raises_valueerror(self, tmp_path):
+        from strands_robots_sim.isaac.loaders import load_mjcf_scene_objects
+
+        bad = tmp_path / "bad.xml"
+        bad.write_text("<mujoco><worldbody>")
+        with pytest.raises(ValueError):
+            load_mjcf_scene_objects(str(bad))
 
 
 class TestProceduralRobots:

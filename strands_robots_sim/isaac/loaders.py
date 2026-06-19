@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from strands_robots_sim.isaac.procedural import (
@@ -53,6 +54,8 @@ __all__ = [
     "load_urdf",
     "load_mjcf",
     "load_usd",
+    "SceneObject",
+    "load_mjcf_scene_objects",
 ]
 
 
@@ -728,3 +731,283 @@ def load_usd(path: str) -> ProceduralRobot:
     robot = ProceduralRobot(name=name, bodies=bodies, joints=joints)
     _validate_kinematic_tree(robot)
     return robot
+
+
+# ---------------------------------------------------------------------------
+# MJCF scene-object extraction (LIBERO/BDDL -> Isaac stage prims)
+# ---------------------------------------------------------------------------
+#
+# ``load_mjcf`` above models a *single robot's* body/joint topology. LIBERO
+# task scenes are different: a robosuite-compiled MJCF carrying a ground
+# plane, the Panda robot, one or more table/fixture bodies, and the task's
+# movable objects (mugs, plates, bowls ...). ``IsaacSimulation.load_scene``
+# needs to realize those *objects* (not the robot — the LiberoAdapter loads
+# the Panda separately via ``add_robot``) as USD prims on the stage so the
+# Isaac LIBERO eval renders a populated scene instead of an empty one.
+#
+# LIBERO object meshes are not portable to the Isaac stage (their asset
+# paths live inside the upstream ``libero`` package and aren't resolvable
+# as USD references here). So instead of meshes we approximate each object
+# with a single box primitive sized to the axis-aligned bounding box (AABB)
+# of its *collision* geoms (MuJoCo ``group="0"``), which robosuite always
+# emits as analytic primitives (boxes / spheres / cylinders) even when the
+# visual geom is a mesh. That gives a faithful-enough footprint for
+# rollout-video parity with the MuJoCo driver without needing the meshes.
+
+# MJCF body-name prefixes/exact-names that are NOT task objects and must be
+# skipped when realizing a LIBERO scene as Isaac prims:
+#   * ``floor`` / planes  -> ground plane is created by ``create_world``.
+#   * ``robot0`` / robot  -> the Panda is loaded separately by the adapter.
+_MJCF_SCENE_SKIP_EXACT = frozenset({"floor", "ground", "world"})
+_MJCF_SCENE_SKIP_PREFIXES = ("robot0", "robot_", "gripper0", "mount0")
+
+
+@dataclass
+class SceneObject:
+    """A single object extracted from a LIBERO/BDDL MJCF scene.
+
+    Carries just enough geometry for ``IsaacSimulation.load_scene`` to call
+    ``add_object(...)``: a box-AABB approximation of the object's collision
+    geometry, its world position (body ``pos`` + AABB centre), and whether
+    it is a static fixture (no free joint) or a dynamic, physics-driven
+    object (has a ``<freejoint>`` / ``<joint type="free">``).
+
+    Attributes
+    ----------
+    name : str
+        Object body name from the MJCF (e.g. ``"porcelain_mug_1_main"``).
+    position : tuple[float, float, float]
+        World-space ``[x, y, z]`` of the object's AABB centre.
+    size : tuple[float, float, float]
+        Full box extents ``[sx, sy, sz]`` (NOT half-extents) of the AABB.
+    is_static : bool
+        ``True`` for fixtures (tables, cabinets) pinned in space; ``False``
+        for movable objects that participate in physics.
+    quat : tuple[float, float, float, float]
+        Orientation quaternion ``[w, x, y, z]`` from the body's ``quat``
+        attribute (identity when absent).
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    is_static: bool
+    quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+
+
+def _parse_quat(quat_str: str | None) -> tuple[float, float, float, float]:
+    """Parse an MJCF ``quat="w x y z"`` string. Identity on failure."""
+    if not quat_str:
+        return (1.0, 0.0, 0.0, 0.0)
+    try:
+        parts = [float(p) for p in quat_str.replace(",", " ").split()]
+    except (ValueError, TypeError):
+        return (1.0, 0.0, 0.0, 0.0)
+    if len(parts) != 4:
+        return (1.0, 0.0, 0.0, 0.0)
+    return (parts[0], parts[1], parts[2], parts[3])
+
+
+def _is_skipped_scene_body(name: str) -> bool:
+    """True when an MJCF top-level body is the floor or the robot (not an object)."""
+    lname = name.lower()
+    if lname in _MJCF_SCENE_SKIP_EXACT:
+        return True
+    return any(lname.startswith(p) for p in _MJCF_SCENE_SKIP_PREFIXES)
+
+
+def _geom_aabb(geom: ET.Element) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Return ``(center, half_extent)`` AABB for a collision ``<geom>``.
+
+    Handles MuJoCo's analytic primitives (box / sphere / cylinder /
+    capsule / ellipsoid). Mesh / plane / unknown geoms return ``None`` so
+    the caller can fall back to other geoms. The geom-local ``pos`` is the
+    AABB centre relative to the owning body's frame.
+    """
+    gtype = geom.get("type", "sphere")
+    pos = _parse_xyz(geom.get("pos"))
+    size_str = geom.get("size", "")
+    try:
+        sizes = [float(p) for p in size_str.replace(",", " ").split()] if size_str else []
+    except (ValueError, TypeError):
+        sizes = []
+
+    if gtype == "box":
+        if len(sizes) >= 3:
+            half = (sizes[0], sizes[1], sizes[2])
+        else:
+            return None
+    elif gtype == "sphere":
+        if sizes:
+            r = sizes[0]
+            half = (r, r, r)
+        else:
+            return None
+    elif gtype in ("cylinder", "capsule"):
+        # MJCF (radius, half-length) along local z.
+        if len(sizes) >= 2:
+            r, hl = sizes[0], sizes[1]
+            ext = hl + (r if gtype == "capsule" else 0.0)
+            half = (r, r, ext)
+        elif len(sizes) == 1:
+            r = sizes[0]
+            half = (r, r, r)
+        else:
+            return None
+    elif gtype == "ellipsoid":
+        if len(sizes) >= 3:
+            half = (sizes[0], sizes[1], sizes[2])
+        else:
+            return None
+    else:
+        # mesh / plane / hfield / sdf -> no analytic AABB.
+        return None
+    return pos, half
+
+
+def _body_collision_aabb(
+    body_el: ET.Element,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Compute the AABB (center, full-size) over a body's own geoms.
+
+    Prefers MuJoCo collision geoms (``group="0"``); if a body has only
+    analytic geoms in another group those are used as a fallback. Geom
+    positions are taken relative to the body frame, so the returned centre
+    is a body-frame offset. Returns ``None`` when no analytic geom is found
+    (e.g. a mesh-only visual body).
+    """
+    for group_filter in ("0", None):
+        mins = [float("inf")] * 3
+        maxs = [float("-inf")] * 3
+        found = False
+        for geom in body_el.findall("geom"):
+            if group_filter is not None and geom.get("group") != group_filter:
+                continue
+            aabb = _geom_aabb(geom)
+            if aabb is None:
+                continue
+            center, half = aabb
+            for i in range(3):
+                mins[i] = min(mins[i], center[i] - half[i])
+                maxs[i] = max(maxs[i], center[i] + half[i])
+            found = True
+        if found:
+            center = tuple((mins[i] + maxs[i]) / 2.0 for i in range(3))
+            size = tuple(max(maxs[i] - mins[i], 1e-4) for i in range(3))
+            return center, size  # type: ignore[return-value]
+    return None
+
+
+def _recursive_collision_aabb(
+    body_el: ET.Element,
+    offset: tuple[float, float, float],
+    bounds: list[list[float]],
+) -> bool:
+    """Fold this body's (and nested bodies') collision AABBs into ``bounds``.
+
+    ``bounds`` is ``[mins, maxs]`` accumulated in place; ``offset`` is the
+    running body-frame offset from the top-level object body. Returns
+    ``True`` if any analytic geometry was found in this subtree.
+    """
+    found = False
+    aabb = _body_collision_aabb(body_el)
+    if aabb is not None:
+        center, size = aabb
+        for i in range(3):
+            lo = offset[i] + center[i] - size[i] / 2.0
+            hi = offset[i] + center[i] + size[i] / 2.0
+            bounds[0][i] = min(bounds[0][i], lo)
+            bounds[1][i] = max(bounds[1][i], hi)
+        found = True
+    for child in body_el.findall("body"):
+        child_off = _parse_xyz(child.get("pos"))
+        new_off = (offset[0] + child_off[0], offset[1] + child_off[1], offset[2] + child_off[2])
+        found = _recursive_collision_aabb(child, new_off, bounds) or found
+    return found
+
+
+def load_mjcf_scene_objects(path: str) -> list[SceneObject]:
+    """Extract LIBERO/BDDL task objects from a compiled MJCF scene.
+
+    Walks the MJCF ``<worldbody>`` top-level bodies, skips the floor and
+    the robot, and emits one :class:`SceneObject` per remaining body (table
+    fixtures and movable task objects). Each object's geometry is the
+    axis-aligned bounding box of its collision geoms (recursing into nested
+    bodies so multi-link fixtures like tables are captured), approximated as
+    a single box primitive.
+
+    This is the parse half of ``IsaacSimulation.load_scene``: pure stdlib
+    (no ``mujoco`` / ``pxr`` dependency), so it is unit-testable on CPU-only
+    CI without Isaac Sim installed.
+
+    Parameters
+    ----------
+    path : str
+        Filesystem path to a robosuite-compiled LIBERO MJCF (``.xml``).
+
+    Returns
+    -------
+    list[SceneObject]
+        One entry per task object / fixture. Empty list only if the scene
+        genuinely has no objects beyond the floor + robot (rare).
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``path`` doesn't exist.
+    ValueError
+        If the XML is malformed, the root isn't ``<mujoco>``, or there is no
+        ``<worldbody>``.
+    """
+    _require_existing_file(path, "MJCF scene")
+    root = _parse_xml(path, "MJCF scene")
+    if root.tag != "mujoco":
+        raise ValueError(f"MJCF scene loader: root element must be <mujoco>, got <{root.tag}> in {path}")
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise ValueError(f"MJCF scene loader: {path} has no <worldbody>")
+
+    objects: list[SceneObject] = []
+    for body_el in worldbody.findall("body"):
+        name = body_el.get("name") or ""
+        if not name or _is_skipped_scene_body(name):
+            continue
+
+        body_pos = _parse_xyz(body_el.get("pos"))
+        body_quat = _parse_quat(body_el.get("quat"))
+
+        # Movable object? -> has a free joint (``<freejoint>`` or
+        # ``<joint type="free">``). Otherwise treat as a static fixture.
+        has_freejoint = body_el.find("freejoint") is not None or any(
+            j.get("type") == "free" for j in body_el.findall("joint")
+        )
+
+        # Gather collision geometry from this body and any nested bodies
+        # (e.g. ``living_room_table`` -> ``living_room_table_col``), folding
+        # nested-body offsets into the AABB.
+        bounds = [[float("inf")] * 3, [float("-inf")] * 3]
+        found = _recursive_collision_aabb(body_el, (0.0, 0.0, 0.0), bounds)
+        mins, maxs = bounds[0], bounds[1]
+
+        if not found:
+            # No analytic collision geometry (mesh-only with no convex
+            # decomposition). Fall back to a small default box so the
+            # object still appears on the stage.
+            center = (0.0, 0.0, 0.0)
+            size = (0.05, 0.05, 0.05)
+        else:
+            center = tuple((mins[i] + maxs[i]) / 2.0 for i in range(3))  # type: ignore[assignment]
+            size = tuple(max(maxs[i] - mins[i], 1e-3) for i in range(3))  # type: ignore[assignment]
+
+        world_pos = tuple(body_pos[i] + center[i] for i in range(3))
+        objects.append(
+            SceneObject(
+                name=name,
+                position=world_pos,  # type: ignore[arg-type]
+                size=size,  # type: ignore[arg-type]
+                is_static=not has_freejoint,
+                quat=body_quat,
+            )
+        )
+
+    return objects
