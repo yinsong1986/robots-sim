@@ -188,13 +188,24 @@ sim.step(1)
 
 # Read observation back:
 obs = sim.get_observation(robot_name="panda")
-# obs == {"joint_positions": {...}, "joint_velocities": {...}, ...}
+# obs == {"panda_joint1": 0.0, "panda_joint2": 0.0, ..., "panda_finger_joint1": 0.0}
+# i.e. a flat dict of joint-position floats keyed by joint name (in
+# `robot_joint_names(robot_name)` order). Index it as obs[joint_name].
 ```
 
+`get_observation` returns a **flat dict** of joint positions keyed by
+joint name — `obs[joint_name]` is the current position float. It is
+**not** nested under `"joint_positions"` / `"joint_velocities"`. The
+dict is empty (`{}`) before `create_world()`, for an unknown /
+ambiguous `robot_name`, or when the robot's articulation handle is not
+yet initialised (each case is logged for diagnosis).
+
 `send_action` accepts either a dict keyed by joint name or a flat list /
-array in `joint_names` order. `get_observation(skip_images=True)` skips
-camera rendering when only the joint state matters (10x speedup in
-mock-policy smoke loops).
+array in `joint_names` order. On Isaac Sim 6.0 it drives PD position
+targets via the articulation's
+`apply_action(ArticulationAction(joint_positions=...))`.
+`get_observation(skip_images=True)` skips camera rendering when only the
+joint state matters (10x speedup in mock-policy smoke loops).
 
 ## Footguns
 
