@@ -486,6 +486,9 @@ class IsaacSimulation(SimEngine):
         # wide so DLSS doesn't ghost a moving arm; captured frames are
         # downscaled to the size the caller asked for before return).
         self._cam_out_size: dict[str, tuple[int, int]] = {}
+        # Synchronous rollout-video recorder state (set by
+        # start_cameras_recording, cleared by stop_cameras_recording).
+        self._cams_rec_state: dict[str, Any] | None = None
 
         # Thread safety
         self._lock = threading.RLock()
@@ -787,6 +790,9 @@ class IsaacSimulation(SimEngine):
             self._cameras.clear()
             self._objects.clear()
             self._prim_registry.clear()
+            # Drop any in-flight recorder state (buffers reference RTX
+            # frames that are meaningless after the stage tears down).
+            self._cams_rec_state = None
 
             # Reset state
             self._world_created = False
@@ -2192,6 +2198,257 @@ class IsaacSimulation(SimEngine):
                 "status": "success",
                 "content": [{"text": f"Camera '{name}' removed."}],
             }
+
+    # --- Recording (rollout video) -----------------------------------------
+    #
+    # The MuJoCo ``Simulation`` records rollout videos via a
+    # ``start_cameras_recording`` / ``stop_cameras_recording`` pair that
+    # spawns a daemon thread pulling frames off ``mjData``. Isaac can't
+    # reuse that shape: the RTX renderer + ``Camera.get_rgba`` are bound
+    # to the thread that booted ``SimulationApp`` (driving them from a
+    # daemon thread deadlocks). So the Isaac recorder is *synchronous* --
+    # it returns an ``on_frame`` closure that the eval driver wires into
+    # ``evaluate_benchmark(..., on_frame=...)`` (present in the
+    # strands-robots 0.4.0 ``SimEngine`` signature). The closure runs on
+    # the eval thread, captures one ``render(camera)`` frame per applied
+    # control step into an in-memory buffer, and ``stop_cameras_recording``
+    # flushes the buffers to ``{name}__{camera}.mp4`` -- the same filename
+    # convention MuJoCo uses, so cross-backend video discovery (the R15
+    # backend matrix glob) picks up Isaac rows uniformly. See
+    # strands-labs/robots-sim#112 and strands-labs/robots#191.
+
+    def start_cameras_recording(
+        self,
+        cameras: list[str] | None = None,
+        output_dir: str | None = None,
+        fps: int = 30,
+        name: str | None = None,
+        max_frames_per_camera: int = 3000,
+    ) -> dict[str, Any]:
+        """Begin a synchronous rollout-video recording.
+
+        Sets up one in-memory RGB buffer per camera and returns an
+        ``on_frame(step, observation, action)`` closure in the result's
+        ``json`` block. Wire that closure into
+        :meth:`evaluate_benchmark`'s ``on_frame=`` kwarg; it captures one
+        :meth:`render` frame per applied control step on the eval thread
+        (no daemon thread -- Isaac's RTX renderer is thread-bound, see the
+        class-level recording note). Call :meth:`stop_cameras_recording`
+        afterwards to flush the buffers to MP4 files named
+        ``{name}__{camera}.mp4`` under ``output_dir`` -- matching the
+        MuJoCo backend's filename convention so cross-backend tooling
+        finds Isaac videos the same way it finds MuJoCo ones.
+
+        Parameters
+        ----------
+        cameras : list[str], optional
+            Camera names to record. ``None`` = every camera added via
+            :meth:`add_camera`. Unknown names error loudly (same policy
+            as the MuJoCo recorder).
+        output_dir : str, optional
+            Directory for the ``{name}__{camera}.mp4`` files. Defaults to
+            ``$TMPDIR/strands_robots/recordings``.
+        fps : int
+            Encoded MP4 frame rate. Default 30.
+        name : str
+            Filename tag. Auto-generated (``rec_<uuid>``) when ``None``.
+        max_frames_per_camera : int
+            Safety cap on in-memory buffers. Frames beyond the cap are
+            silently dropped. Default 3000.
+
+        Returns
+        -------
+        dict
+            On success: ``{"status": "success", "content": [{"text": ...},
+            {"json": {"on_frame": <callable>, "cameras": [...],
+            "output_dir": ..., "name": ...}}]}``. The ``on_frame`` closure
+            isn't JSON-serializable; Python callers unpack it from the
+            json block. On error (no world, already recording, unknown
+            cameras, none to record): ``{"status": "error", ...}``.
+        """
+        import os as _os
+        import tempfile as _tempfile
+        import time as _time
+        import uuid as _uuid
+
+        with self._lock:
+            if not self._world_created:
+                return {"status": "error", "content": [{"text": "No world created. Call create_world() first."}]}
+
+            if getattr(self, "_cams_rec_state", None) and self._cams_rec_state.get("running"):
+                cur = self._cams_rec_state["name"]
+                return {
+                    "status": "error",
+                    "content": [{"text": f"Already recording '{cur}'. Call stop_cameras_recording() first."}],
+                }
+
+            if cameras is None:
+                names = list(self._cameras.keys())
+            else:
+                unresolved = [c for c in cameras if c not in self._cameras]
+                if unresolved:
+                    return {
+                        "status": "error",
+                        "content": [
+                            {"text": (f"Camera(s) not found: {unresolved}. Available: {list(self._cameras.keys())}")}
+                        ],
+                    }
+                names = list(cameras)
+            if not names:
+                return {"status": "error", "content": [{"text": "No cameras to record."}]}
+
+            out_dir = _os.path.abspath(
+                output_dir or _os.path.join(_tempfile.gettempdir(), "strands_robots", "recordings")
+            )
+            _os.makedirs(out_dir, exist_ok=True)
+            tag = name or f"rec_{_uuid.uuid4().hex[:8]}"
+
+            buffers: dict[str, list] = {cam: [] for cam in names}
+            paths = {cam: _os.path.join(out_dir, f"{tag}__{cam}.mp4") for cam in names}
+
+            state: dict[str, Any] = {
+                "running": True,
+                "name": tag,
+                "cameras": names,
+                "fps": fps,
+                "buffers": buffers,
+                "paths": paths,
+                "errors": dict.fromkeys(names, 0),
+                "output_dir": out_dir,
+                "started_at": _time.time(),
+                "max_frames": max_frames_per_camera,
+            }
+            self._cams_rec_state = state
+
+        def on_frame(step: int, observation: dict, action: dict) -> None:
+            """Capture one RGB frame per camera (runs on the eval thread).
+
+            Best-effort: a render failure on a single camera/step
+            increments that camera's error counter rather than raising,
+            so a transient RTX hiccup doesn't abort the whole eval.
+            """
+            st = getattr(self, "_cams_rec_state", None)
+            if not st or not st.get("running"):
+                return
+            for cam in st["cameras"]:
+                if len(st["buffers"][cam]) >= st["max_frames"]:
+                    continue
+                try:
+                    rendered = self.render(camera_name=cam)
+                    rgb = rendered.get("rgb") if isinstance(rendered, dict) else None
+                    if rgb is None:
+                        st["errors"][cam] += 1
+                        continue
+                    arr = np.asarray(rgb)
+                    if arr.ndim != 3 or arr.shape[0] == 0 or arr.shape[1] == 0:
+                        st["errors"][cam] += 1
+                        continue
+                    st["buffers"][cam].append(np.ascontiguousarray(arr[..., :3].astype(np.uint8)))
+                except (RuntimeError, ValueError, OSError, AttributeError, TypeError):
+                    st["errors"][cam] += 1
+
+        return {
+            "status": "success",
+            "content": [
+                {
+                    "text": (
+                        f"Recording '{tag}' armed for cameras {names}. "
+                        "Pass the returned on_frame to evaluate_benchmark(on_frame=...), "
+                        "then call stop_cameras_recording()."
+                    ),
+                    "json": {
+                        "on_frame": on_frame,
+                        "cameras": names,
+                        "output_dir": out_dir,
+                        "name": tag,
+                        "paths": paths,
+                    },
+                }
+            ],
+        }
+
+    def stop_cameras_recording(self) -> dict[str, Any]:
+        """Stop recording and flush captured frames to MP4.
+
+        Encodes each camera's in-memory RGB buffer to
+        ``{name}__{camera}.mp4`` under the ``output_dir`` passed to
+        :meth:`start_cameras_recording`, using ``imageio`` (the same
+        encoder the MuJoCo recorder uses). Idempotent: a no-op success
+        when nothing is recording.
+
+        Best-effort: per-camera flush failures are reported in the result
+        (``frames`` / ``errors`` / ``size_kb``) but never raise, so a
+        partial encode still yields a structured success response.
+
+        Returns
+        -------
+        dict
+            Standard ``{"status", "content": [{"text"}, {"json"}]}``
+            envelope. ``json`` carries ``recording`` (the tag) and an
+            ``artifacts`` list of ``{camera, path, frames, errors,
+            size_kb}`` per camera.
+        """
+        import os as _os
+        import time as _time
+
+        with self._lock:
+            state = getattr(self, "_cams_rec_state", None)
+            if not state or not state.get("running"):
+                return {"status": "success", "content": [{"text": "Was not recording cameras."}]}
+            state["running"] = False
+            self._cams_rec_state = None
+
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            return {
+                "status": "error",
+                "content": [{"text": "imageio not installed. pip install imageio imageio-ffmpeg"}],
+            }
+
+        elapsed = _time.time() - state["started_at"]
+        lines = [
+            f"Stopped '{state['name']}' after {elapsed:.1f}s",
+            f"   output_dir: {state['output_dir']}",
+        ]
+        artifacts = []
+        for cam in state["cameras"]:
+            frames_buffer = state["buffers"][cam]
+            path = state["paths"][cam]
+            errors = state["errors"][cam]
+            frames_written = 0
+            size_kb = 0.0
+            if frames_buffer:
+                writer = imageio.get_writer(path, fps=state["fps"], quality=8, macro_block_size=1)
+                try:
+                    for arr in frames_buffer:
+                        writer.append_data(arr)
+                        frames_written += 1
+                finally:
+                    writer.close()
+                if _os.path.exists(path):
+                    size_kb = _os.path.getsize(path) / 1024
+            lines.append(
+                f"   {cam:20s} {frames_written:>5d} frames  {size_kb:>7.1f} KB  "
+                f"({errors} errors)  -> {_os.path.basename(path)}"
+            )
+            artifacts.append(
+                {
+                    "camera": cam,
+                    "path": path,
+                    "frames": frames_written,
+                    "errors": errors,
+                    "size_kb": size_kb,
+                }
+            )
+
+        return {
+            "status": "success",
+            "content": [
+                {"text": "\n".join(lines)},
+                {"json": {"recording": state["name"], "artifacts": artifacts}},
+            ],
+        }
 
     def _create_camera_prim(
         self,

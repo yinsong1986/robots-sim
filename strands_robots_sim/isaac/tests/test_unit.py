@@ -2561,3 +2561,153 @@ class TestSendActionReturnContract:
         assert "articulation torn down" in result["content"][0]["text"]
         # Physics must not advance once the action couldn't be applied.
         sim._world.step.assert_not_called()
+
+
+class TestCamerasRecording:
+    """Synchronous rollout-video recorder (strands-labs/robots-sim#112).
+
+    ``IsaacSimulation`` records videos via a ``start_cameras_recording`` /
+    ``stop_cameras_recording`` pair that mirrors the MuJoCo backend's API
+    and filename convention (``{name}__{camera}.mp4``). Capture is
+    synchronous (Isaac's RTX renderer is thread-bound): ``start`` returns
+    an ``on_frame`` closure wired into ``evaluate_benchmark(on_frame=...)``,
+    and ``stop`` flushes the in-memory buffers to MP4.
+    """
+
+    def _make_sim_with_camera(self, render_mode: str = "rtx_realtime"):
+        """An IsaacSimulation with a world + one RTX camera that renders
+        solid-colour frames, so the recorder has real frames to capture.
+        """
+        from strands_robots_sim.isaac.simulation import IsaacSimulation, _CameraState
+
+        sim = IsaacSimulation(render_mode=render_mode)
+        sim._world_created = True
+        sim._world = MagicMock()
+        handle = MagicMock(name="Camera_handle")
+        handle.get_rgba.return_value = np.full((48, 64, 4), 200, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((48, 64), 1.0, dtype=np.float32)
+        cs = _CameraState(name="image", prim_path="/World/Cameras/image", width=64, height=48)
+        cs.handle = handle
+        sim._cameras["image"] = cs
+        return sim
+
+    def test_start_without_world_errors(self):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.start_cameras_recording(cameras=["image"])
+        assert result["status"] == "error"
+        assert "No world created" in result["content"][0]["text"]
+
+    def test_start_unknown_camera_errors(self):
+        sim = self._make_sim_with_camera()
+        result = sim.start_cameras_recording(cameras=["ghost"])
+        assert result["status"] == "error"
+        assert "Camera(s) not found" in result["content"][0]["text"]
+
+    def test_start_no_cameras_errors(self):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        # No cameras added; cameras=None resolves to empty.
+        result = sim.start_cameras_recording()
+        assert result["status"] == "error"
+        assert "No cameras to record" in result["content"][0]["text"]
+
+    def test_start_returns_on_frame_closure(self):
+        sim = self._make_sim_with_camera()
+        result = sim.start_cameras_recording(cameras=["image"], name="tag")
+        assert result["status"] == "success"
+        json_block = next(c["json"] for c in result["content"] if "json" in c)
+        assert callable(json_block["on_frame"])
+        assert json_block["cameras"] == ["image"]
+        assert json_block["name"] == "tag"
+
+    def test_double_start_errors(self):
+        sim = self._make_sim_with_camera()
+        sim.start_cameras_recording(cameras=["image"], name="first")
+        result = sim.start_cameras_recording(cameras=["image"], name="second")
+        assert result["status"] == "error"
+        assert "Already recording 'first'" in result["content"][0]["text"]
+
+    def test_stop_without_recording_is_idempotent_success(self):
+        sim = self._make_sim_with_camera()
+        result = sim.stop_cameras_recording()
+        assert result["status"] == "success"
+        assert "Was not recording" in result["content"][0]["text"]
+
+    def test_full_cycle_writes_mp4(self, tmp_path):
+        """on_frame captures frames; stop encodes them to a real MP4 under
+        the MuJoCo-compatible ``{name}__{camera}.mp4`` filename.
+        """
+        import os
+
+        pytest.importorskip("imageio")
+        sim = self._make_sim_with_camera()
+        result = sim.start_cameras_recording(cameras=["image"], output_dir=str(tmp_path), name="rec1", fps=10)
+        on_frame = next(c["json"]["on_frame"] for c in result["content"] if "json" in c)
+
+        # Simulate the eval loop firing the per-step hook.
+        for step in range(5):
+            on_frame(step, {}, {})
+
+        stop = sim.stop_cameras_recording()
+        assert stop["status"] == "success"
+        artifacts = next(c["json"] for c in stop["content"] if "json" in c)["artifacts"]
+        assert len(artifacts) == 1
+        art = artifacts[0]
+        assert art["camera"] == "image"
+        assert art["frames"] == 5
+        assert art["errors"] == 0
+        # Filename convention matches MuJoCo: {name}__{camera}.mp4
+        expected = os.path.join(str(tmp_path), "rec1__image.mp4")
+        assert art["path"] == expected
+        assert os.path.exists(expected)
+        assert os.path.getsize(expected) > 0
+
+    def test_on_frame_after_stop_is_noop(self, tmp_path):
+        sim = self._make_sim_with_camera()
+        result = sim.start_cameras_recording(cameras=["image"], output_dir=str(tmp_path), name="rec2")
+        on_frame = next(c["json"]["on_frame"] for c in result["content"] if "json" in c)
+        on_frame(0, {}, {})
+        sim.stop_cameras_recording()
+        # Firing the stale closure after stop must not raise / re-capture.
+        on_frame(1, {}, {})  # no exception
+        assert sim._cams_rec_state is None
+
+    def test_render_error_counts_not_raises(self, tmp_path):
+        """A per-camera render failure increments the error counter rather
+        than aborting the whole eval.
+        """
+        pytest.importorskip("imageio")
+        sim = self._make_sim_with_camera()
+        sim._cameras["image"].handle.get_rgba.side_effect = RuntimeError("rtx hiccup")
+        result = sim.start_cameras_recording(cameras=["image"], output_dir=str(tmp_path), name="rec3")
+        on_frame = next(c["json"]["on_frame"] for c in result["content"] if "json" in c)
+        on_frame(0, {}, {})  # must not raise
+        stop = sim.stop_cameras_recording()
+        art = next(c["json"] for c in stop["content"] if "json" in c)["artifacts"][0]
+        assert art["frames"] == 0
+        assert art["errors"] == 1
+
+    def test_max_frames_cap_respected(self, tmp_path):
+        sim = self._make_sim_with_camera()
+        result = sim.start_cameras_recording(
+            cameras=["image"], output_dir=str(tmp_path), name="rec4", max_frames_per_camera=3
+        )
+        on_frame = next(c["json"]["on_frame"] for c in result["content"] if "json" in c)
+        for step in range(10):
+            on_frame(step, {}, {})
+        # Assert on the in-memory buffer (no imageio encode needed) so this
+        # cap test runs even on hosts without the MP4 encoder installed.
+        assert len(sim._cams_rec_state["buffers"]["image"]) == 3
+        sim.stop_cameras_recording()
+
+    def test_destroy_clears_recorder_state(self, tmp_path):
+        sim = self._make_sim_with_camera()
+        sim.start_cameras_recording(cameras=["image"], output_dir=str(tmp_path), name="rec5")
+        assert sim._cams_rec_state is not None
+        sim.destroy()
+        assert sim._cams_rec_state is None
