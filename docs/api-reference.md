@@ -104,12 +104,12 @@ IsaacSimulation(...) as sim:` works.
 ```python
 sim.add_robot(
     name: str,
-    *,
-    usd_path: str | None = None,
     urdf_path: str | None = None,
-    position: list[float] | None = None,
+    mjcf_path: str | None = None,
+    usd_path: str | None = None,
     data_config: str | None = None,
-    **kwargs,
+    position: list[float] | None = None,
+    orientation: list[float] | None = None,    # quaternion [w, x, y, z]
 ) -> dict
 
 sim.remove_robot(name: str) -> dict
@@ -130,14 +130,12 @@ sim.add_object(
 sim.remove_object(name: str) -> dict
 
 sim.add_camera(
-    name: str,
-    *,
-    position: list[float],
+    name: str = "default",
+    position: list[float] | None = None,    # default [2.0, 2.0, 2.0]
     target: list[float] | None = None,
     width: int | None = None,
     height: int | None = None,
-    horizontal_aperture_mm: float | None = None,
-    focal_length_mm: float | None = None,
+    fov: float = 60.0,                       # horizontal FOV in degrees
 ) -> dict
 ```
 
@@ -191,15 +189,15 @@ All three return the same dataclass shape:
 @dataclass
 class ProceduralRobot:
     name: str
-    bodies: list[Body]
-    joints: list[Joint]
-    base_link: str
+    bodies: list[BodyDef]
+    joints: list[JointDef]
+    base_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
-    def num_joints(self) -> int: ...
+    def num_joints(self) -> int: ...        # count of non-fixed joints
 
     @property
-    def joint_names(self) -> list[str]: ...
+    def joint_names(self) -> list[str]: ... # names of non-fixed joints
 ```
 
 Failure semantics are uniform across loaders:
@@ -219,32 +217,50 @@ upstream LIBERO adapter consumes (`panda` / `iiwa` / `kinova3` / `jaco` /
 ```python
 from strands_robots_sim.isaac.procedural import (
     ProceduralRobot,
-    build_so100,
-    build_panda,
-    build_unitree_g1,
+    BodyDef,
+    JointDef,
+    get_procedural_robot,                    # get_procedural_robot(name) -> ProceduralRobot | None
+    list_procedural_robots,                  # list_procedural_robots() -> ["so100", "panda", "unitree_g1"]
     _validate_kinematic_tree,                # public-ish: used by tests
 )
 ```
 
-The builders construct `ProceduralRobot` instances without any asset
-files. `_validate_kinematic_tree(robot)` raises `ValueError` if the joint
-graph has a duplicate `(parent_body, child_body)` edge — the validator
-runs at every builder's construction, fail-first.
+`get_procedural_robot(name)` looks up a `ProceduralRobot` by name or alias
+(`so100` / `panda` / `unitree_g1`, plus aliases like `g1`, `franka`),
+returning `None` if unknown. `list_procedural_robots()` returns the
+canonical names. There are no `build_*` functions on the public surface —
+the per-robot constructors (`_build_so100` etc.) are private; go through
+`get_procedural_robot`. Each builds a `ProceduralRobot` instance without
+any asset files. `_validate_kinematic_tree(robot)` raises `ValueError` if
+the joint graph has a duplicate `(parent_body, child_body)` edge — the
+validator runs at every builder's construction, fail-first.
 
 ## `_install.py` constants
 
 ```python
 from strands_robots_sim.isaac._install import (
-    DOCKER_IMAGE_TAG,                       # "nvcr.io/nvidia/isaac-sim:6.0"
-    OMNIVERSE_LAUNCHER_HINT,
-    ISAAC_LAB_BOOTSTRAP_HINT,
-    INSTALL_HELP,                           # full multiline help string
+    ISAAC_SIM_MIN_VERSION,                  # "6.0"
+    ISAAC_SIM_DOCKER_IMAGE,                 # "nvcr.io/nvidia/isaac-sim:6.0"
+    ISAAC_LAB_BOOTSTRAP,                    # "git clone IsaacLab && ./isaaclab.sh -i"
+    PIP_EXTRA,                              # "pip install 'strands-robots-sim[isaac]'"
+)
+```
+
+Plus the helpers that compose these into user-facing strings:
+
+```python
+from strands_robots_sim.isaac._install import (
+    install_options_block,                  # multi-line bullet block of install paths
+    install_options_inline,                 # one-line variant
+    not_importable_reason,                  # full reason string for is_available()
+    not_available_import_error,             # ImportError message at runtime
 )
 ```
 
 These are the single source of truth for the `is_available()` reason
 string and any `ImportError` rendered to the user. Updating Isaac Sim
-versions = update one constant.
+versions = update one constant (`ISAAC_SIM_DOCKER_IMAGE` /
+`ISAAC_SIM_MIN_VERSION`).
 
 ## Entry-point registration
 
