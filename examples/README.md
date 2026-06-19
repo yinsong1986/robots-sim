@@ -58,6 +58,44 @@ canonical mujoco baseline number for the matrix table is the
 `--policy=groot` measurement of `libero/run_mujoco.py`** against the
 `libero_spatial/` sub-checkpoint.
 
+### `--policy groot` prerequisites & gotchas
+
+Running `--policy groot` end-to-end (real GR00T-N1.7 VLA, served via
+the `nvcr.io/nvidia/isaac-gr00t` container) reaches `success_rate=1.00`
+on e.g. `libero-10/SCENE5` for both `run_mujoco.py` and
+`run_mujoco_agent.py`. A few setup gotchas trip up first-time runs;
+each fails *loudly* except the last, which silently zeroes the score:
+
+- **Checkpoint dir must live outside `/home`.** `gr00t_inference`
+  refuses to bind-mount any path under `/home` (a "protected host path"
+  mount guard), so a checkpoint cache there aborts `start_container`
+  with `refusing to mount … under protected host path '/home'`. Both
+  example drivers now **default to a non-`/home` cache**
+  (`$XDG_CACHE_HOME/strands_robots/checkpoints` when it's outside
+  `/home`, else `/tmp/strands_robots/checkpoints`), so the OOTB run just
+  works ([#125](https://github.com/strands-labs/robots-sim/issues/125),
+  fixed in [#126](https://github.com/strands-labs/robots-sim/pull/126)).
+  If you *override* `--checkpoint-dir` (or `$STRANDS_ROBOTS_CHECKPOINT_DIR`)
+  with a `/home` path you'll hit the guard again — point it at a
+  non-`/home` path such as `--checkpoint-dir /tmp/groot-ck`.
+- **`pyzmq` is required** for the GR00T ZMQ client. Without it the eval
+  fails *after* the model loads with
+  `ImportError: 'zmq' is required for GR00T service inference`. If your
+  GR00T policy extra doesn't pull it in, `pip install pyzmq`.
+- **`numba` + `coverage>=7` silently zeroes `success_rate`.** When both
+  are installed in the eval environment, `import numba` fails
+  (`numba/misc/coverage_support.py` subclasses the removed
+  `coverage.types.Tracer`). That makes the LIBERO adapter's OSC
+  controller fail to install, so **GR00T actions silently no-op and
+  `success_rate=0`** with only a buried `WARNING` — easy to misread as a
+  bad policy. Uninstall the conflicting `coverage` (or pin
+  `coverage<7`) and the same run returns `success_rate=1.00`. The
+  silent-degrade behaviour is tracked upstream at
+  [`strands-labs/robots#522`](https://github.com/strands-labs/robots/issues/522).
+
+See [docs/troubleshooting.md](../docs/troubleshooting.md#-policy-groot-eval-failures)
+for the exact error strings and one-line fixes.
+
 ## Backend matrix
 
 Same task — `libero-spatial-pick_up_the_red_cube`, 10 episodes, seed
