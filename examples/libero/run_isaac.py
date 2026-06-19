@@ -176,6 +176,31 @@ def _suite_for_task(task: str) -> str:
     return f"libero_{parts[1]}"
 
 
+def _configure_gr00t_image(image: str) -> None:
+    """Point ``gr00t_inference`` at *image* via operator env config.
+
+    In ``strands-robots>=0.4.0`` the GR00T docker image is no longer a
+    ``gr00t_inference`` kwarg — it's operator-configured through the
+    ``STRANDS_GR00T_IMAGE`` env var and validated against
+    ``STRANDS_GR00T_IMAGE_ALLOW`` (defaults: ``gr00t:*`` and
+    ``nvcr.io/nvidia/isaac-gr00t:*``). This sets the env var to the
+    requested ``--image`` and, when the image doesn't already match the
+    allowlist, appends it so resolution doesn't fail closed.
+    """
+    os.environ["STRANDS_GR00T_IMAGE"] = image
+    allow = os.environ.get("STRANDS_GR00T_IMAGE_ALLOW", "")
+    patterns = [p.strip() for p in allow.split(",") if p.strip()]
+    default_allow = ("gr00t:", "nvcr.io/nvidia/isaac-gr00t:")
+    already_allowed = (
+        image in patterns
+        or any(image.startswith(prefix) for prefix in default_allow)
+        or any(p.endswith("*") and image.startswith(p[:-1]) for p in patterns)
+    )
+    if not already_allowed:
+        patterns.append(image)
+        os.environ["STRANDS_GR00T_IMAGE_ALLOW"] = ",".join(patterns)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Mirror :func:`run_mujoco.main`'s parser surface.
 
@@ -226,7 +251,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--image",
         default="gr00t:latest",
-        help="(--auto-server only) Docker image tag of the GR00T container.",
+        help="(--auto-server only) Docker image tag of the GR00T container. "
+        "In strands-robots>=0.4.0 the image is operator-configured via the "
+        "STRANDS_GR00T_IMAGE env var (validated against STRANDS_GR00T_IMAGE_ALLOW); "
+        "this flag sets that env var (and extends the allowlist if needed) before "
+        "calling `gr00t_inference`.",
     )
     p.add_argument(
         "--container",
@@ -286,11 +315,12 @@ def _orchestrate_groot_server(args: argparse.Namespace, suite: str) -> dict | No
 
     from strands_robots.tools import gr00t_inference
 
+    _configure_gr00t_image(args.image)
+
     hf_token = _resolve_hf_token()
     result = gr00t_inference(
         action="lifecycle",
         lifecycle="full",
-        image_name=args.image,
         hf_repo="nvidia/GR00T-N1.7-LIBERO",
         hf_subfolder=suite,
         hf_local_dir=args.checkpoint_dir,
@@ -307,12 +337,14 @@ def _orchestrate_groot_server(args: argparse.Namespace, suite: str) -> dict | No
     print(f"[setup] {result.get('message')}")
 
     # Wait for model load. Same heuristic as run_mujoco.py: GR00T-N1.7
-    # is ~6 GB on the L4; cross 10 GiB GPU mem to consider it loaded.
+    # loads to ~6.3 GB on the L4; gate at 4 GiB so the check fires once the
+    # model is resident (the old 10 GiB gate never tripped — the model
+    # footprint is below it — so --auto-server always timed out at 180 s).
     import subprocess
     from time import monotonic, sleep
 
     deadline = monotonic() + 180
-    loaded_threshold_mib = 10_000
+    loaded_threshold_mib = 4_000
     while monotonic() < deadline:
         try:
             used = int(
