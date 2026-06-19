@@ -431,6 +431,56 @@ class TestIsaacSimulationContract:
         )
 
 
+class TestLoadSceneFailFast:
+    """Tests for IsaacSimulation.load_scene deferred fail-fast (#116).
+
+    Full LIBERO/BDDL -> USD scene realization on the Isaac backend is
+    deferred; until it lands, ``load_scene`` must fail fast with a clear,
+    structured error so ``LiberoAdapter.on_episode_start`` (which calls
+    ``sim.load_scene(...)``) surfaces a descriptive abort instead of the
+    opaque ``NotImplementedError`` from the base ``SimEngine`` stub.
+    """
+
+    def test_load_scene_returns_error_envelope(self):
+        """load_scene returns a structured error (not a raise / NotImplemented)."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        result = sim.load_scene("/tmp/some_libero_scene.xml")
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+
+    def test_load_scene_message_is_descriptive(self):
+        """Error text names the gap, the issue, and the workarounds."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        text = sim.load_scene("/tmp/some_libero_scene.xml")["content"][0]["text"]
+        # Names the unimplemented method + the tracking issue so the abort
+        # is traceable, and echoes the requested path for debuggability.
+        assert "load_scene" in text
+        assert "#116" in text
+        assert "/tmp/some_libero_scene.xml" in text
+        # Points at the supported alternatives (MuJoCo driver / manual
+        # Isaac quickstart) rather than leaving the caller stuck.
+        assert "run_mujoco.py" in text
+
+    def test_load_scene_does_not_raise_notimplemented(self):
+        """The base SimEngine stub raises NotImplementedError; the override must not."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        # Must not propagate the base-class NotImplementedError.
+        result = sim.load_scene("scene.xml")
+        assert result["status"] == "error"
+
+    def test_load_scene_overrides_base_stub(self):
+        """IsaacSimulation defines its own load_scene (not the inherited stub)."""
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        assert "load_scene" in IsaacSimulation.__dict__
+
+
 class TestProceduralRobots:
     """Tests for procedural robot definitions."""
 

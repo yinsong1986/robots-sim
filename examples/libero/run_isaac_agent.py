@@ -22,12 +22,26 @@ working on both. The script
 runs past ``IsaacSimulation.is_available`` → ``create_world`` →
 ``add_robot`` (real Franka USD over the Omniverse CDN) → ``add_camera``,
 and the agent invokes ``evaluate_isaac_benchmark`` on a one-tool
-surface. ``evaluate_benchmark`` additionally depends on the LIBERO
-benchmark suite being importable inside Isaac's bundled Python
-(``strands-robots`` interpreter constraint -- see
-`#71 <https://github.com/strands-labs/robots-sim/issues/71>`_); on a
-host without that wired up, the agent's tool call surfaces the
-``ImportError`` in its summary rather than crashing the process.
+surface.
+
+LIBERO benchmark on Isaac is NOT yet runnable end-to-end
+--------------------------------------------------------
+The agent's ``evaluate_isaac_benchmark`` tool call routes through the
+same ``IsaacSimulation.evaluate_benchmark`` path as ``run_isaac.py``,
+so it hits the same blocker: ``LiberoAdapter.on_episode_start`` calls
+``sim.load_scene(...)`` and ``IsaacSimulation.load_scene`` is not yet
+implemented (BDDL/MJCF -> USD scene realization is the substantive
+remaining work for LIBERO-on-Isaac -- tracked in
+`#116 <https://github.com/strands-labs/robots-sim/issues/116>`_). The
+eval aborts at episode 0; the agent surfaces the ``load_scene``
+fail-fast message in its summary, and this script **exits non-zero**
+(the ``__main__`` guard forces ``os._exit(1)`` so Isaac's
+SimulationApp fast-shutdown can't swallow the failure into exit 0).
+Use ``examples/libero/run_mujoco_agent.py`` for an end-to-end LIBERO
+agent demo today, or drive the Isaac backend directly via the manual
+``create_world`` -> ``add_robot`` -> ``add_object`` -> ``add_camera``
+-> ``step`` -> ``render`` quickstart in ``docs/index.md`` (which works
+end-to-end on Isaac Sim 6.0).
 
 The earlier ``--policy=groot`` ``success_rate=0.0`` warning predates
 PRs `#61 <https://github.com/strands-labs/robots-sim/pull/61>`_ /
@@ -175,6 +189,16 @@ _sim: IsaacSimulation | None = None
 # call. See strands-labs/robots#191 for the closure-vs-tool-boundary
 # rationale on the MuJoCo side.
 _on_frame: Any = None
+
+# Module-level capture of the last ``evaluate_isaac_benchmark`` result
+# envelope. The agent consumes the tool's dict and folds it into a
+# natural-language summary, so ``main()`` can't see the raw
+# ``{"status": ...}`` directly. Stashing it here lets ``main()``
+# deterministically fail-fast (non-zero exit) when the eval errored --
+# e.g. the current ``IsaacSimulation.load_scene`` fail-fast that aborts
+# the LIBERO benchmark at episode 0 (#116). Without this, the agent
+# would happily summarise the failure and the script would still exit 0.
+_last_eval_result: dict[str, Any] | None = None
 
 
 def _date_dir(date_root: str = "rollouts") -> str:
@@ -341,7 +365,7 @@ def evaluate_isaac_benchmark(
             "status": "error",
             "content": [{"text": "evaluate_isaac_benchmark: _sim is not initialised. main() must run first."}],
         }
-    return _sim.evaluate_benchmark(
+    result = _sim.evaluate_benchmark(
         benchmark_name=benchmark_name,
         n_episodes=n_episodes,
         seed=seed,
@@ -353,6 +377,11 @@ def evaluate_isaac_benchmark(
         # this is a no-op for callers that don't want video.
         on_frame=_on_frame,
     )
+    # Stash the raw envelope so main() can fail-fast on an eval error
+    # the agent would otherwise only mention in prose (#116).
+    global _last_eval_result
+    _last_eval_result = result
+    return result
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -515,7 +544,8 @@ def _resolve_robot_asset(args: argparse.Namespace) -> "tuple[str | None, str | N
 
 
 def main() -> None:
-    global _sim, _on_frame
+    global _sim, _on_frame, _last_eval_result
+    _last_eval_result = None
 
     args = _build_parser().parse_args()
     if args.robot_usd is not None and args.robot_urdf is not None:
@@ -659,6 +689,21 @@ def main() -> None:
         wall_time = time.time() - t0
         print(result)
 
+        # Fail-fast (non-zero exit) if the agent's eval tool call errored.
+        # The agent only summarises the failure in prose; main() inspects
+        # the raw envelope the tool stashed so a blocked LIBERO-on-Isaac
+        # eval (e.g. the IsaacSimulation.load_scene fail-fast, #116) is
+        # visible to the exit status / CI rather than swallowed into the
+        # agent's natural-language report + a misleading exit 0.
+        if _last_eval_result is None:
+            raise RuntimeError(
+                "Agent did not invoke evaluate_isaac_benchmark (no eval result captured). "
+                "Expected exactly one tool call; check the agent transcript above."
+            )
+        if _last_eval_result.get("status") != "success":
+            err_text = (_last_eval_result.get("content") or [{}])[0].get("text", "")
+            raise RuntimeError(f"evaluate_isaac_benchmark failed: {err_text}")
+
         # Echo the CLI-requested task (replayable) plus the resolved one.
         print(
             f"[agent-eval] policy={args.policy} task={requested_task} "
@@ -677,4 +722,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Force a non-zero exit on failure even when Isaac Sim's SimulationApp
+    # fast-shutdown has registered an atexit/_exit hook that would
+    # otherwise swallow the interpreter's normal non-zero status into a
+    # misleading exit 0 (#116 secondary). ``os._exit(1)`` bypasses atexit
+    # handlers (including SimulationApp's), so a failed eval -- e.g. the
+    # current ``IsaacSimulation.load_scene`` fail-fast that aborts the
+    # LIBERO benchmark at episode 0 -- is visible to the exit status / CI.
+    import sys
+    import traceback
+
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: BLE001 - top-level: log + force non-zero exit
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
