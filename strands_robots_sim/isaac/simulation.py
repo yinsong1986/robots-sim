@@ -173,6 +173,39 @@ logger = logging.getLogger(__name__)
 # A unit test pins this mapping so docs and code can't drift apart again.
 _SHAPE_ALIASES: dict[str, str] = {"cuboid": "box"}
 
+
+def _rgb_png_block(rgb: "np.ndarray") -> dict[str, Any] | None:
+    """Encode an RGB ndarray as a render ``content[].image`` PNG block.
+
+    Mirrors the MuJoCo backend's emission: raw PNG bytes in
+    ``source.bytes`` (NOT base64 -- the Bedrock Converse API base64-encodes
+    on the wire and rejects a pre-encoded string with "Could not process
+    image"). Emitting this block on every ``render()`` success path makes
+    the Isaac frame transport match MuJoCo so the shared
+    ``PolicyRunner._extract_frame_ndarray`` (which decodes ``content[].image``
+    only) can pull frames for video recording (#127).
+
+    Returns ``None`` if PIL is unavailable or encoding fails, so
+    ``render()`` degrades to the legacy rgb-only envelope rather than
+    raising -- same lazy-PIL discipline as ``_resize_rgb`` (PIL stays out
+    of module import; Isaac's bundled python may lack it).
+    """
+    try:
+        import io
+
+        from PIL import Image  # lazy: keep heavy import out of module load
+
+        arr = np.asarray(rgb)[..., :3].astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        return {"image": {"format": "png", "source": {"bytes": buf.getvalue()}}}
+    except (ImportError, ValueError, OSError, TypeError, AttributeError) as e:
+        # PIL absent (ImportError) or encode failure -- never let frame
+        # telemetry break render; mirrors the render() except-clause shape.
+        logger.warning("render: PNG frame encode failed (%s); content[].image omitted", e)
+        return None
+
+
 # Module-level singleton tracking for SimulationApp
 _SIMULATION_APP: Any = None
 _SIMULATION_APP_LOCK = threading.Lock()
@@ -2010,6 +2043,14 @@ class IsaacSimulation(SimEngine):
             also carries a ``json`` block with the resolved camera
             ``resolution``, ``prim_path``, and the boolean ``rtx`` flag
             so an agent can route on the path without parsing text.
+
+            Every success path also appends a
+            ``{"image": {"format": "png", "source": {"bytes": <raw PNG>}}}``
+            content block (raw PNG bytes, matching the MuJoCo backend)
+            so the shared ``PolicyRunner._extract_frame_ndarray`` can pull
+            frames for video recording (#127). The block is omitted (and a
+            warning logged) if PIL is unavailable; ``rgb``/``depth`` are
+            unaffected.
         """
         with self._lock:
             if not self._world_created:
@@ -2018,25 +2059,42 @@ class IsaacSimulation(SimEngine):
             w = width or self._config.camera_width
             h = height or self._config.camera_height
 
+            def _finish(env: dict[str, Any]) -> dict[str, Any]:
+                # Attach a content[].image PNG block mirroring the MuJoCo
+                # backend so the shared PolicyRunner._extract_frame_ndarray
+                # can pull frames for video recording (#127). rgb/depth stay
+                # top-level for direct numeric consumers (e.g. isaac_gs).
+                # The error path carries no rgb, so this is a no-op there.
+                rgb_arr = env.get("rgb")
+                if rgb_arr is not None:
+                    block = _rgb_png_block(rgb_arr)
+                    if block is not None:
+                        env.setdefault("content", []).append(block)
+                return env
+
             if self._config.render_mode == "headless":
                 # Return blank frames in headless mode. Most CI flows
                 # land here; Isaac's RTX path-tracer is unavailable.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                    "depth": np.zeros((h, w), dtype=np.float32),
-                    "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                        "depth": np.zeros((h, w), dtype=np.float32),
+                        "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
+                    }
+                )
 
             if camera_name not in self._cameras:
                 # No camera configured — return blank. Caller probably
                 # forgot to call add_camera or typo'd the name.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                    "depth": np.zeros((h, w), dtype=np.float32),
-                    "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                        "depth": np.zeros((h, w), dtype=np.float32),
+                        "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
+                    }
+                )
 
             cam = self._cameras[camera_name]
 
@@ -2046,12 +2104,16 @@ class IsaacSimulation(SimEngine):
                 # registered resolution rather than the method's
                 # ``width`` / ``height`` arguments, since the camera's
                 # resolution is what the caller asked for at add_camera.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
-                    "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
-                    "content": [{"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
+                        "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
+                        "content": [
+                            {"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}
+                        ],
+                    }
+                )
 
             # Phase-2 RTX path: pull real frames from the Camera handle.
             try:
@@ -2116,17 +2178,19 @@ class IsaacSimulation(SimEngine):
                 "resolution": [int(rgb.shape[1]), int(rgb.shape[0])],
                 "render_mode": self._config.render_mode,
             }
-            return {
-                "status": "success",
-                "rgb": rgb,
-                "depth": depth,
-                "content": [
-                    {
-                        "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
-                        "json": render_info,
-                    }
-                ],
-            }
+            return _finish(
+                {
+                    "status": "success",
+                    "rgb": rgb,
+                    "depth": depth,
+                    "content": [
+                        {
+                            "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
+                            "json": render_info,
+                        }
+                    ],
+                }
+            )
 
     def add_camera(
         self,

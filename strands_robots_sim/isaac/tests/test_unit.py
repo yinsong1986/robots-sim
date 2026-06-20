@@ -1645,6 +1645,121 @@ class TestRenderFramePathPhase2:
         assert result["status"] == "error"
         assert "annotator not bound" in result["content"][0]["text"]
 
+    # --- #127: render() must emit a content[].image PNG block on every
+    # success path so the shared PolicyRunner._extract_frame_ndarray (which
+    # decodes content[].image only, like the MuJoCo backend) can pull frames
+    # for video recording. Before this, Isaac emitted only top-level rgb/depth
+    # and run_policy(video=) captured zero frames. These run GPU-free.
+
+    @staticmethod
+    def _image_blocks(result: dict) -> list:
+        return [b for b in result.get("content", []) if isinstance(b, dict) and "image" in b]
+
+    def test_headless_render_emits_decodable_png_block(self) -> None:
+        """Headless path (the common CI/GR00T path) now carries a decodable
+        content[].image PNG block alongside the legacy top-level rgb/depth.
+        """
+        pytest.importorskip("PIL")
+        sim = self._make_sim(render_mode="headless")
+        result = sim.render(width=16, height=8)
+
+        assert result["status"] == "success"
+        # Legacy top-level keys preserved for direct numeric consumers.
+        assert result["rgb"].shape == (8, 16, 3)
+        assert result["depth"].shape == (8, 16)
+
+        blocks = self._image_blocks(result)
+        assert len(blocks) == 1
+        src_bytes = blocks[0]["image"]["source"]["bytes"]
+        # Raw PNG bytes (NOT base64 str): the Converse API base64-encodes on
+        # the wire and rejects a pre-encoded string. Matches MuJoCo backend.
+        assert isinstance(src_bytes, (bytes, bytearray))
+        assert blocks[0]["image"]["format"] == "png"
+
+        import io
+
+        from PIL import Image
+
+        arr = np.asarray(Image.open(io.BytesIO(src_bytes)).convert("RGB"))
+        assert arr.shape == (8, 16, 3)
+
+    def test_no_camera_render_emits_png_block(self) -> None:
+        """The no-camera blank path also emits a decodable image block."""
+        pytest.importorskip("PIL")
+        sim = self._make_sim(render_mode="rtx_realtime")
+        result = sim.render("ghost", width=16, height=8)
+        assert result["status"] == "success"
+        assert len(self._image_blocks(result)) == 1
+
+    def test_phase1_camera_render_emits_png_block(self) -> None:
+        """The Phase-1 (handle=None) blank path also emits an image block."""
+        pytest.importorskip("PIL")
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        sim._cameras["legacy"] = _CameraState(name="legacy", prim_path="/World/Cameras/legacy", width=20, height=10)
+        result = sim.render("legacy")
+        assert result["status"] == "success"
+        assert len(self._image_blocks(result)) == 1
+
+    def test_rtx_render_emits_png_block_and_preserves_json(self) -> None:
+        """The RTX real-frame path appends the image block WITHOUT clobbering
+        the existing text/json block (which downstream agents read at
+        content[0]).
+        """
+        pytest.importorskip("PIL")
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim(render_mode="rtx_realtime")
+        handle = MagicMock()
+        handle.get_rgba.return_value = np.full((10, 20, 4), 200, dtype=np.uint8)
+        handle.get_depth.return_value = np.full((10, 20), 1.0, dtype=np.float32)
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=20, height=10)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "success"
+        # The text/json block stays at content[0] (agents route on it).
+        assert result["content"][0]["json"]["rtx"] is True
+        # The image block is appended.
+        assert len(self._image_blocks(result)) == 1
+
+    def test_error_render_carries_no_image_block(self) -> None:
+        """The error path has no rgb, so no image block is attached."""
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        handle.get_rgba.side_effect = RuntimeError("not stepped")
+        cs = _CameraState(name="front", prim_path="/World/Cameras/front", width=20, height=10)
+        cs.handle = handle
+        sim._cameras["front"] = cs
+
+        result = sim.render("front")
+        assert result["status"] == "error"
+        assert self._image_blocks(result) == []
+
+    def test_render_block_round_trips_through_policy_runner(self) -> None:
+        """End-to-end contract: the block Isaac emits is decodable by the
+        SHARED consumer PolicyRunner._extract_frame_ndarray (robots repo),
+        which is the actual code path run_policy(video=) uses. This is the
+        regression that #127 broke (it returned None on every Isaac frame).
+        """
+        pytest.importorskip("PIL")
+        try:
+            from strands_robots.simulation.policy_runner import (
+                _extract_frame_ndarray,
+            )
+        except ImportError:
+            pytest.skip("strands_robots not importable in this environment")
+
+        sim = self._make_sim(render_mode="headless")
+        result = sim.render(width=16, height=8)
+        frame = _extract_frame_ndarray(result)
+        assert frame is not None
+        assert frame.shape == (8, 16, 3)
+
 
 def _patched_isaac_camera_modules() -> "tuple[MagicMock, MagicMock, MagicMock, MagicMock]":
     """Build MagicMocks for the three lazy-imported camera modules.
