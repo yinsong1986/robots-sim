@@ -160,8 +160,17 @@ class PrecomputedPlanner:
         # Sanity-check the plan targets the scene we're about to execute (so a
         # stale file isn't replayed against a moved cube). Tolerate small float
         # drift; only error on a real mismatch.
+        #
+        # Only the PICK (cube_xy) is validated. The place_xy in the plan is a
+        # *control target*, not the bin's location: the 5-DOF arm can't reach the
+        # full fingertip-TCP place pose, so the place segment falls back to a
+        # heuristic interpolation that systematically lands the carried cube
+        # ~10 cm in +X of the commanded target. The offline plan therefore aims
+        # the place target OFF the bin (e.g. x=0.02 to land the cube on a bin at
+        # x=0.12) to compensate. Validating place_xy against the scene's bin
+        # position would wrongly reject this intentional offset, so skip it.
         pf = d.get("plan_for") or {}
-        for label, want, key in (("cube", cube_xy, "cube_xy"), ("place", place_xy, "place_xy")):
+        for label, want, key in (("cube", cube_xy, "cube_xy"),):
             have = pf.get(key)
             if want is not None and have is not None:
                 if max(abs(float(a) - float(b)) for a, b in zip(want[:2], have[:2])) > 1e-3:
@@ -172,6 +181,27 @@ class PrecomputedPlanner:
         phases = list(d.get("phases") or [""] * len(wps))
         if len(phases) < len(wps):
             phases += [phases[-1] if phases else ""] * (len(wps) - len(phases))
+        # Deepen the gripper CLAMP on the gripping phases. The offline plan closes
+        # to gripper_close (~-0.15), which on the force-driven Isaac arm leaves the
+        # grip *marginal* -- it holds the cube on some PhysX contact rolls and
+        # slips on others (non-deterministic max-lift z), so a 5-episode batch
+        # scores ~0-20% even though a single run can succeed. Driving the gripper
+        # target to the joint's hard min (~-0.174) squeezes the jaws fully closed,
+        # generating consistent normal force so the friction grip holds every
+        # episode. Tunable via SO101_GRIP_CLOSE; applied only to the closed
+        # phases (close/lift/place/place_down) so reach/grasp still open to clear
+        # the cube on descent.
+        grip_jn = gripper_joint or (list(d.get("joint_names") or joint_names) or [None])[-1]
+        try:
+            deep_close = float(os.environ.get("SO101_GRIP_CLOSE", "-0.174"))
+        except ValueError:
+            deep_close = -0.174
+        if grip_jn is not None:
+            closed_phases = {"close", "lift", "place", "place_down"}
+            for wp, ph in zip(wps, phases):
+                if ph in closed_phases and grip_jn in wp:
+                    # Only deepen (never weaken) the existing closed target.
+                    wp[grip_jn] = min(float(wp[grip_jn]), deep_close)
         return JointTrajectory(
             joint_names=list(d.get("joint_names") or joint_names),
             waypoints=wps,
@@ -318,6 +348,8 @@ class CuroboMotionPlanner:
         top_down_attempts: int = 6,
         gripper_open: float = 0.3,
         gripper_close: float = -0.15,
+        grasp_z: float = 0.05,
+        fingertip_offset: Optional[Sequence[float]] = None,
         **_ignored,
     ):
         import os
@@ -361,6 +393,18 @@ class CuroboMotionPlanner:
         # (Values are approximate; fine-tune against a render of the grip.)
         self.gripper_open = gripper_open
         self.gripper_close = gripper_close
+        self.grasp_z_cfg = float(grasp_z)
+        # TCP (fingertip) offset expressed in the cuRobo tool frame
+        # (gripper_frame_link). The SO-101 URDF's gripper_frame_link is the
+        # "graspframe" ~6 cm BEHIND the fingertips along its -Z axis (plus a small
+        # -X for the one-fixed-one-moving jaw asymmetry); the actual fingertip TCP
+        # (where a grasped object sits) is here. cuRobo's GoalToolPose drives the
+        # *tool frame* to the goal, so to put the FINGERTIPS on the target we
+        # offset the goal by R_goal @ tcp_offset (the tool-local offset rotated
+        # into the world). Measured from the jaw geoms; matches the ggando.com
+        # SO-101 blog's gripperframe-vs-graspframe distinction.
+        self.tcp_offset = [0.0, 0.0, -0.04]
+        self.fingertip_offset = list(fingertip_offset) if fingertip_offset else [0.0, 0.0, 0.0]
         self._planner = None
         self._arm_joint_names: List[str] = []
         self._default_quat: Optional[List[float]] = None
@@ -442,15 +486,61 @@ class CuroboMotionPlanner:
             self._default_quat,
         )
 
-    def _plan_segment(self, start_arm_q, goal_xyz, goal_quat, orient: bool = False) -> List[List[float]]:
+    @staticmethod
+    def _rotate_by_quat(v, q_wxyz):
+        """Rotate 3-vector ``v`` by unit quaternion ``q`` (w, x, y, z)."""
+        w, x, y, z = q_wxyz
+        vx, vy, vz = v
+        tx = 2.0 * (y * vz - z * vy)
+        ty = 2.0 * (z * vx - x * vz)
+        tz = 2.0 * (x * vy - y * vx)
+        return [
+            vx + w * tx + (y * tz - z * ty),
+            vy + w * ty + (z * tx - x * tz),
+            vz + w * tz + (x * ty - y * tx),
+        ]
+
+    def _heuristic_place_arm(self, cur_arm, place_xy, home_arm) -> List[float]:
+        """A best-effort joint-space place pose when cuRobo can't solve the bin.
+
+        Pan the base (joint 0) to face the bin XY and partly retract the
+        shoulder/elbow toward home so the carried cube is lifted clear of the
+        ground and brought OVER the bin (pure base-pan kept the arm folded low,
+        dragging/flinging the cube). Blended modestly to avoid a big posture jump.
+        Used only as a graceful continuation of the real cuRobo pick so the whole
+        episode isn't thrown to the scripted fallback.
+        """
+        import math
+
+        out = list(cur_arm)
+        if len(out) >= 1 and place_xy:
+            out[0] = float(math.atan2(place_xy[1], place_xy[0]))
+        # Retract shoulder (j1) and elbow (j2) partway toward home so the held
+        # cube rises and the arm reaches outward over the bin rather than staying
+        # folded over the pick spot.
+        for j in (1, 2):
+            if len(out) > j and j < len(home_arm):
+                out[j] = 0.65 * home_arm[j] + 0.35 * out[j]
+        return out
+
+    def _plan_segment(self, start_arm_q, goal_xyz, goal_quat, orient: bool = False, apply_tcp: bool = True) -> List[List[float]]:
         import torch
         from curobo.types import GoalToolPose, JointState, ToolPoseCriteria
-
         jn = self._arm_joint_names
         start = JointState.from_position(
             torch.tensor([start_arm_q], dtype=torch.float32, device=self.device), joint_names=jn
         )
-        pos = torch.tensor(goal_xyz, dtype=torch.float32, device=self.device).reshape(1, 1, 1, 1, 3)
+        # Offset the goal so the FINGERTIP TCP (not the gripper_frame_link origin,
+        # which sits ~6 cm behind the fingers) lands at goal_xyz. The tool-local
+        # tcp_offset is rotated by the goal orientation into the world and
+        # subtracted: tool_goal = goal - R(goal_quat) @ tcp_offset. This makes
+        # reach/grasp/lift/place all track the fingertips consistently (the
+        # gripperframe-vs-graspframe fix from the SO-101 RL blog).
+        gx = list(goal_xyz)
+        if apply_tcp and any(self.tcp_offset):
+            world_off = self._rotate_by_quat(self.tcp_offset, goal_quat)
+            gx = [goal_xyz[i] - world_off[i] for i in range(3)]
+        pos = torch.tensor(gx, dtype=torch.float32, device=self.device).reshape(1, 1, 1, 1, 3)
         quat = torch.tensor(goal_quat, dtype=torch.float32, device=self.device).reshape(1, 1, 1, 1, 4)
         goal = GoalToolPose(tool_frames=[self.tool_frame], position=pos, quaternion=quat)
 
@@ -528,7 +618,7 @@ class CuroboMotionPlanner:
         place_xy: Optional[Sequence[float]] = None,
         table_z: float = 0.0,
         approach: float = 0.12,
-        grasp_z: float = 0.05,
+        grasp_z: Optional[float] = None,
         hold_steps: int = 5,
         **_ignored,
     ) -> JointTrajectory:
@@ -540,6 +630,8 @@ class CuroboMotionPlanner:
         segment is unreachable.
         """
         self._ensure()
+        if grasp_z is None:
+            grasp_z = self.grasp_z_cfg
         jn = list(joint_names)
         n_arm = len(self._arm_joint_names)
         if len(jn) < n_arm:
@@ -556,6 +648,7 @@ class CuroboMotionPlanner:
         waypoints: List[Dict[str, float]] = []
         phases: List[str] = []
         cur_arm = start_arm
+        cur_grip = OPEN  # current gripper target; ramped on in-place close/release
 
         def emit(arm_q, gripval, phase):
             wp = dict(home)
@@ -573,24 +666,74 @@ class CuroboMotionPlanner:
         #  bin, so forcing a finger-down lift leaves the place segment unreachable
         #  ("start state in collision"). Freeing the lift orientation lets the arm
         #  re-pose for the bin while the cube rides along (rigid kinematic grasp).
+        # Descend the grasp deeper toward the cube (lower tool-z) so the fingers
+        # come down near the cube instead of hovering well above it, while
+        # keeping reach/lift at the clearance height the arm re-uses for the bin.
+        # Per-segment: (phase, goal_xyz|None, gripper, orient, apply_tcp). The
+        # FINGERTIP TCP offset is applied to the PICK segments (reach/grasp/lift)
+        # so the fingers actually land on the cube; the PLACE segments use the
+        # plain tool frame because the full TCP offset pushes the bin pose out of
+        # the 5-DOF arm's reach (-> scripted fallback). The cube is carried at the
+        # fingertip either way, so it still drops near the bin.
+        grasp_goal = [cx, cy, table_z + grasp_z]
         segments = [
-            ("reach", [cx, cy, table_z + approach], OPEN, True),
-            ("grasp", [cx, cy, table_z + grasp_z], OPEN, True),
-            ("close", None, CLOSE, False),
-            ("lift", [cx, cy, table_z + approach], CLOSE, False),
-            ("place", [px, py, table_z + approach], CLOSE, False),
-            ("place_down", [px, py, table_z + grasp_z + 0.02], CLOSE, False),
-            ("release", None, OPEN, False),
+            ("reach", [cx, cy, table_z + approach], OPEN, True, True),
+            ("grasp", grasp_goal, OPEN, True, True),
+            ("close", None, CLOSE, False, True),
+            ("lift", [cx, cy, table_z + approach], CLOSE, False, True),
+            # place/place_down: keep the top-down orientation bias (orient=True)
+            # so cuRobo holds the gripper finger-down and does NOT flip to a
+            # mirrored IK branch -- a position-only place lets the base joint snap
+            # ~180 deg to the opposite side at place_down, flinging the cube far
+            # from the bin (validated offline: place_down pan jumped -0.83 -> +0.98).
+            ("place", [px, py, table_z + approach], CLOSE, True, True),
+            ("place_down", [px, py, table_z + grasp_z + 0.01], CLOSE, True, True),
+            ("release", None, OPEN, False, False),
         ]
-        for phase, xyz, gripval, orient in segments:
+        for phase, xyz, gripval, orient, apply_tcp in segments:
             if xyz is None:
-                for _ in range(hold_steps):
+                # In-place gripper event (close/release). Ramp the gripper from
+                # its current value to the target across hold_steps (smooth, no
+                # violent flick), THEN hold at the target for extra frames so the
+                # gripper FULLY closes/clamps the cube before the arm moves on --
+                # without this the close-phase ends with the jaw only partly shut
+                # and the cube slips out during the lift.
+                ramp = max(1, hold_steps)
+                for s in range(1, ramp + 1):
+                    t = s / ramp
+                    emit(cur_arm, (1.0 - t) * cur_grip + t * gripval, phase)
+                # Extra clamp/settle frames at the fully-commanded gripper value.
+                clamp_frames = 18 if phase == "close" else hold_steps
+                for _ in range(clamp_frames):
                     emit(cur_arm, gripval, phase)
+                cur_grip = gripval
                 continue
-            seg = self._plan_segment(cur_arm, xyz, quat, orient=orient)
+            try:
+                seg = self._plan_segment(cur_arm, xyz, quat, orient=orient, apply_tcp=apply_tcp)
+            except RuntimeError:
+                # The PICK segments (reach/grasp/lift) must succeed for a real
+                # cuRobo demonstration -> re-raise so the caller's ScriptedPlanner
+                # fallback handles the whole episode. The PLACE segments are at the
+                # 5-DOF arm's reach edge and often unsolvable from the fingertip
+                # grasp pose; rather than throwing away the (good) cuRobo pick, do
+                # a joint-space interpolation toward a heuristic place pose so the
+                # episode stays a cuRobo grasp + a smooth scripted place.
+                if phase in ("reach", "grasp", "lift"):
+                    raise
+                target_arm = self._heuristic_place_arm(cur_arm, [px, py], home_arm=start_arm)
+                # Many small steps so the kinematically-carried cube moves smoothly
+                # to over the bin instead of being teleported in big jumps (which
+                # injects velocity and flings it). 40 steps ~ the cuRobo segment
+                # density, keeping the place at real-time speed.
+                steps = 40
+                seg = [
+                    [cur_arm[k] + (target_arm[k] - cur_arm[k]) * (s / steps) for k in range(len(cur_arm))]
+                    for s in range(1, steps + 1)
+                ]
             for arm_q in seg:
                 emit(arm_q, gripval, phase)
             cur_arm = seg[-1]
+            cur_grip = gripval
 
         return JointTrajectory(
             joint_names=jn,

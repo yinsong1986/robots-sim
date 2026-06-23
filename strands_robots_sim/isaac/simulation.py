@@ -281,6 +281,40 @@ def _get_or_create_simulation_app(
 # still degrading gracefully on a legacy box.
 
 
+def _accepts_config_kw(cls: Any) -> bool:
+    """True if ``cls.__init__`` accepts a ``config`` keyword argument."""
+    try:
+        import inspect
+
+        return "config" in inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        return True  # assume yes; the call site falls back to no-arg on TypeError
+
+
+def _coerce_prim_path(res: Any) -> str:
+    """Normalise a URDF-import return value to a USD prim-path string.
+
+    Isaac Sim 6.0's ``URDFImporter.import_urdf()`` may return the prim path
+    directly, a ``(status, path)`` tuple, or an object exposing ``.prim_path`` /
+    ``.path``. Handle the common shapes; return ``""`` if none match.
+    """
+    if res is None:
+        return ""
+    if isinstance(res, str):
+        return res
+    if isinstance(res, (tuple, list)):
+        for item in res:
+            p = _coerce_prim_path(item)
+            if p:
+                return p
+        return ""
+    for attr in ("prim_path", "path", "stage_path", "default_prim_path"):
+        val = getattr(res, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
 def _import_articulation_cls() -> Any:
     """Resolve the single-prim articulation wrapper across Isaac versions.
 
@@ -1751,6 +1785,34 @@ class IsaacSimulation(SimEngine):
                     # bugs propagate.
                     logger.debug("Failed to get joint positions: %s", e)
 
+            # Camera frames keyed by camera name (RGB HxWx3 uint8), so callers
+            # (e.g. the SO-101 collector / Gradio render) get images the same way
+            # the MuJoCo backend provides them. Skipped when ``skip_images`` or in
+            # headless render mode (no RTX frames). Best-effort per camera: a
+            # camera whose RTX product hasn't warmed up is omitted rather than
+            # failing the whole observation.
+            if not skip_images and self._config.render_mode != "headless":
+                # Multi-camera refresh: a single ``world.step(render=True)`` in
+                # the substep loop reliably refreshes only the PRIMARY render
+                # product, so secondary cameras' ``get_rgba`` returns a stale or
+                # blank buffer. When more than one camera is configured, tick the
+                # renderer a few extra times (holding the pose static) so EVERY
+                # camera's RTX render product accumulates a fresh frame before we
+                # read them back. Single-camera setups skip this (the substep
+                # render already warmed the one product) to stay fast.
+                if len(self._cameras) > 1:
+                    self._refresh_all_render_products()
+                for cam_name, cam in self._cameras.items():
+                    if cam.handle is None:
+                        continue
+                    try:
+                        rgba = cam.handle.get_rgba()
+                        rgb = np.asarray(rgba)[..., :3]
+                        if rgb.ndim == 3 and rgb.shape[0] > 0 and rgb.shape[1] > 0:
+                            obs[cam_name] = rgb.astype(np.uint8)
+                    except (RuntimeError, ValueError, AttributeError, TypeError) as e:
+                        logger.debug("camera %r frame unavailable: %s", cam_name, e)
+
             return obs
 
     def send_action(
@@ -1851,9 +1913,14 @@ class IsaacSimulation(SimEngine):
                         "content": [{"text": f"Failed to set joint targets on '{robot_name}': {e}"}],
                     }
 
-            # Step physics
-            for _ in range(n_substeps):
-                self._world.step(render=False)
+            # Step physics. Render on the LAST substep when not headless so the
+            # RTX camera render products refresh -> ``get_rgba`` returns a fresh
+            # frame for this step (otherwise every recorded frame is identical,
+            # i.e. a static video). Intermediate substeps skip render for speed.
+            render_on = self._config.render_mode != "headless"
+            for i in range(n_substeps):
+                last = i == n_substeps - 1
+                self._world.step(render=bool(render_on and last))
                 self._sim_time += self._config.physics_dt
                 self._step_count += 1
 
@@ -2822,75 +2889,101 @@ class IsaacSimulation(SimEngine):
         # modern ``isaacsim.*`` locations first, fall back to legacy.
         Articulation = _import_articulation_cls()  # noqa: N806
 
-        # Isaac Sim's URDF importer module path varies across releases:
-        # * 4.5+ uses ``isaacsim.asset.importer.urdf._urdf.ImportConfig``
-        # * pre-4.5 used ``omni.importer.urdf._urdf.ImportConfig`` (now
-        #   renamed under the deprecation transition).
-        # Try the modern path first, fall back to the old one. Caught
-        # during PR #64 GPU validation against Isaac Sim 4.5 -- the
-        # original wiring only knew the pre-4.5 path and crashed on a
-        # ``ModuleNotFoundError: No module named 'omni.importer'``.
-        try:
-            from isaacsim.asset.importer.urdf import _urdf  # type: ignore[import-not-found]
-        except ImportError:
-            from omni.importer.urdf import _urdf  # type: ignore[import-not-found]
-
-        # Step 1: import config. Defaults chosen for a fixed-base
-        # manipulator (the most common LIBERO / GR00T case); fleet RL
-        # workflows can override fix_base via a future config knob.
-        # Self-collision is left off because mesh-mesh self-contact
-        # between adjacent links of a fresh-from-OnShape URDF (the
-        # SO-101 case validated by issue #69) tends to manifest as a
-        # high-frequency oscillation that the actuator-less arm can't
-        # damp out. ``merge_fixed_joints`` is left off so cuRobo's
-        # joint conventions stay aligned with the URDF's; merging
-        # would silently drop link names cuRobo's plan references.
-        import_config = _urdf.ImportConfig()
-        import_config.fix_base = True
-        import_config.import_inertia_tensor = True
-        import_config.create_physics_scene = False  # World already created one
-        import_config.distance_scale = 1.0  # URDF in meters; matches stage units
-        # Best-effort: not every Isaac Sim 4.5+/5.x build exposes these
-        # attrs. ``setattr`` would happily set a typo'd attr and silently
-        # drop it; explicit hasattr guards keep the contract narrow.
-        if hasattr(import_config, "merge_fixed_joints"):
-            import_config.merge_fixed_joints = False
-        if hasattr(import_config, "self_collision"):
-            import_config.self_collision = False
-        if hasattr(import_config, "make_default_prim"):
-            import_config.make_default_prim = False
-
-        # Step 2: parse + import via the direct ``_urdf`` interface
-        # rather than the ``URDFParseAndImportFile`` Kit command. The
-        # Kit-command path was deprecated / changed semantics across
-        # Isaac Sim releases and produced a "Used null prim" runtime
-        # error on 4.5 against a freshly-created World; the direct
-        # interface (``parse_urdf`` -> ``import_robot``) is the
-        # documented stable surface that survives across versions.
+        # Isaac Sim's URDF importer API varies across releases:
+        # * 6.0 exposes high-level ``URDFImporter`` + ``URDFImporterConfig``
+        #   classes (the ``_urdf`` C-binding is no longer importable).
+        # * 4.5/5.x used ``isaacsim.asset.importer.urdf._urdf`` with
+        #   ``acquire_urdf_interface().parse_urdf()/import_robot()``.
+        # * pre-4.5 used ``omni.importer.urdf._urdf``.
+        # Try the modern 6.0 class API first, then the legacy ``_urdf`` ifaces.
         import os
 
-        urdf_iface = _urdf.acquire_urdf_interface()
-        # Isaac Sim 4.5+: parse_urdf(asset_root, asset_name, import_config),
-        # import_robot(asset_root, asset_name, robot, import_config, stage="").
-        # Both methods take the URDF as a (root_dir, filename) pair so
-        # the importer can resolve relative mesh paths inside the URDF.
-        # Splitting the caller's single ``urdf_path`` here keeps the
-        # method's caller-visible API as one path argument.
         urdf_root, urdf_filename = os.path.split(os.path.abspath(urdf_path))
-        urdf_robot = urdf_iface.parse_urdf(urdf_root, urdf_filename, import_config)
-        if urdf_robot is None:
-            raise RuntimeError(f"URDF parse failed for {urdf_path!r}")
-        # ``stage=""`` (default) imports directly into the live USD
-        # stage held open by ``SimulationApp``. Returns the prim path
-        # the importer used, which we then bind to the caller's
-        # requested ``prim_path`` via ``add_reference_to_stage`` --
-        # actually, the importer adds prims directly to the live
-        # stage so we don't need a separate ``add_reference_to_stage``
-        # step. The ``usd_dest`` path is only used as a side-channel
-        # USD-on-disk export for offline asset reuse if needed.
-        imported_prim_path = urdf_iface.import_robot(urdf_root, urdf_filename, urdf_robot, import_config, "")
-        if not imported_prim_path:
-            raise RuntimeError(f"URDF import failed for {urdf_path!r} via _urdf.import_robot")
+        imported_prim_path = None
+
+        URDFImporter = URDFImporterConfig = None  # noqa: N806
+        try:
+            from isaacsim.asset.importer.urdf import (  # type: ignore[import-not-found]
+                URDFImporter,
+                URDFImporterConfig,
+            )
+        except ImportError:
+            URDFImporter = URDFImporterConfig = None  # noqa: N806
+
+        if URDFImporter is not None and URDFImporterConfig is not None:
+            # Isaac Sim 6.0 high-level API: build a config, point it at the URDF,
+            # and import. Fixed base, keep joint names aligned with cuRobo (no
+            # fixed-joint merge), self-collision off (adjacent-link mesh contact
+            # oscillates on the actuator-less arm). Drive type 'position' so the
+            # imported articulation can be position-commanded.
+            cfg = URDFImporterConfig()
+            cfg.urdf_path = os.path.abspath(urdf_path)
+            for attr, val in (
+                ("fix_base", True),
+                ("merge_fixed_joints", False),
+                ("allow_self_collision", False),
+                ("collision_from_visuals", False),
+            ):
+                if hasattr(cfg, attr):
+                    setattr(cfg, attr, val)
+            if hasattr(cfg, "joint_drive_type"):
+                try:
+                    cfg.joint_drive_type = "position"
+                except Exception:  # noqa: BLE001 - enum vs str varies; leave default
+                    pass
+            # Strong position-drive gains so the arm holds against gravity and
+            # tracks commanded joint targets (the bare SO-101 URDF has no
+            # <dynamics> drive params -> default gains are too soft and the arm
+            # droops instead of reaching the planned grasp pose).
+            for attr, val in (("override_joint_stiffness", 1.0e5), ("override_joint_damping", 1.0e4)):
+                if hasattr(cfg, attr):
+                    try:
+                        setattr(cfg, attr, val)
+                    except Exception:  # noqa: BLE001
+                        pass
+            importer = URDFImporter(config=cfg) if _accepts_config_kw(URDFImporter) else URDFImporter()
+            if hasattr(importer, "config"):
+                try:
+                    importer.config = cfg
+                except Exception:  # noqa: BLE001
+                    pass
+            # Isaac Sim 6.0 ``import_urdf()`` converts URDF -> USD on disk and
+            # returns the USD path (NOT a live-stage prim path). Reference that
+            # USD onto the live stage at our prim_path, then wrap that prim as an
+            # Articulation.
+            usd_out = importer.import_urdf()
+            if not isinstance(usd_out, str) or not usd_out:
+                raise RuntimeError(f"URDF import (6.0 API) returned no USD path for {urdf_path!r}")
+            from isaacsim.core.utils.stage import add_reference_to_stage  # type: ignore[import-not-found]
+
+            add_reference_to_stage(usd_path=usd_out, prim_path=prim_path)
+            imported_prim_path = prim_path
+        else:
+            try:
+                from isaacsim.asset.importer.urdf import _urdf  # type: ignore[import-not-found]
+            except ImportError:
+                from omni.importer.urdf import _urdf  # type: ignore[import-not-found]
+
+            import_config = _urdf.ImportConfig()
+            import_config.fix_base = True
+            import_config.import_inertia_tensor = True
+            import_config.create_physics_scene = False
+            import_config.distance_scale = 1.0
+            if hasattr(import_config, "merge_fixed_joints"):
+                import_config.merge_fixed_joints = False
+            if hasattr(import_config, "self_collision"):
+                import_config.self_collision = False
+            if hasattr(import_config, "make_default_prim"):
+                import_config.make_default_prim = False
+
+            urdf_iface = _urdf.acquire_urdf_interface()
+            urdf_robot = urdf_iface.parse_urdf(urdf_root, urdf_filename, import_config)
+            if urdf_robot is None:
+                raise RuntimeError(f"URDF parse failed for {urdf_path!r}")
+            imported_prim_path = urdf_iface.import_robot(urdf_root, urdf_filename, urdf_robot, import_config, "")
+            if not imported_prim_path:
+                raise RuntimeError(f"URDF import failed for {urdf_path!r} via _urdf.import_robot")
+
 
         # Step 2b: bind the imported prim to our caller-requested
         # ``prim_path``. The ``import_robot`` call adds prims at
@@ -2908,6 +3001,38 @@ class IsaacSimulation(SimEngine):
         articulation_name = actual_prim_path.rsplit("/", 1)[-1]
         articulation = Articulation(prim_path=actual_prim_path, name=articulation_name)
         articulation.initialize()
+        # Set strong position-drive PD gains so the arm holds against gravity and
+        # tracks commanded joint targets (the bare SO-101 URDF has no <dynamics>
+        # drive params, so default gains are too soft -> the arm droops instead
+        # of reaching the planned grasp pose, and the gripper can't clamp).
+        try:
+            ndof = len(articulation.dof_names) if articulation.dof_names else 0
+            if ndof:
+                kp = np.full(ndof, 1.0e5, dtype=float)
+                kd = np.full(ndof, 1.0e4, dtype=float)
+                set_gains = getattr(articulation, "set_gains", None)
+                if callable(set_gains):
+                    set_gains(kps=kp, kds=kd)
+                else:
+                    ctrl = getattr(articulation, "get_articulation_controller", None)
+                    if callable(ctrl):
+                        ctrl().set_gains(kps=kp, kds=kd)
+                # Raise the per-joint max effort far above the SO-101 URDF's
+                # tiny ``effort=10`` limit. With effort capped at 10 N*m PhysX
+                # clamps the gripper drive torque regardless of how stiff the PD
+                # gains are -> the closed jaw can't generate enough clamping
+                # force to hold the 5 cm cube against gravity through the lift
+                # (the cube just gets nudged and squirts out). 1000 gives the
+                # gripper real clamping authority while staying physical.
+                set_max = getattr(articulation, "set_max_efforts", None)
+                if callable(set_max):
+                    try:
+                        set_max(np.full(ndof, 1.0e3, dtype=float))
+                    except Exception:  # noqa: BLE001
+                        # Some builds expect a (M, K) batch for the view.
+                        set_max(np.full((1, ndof), 1.0e3, dtype=float))
+        except Exception:  # noqa: BLE001 - gain set is best-effort
+            logger.debug("set drive gains failed (non-fatal)", exc_info=True)
         # Stash the importer's actual landing path on the articulation
         # handle as a sidecar attribute so the caller (``add_robot``)
         # can record it on ``_RobotState.actual_prim_path`` for later
@@ -3189,9 +3314,92 @@ class IsaacSimulation(SimEngine):
                 obj.handle.set_linear_velocity(np.zeros(3))
             if hasattr(obj.handle, "set_angular_velocity"):
                 obj.handle.set_angular_velocity(np.zeros(3))
+            # Also write the USD xform translate/orient DIRECTLY. ``set_world_pose``
+            # updates the PhysX/fabric transform, but the RENDER reads the prim's
+            # USD ``xformOp:translate``; for a teleported (collider-off / kinematic)
+            # body the fabric->USD writeback can lag or not fire on a render-only
+            # tick, so the cube RENDERS at its stale pose (looked offset from / beside
+            # the bin). Setting the USD xform ops here keeps the rendered mesh
+            # exactly at the commanded pose.
+            if pos is not None:
+                try:
+                    import omni.usd  # type: ignore[import-not-found]
+                    from pxr import Gf, UsdGeom  # type: ignore[import-not-found]
+
+                    stage = omni.usd.get_context().get_stage()
+                    prim = stage.GetPrimAtPath(obj.prim_path)
+                    if prim and prim.IsValid():
+                        xf = UsdGeom.Xformable(prim)
+                        top = None
+                        for op in xf.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                                top = op
+                                break
+                        if top is None:
+                            top = xf.AddTranslateOp()
+                        top.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
+                        if ori is not None:
+                            for op in xf.GetOrderedXformOps():
+                                if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
+                                    op.Set(Gf.Quatf(float(ori[0]), float(ori[1]), float(ori[2]), float(ori[3])))
+                                    break
+                except Exception:  # noqa: BLE001
+                    logger.debug("move_object USD xform write skipped", exc_info=True)
         except (RuntimeError, ValueError, AttributeError, TypeError) as exc:
             return {"status": "error", "content": [{"text": f"move_object failed: {type(exc).__name__}: {exc}"}]}
         return {"status": "success", "content": [{"text": f"'{name}' moved to {position or 'same'}."}]}
+
+    def set_object_kinematic(self, name: str, kinematic: bool = True) -> dict[str, Any]:
+        """Toggle an object's rigid body between KINEMATIC and dynamic.
+
+        Root-causes the "cube renders offset from where it was placed" bug in
+        the hybrid carry: the cube is a *dynamic* PhysX body, so even with its
+        collider disabled, gravity + the physics solver own its transform and
+        write it back to USD every ``world.step``. ``move_object`` (set_world_pose)
+        sets the pose, but a render-only ``app.update()`` then shows the physics
+        body's last-written (drifted) transform, NOT the pinned pose -> the cube
+        renders apart from the bin.
+
+        A KINEMATIC body ignores gravity/forces and takes its transform straight
+        from ``set_world_pose``, which is written to USD and rendered faithfully.
+        So flipping the carried cube kinematic makes its render match its placed
+        pose exactly. Restored to dynamic on release. Toggles
+        ``UsdPhysics.RigidBodyAPI.kinematicEnabled`` on the prim; best-effort.
+        """
+        obj = self._objects.get(name)
+        if obj is None:
+            return {"status": "error", "content": [{"text": f"Object {name!r} not found."}]}
+        # Prefer the wrapper's own setter if present.
+        if obj.handle is not None:
+            for meth in ("set_rigid_body_kinematic", "set_kinematic_enabled"):
+                fn = getattr(obj.handle, meth, None)
+                if callable(fn):
+                    try:
+                        fn(bool(kinematic))
+                        return {"status": "success", "content": [{"text": f"'{name}' kinematic={kinematic}."}]}
+                    except (RuntimeError, ValueError, AttributeError, TypeError):
+                        logger.debug("%s failed; trying USD API", meth, exc_info=True)
+        # Fallback: toggle UsdPhysics.RigidBodyAPI kinematicEnabled directly.
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import UsdPhysics  # type: ignore[import-not-found]
+
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(obj.prim_path)
+            api = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath()) or UsdPhysics.RigidBodyAPI.Apply(prim)
+            attr = api.GetKinematicEnabledAttr()
+            if not attr:
+                attr = api.CreateKinematicEnabledAttr()
+            attr.Set(bool(kinematic))
+            return {
+                "status": "success",
+                "content": [{"text": f"'{name}' kinematic={kinematic} (USD)."}],
+            }
+        except (RuntimeError, ValueError, AttributeError, TypeError, ImportError) as exc:
+            return {
+                "status": "error",
+                "content": [{"text": f"set_object_kinematic failed: {type(exc).__name__}: {exc}"}],
+            }
 
     def set_object_collision(self, name: str, enabled: bool = True) -> dict[str, Any]:
         """Enable / disable an object's collider (keeps the visual mesh intact).
@@ -3328,6 +3536,38 @@ class IsaacSimulation(SimEngine):
             return None
 
     # --- DLSS-ghost mitigation + RTX renderer config ------------------------
+
+    def _refresh_all_render_products(self, n: int = 1) -> None:
+        """Tick the renderer ``n`` times so EVERY camera's RTX render product
+        accumulates a fresh frame.
+
+        In headless RTX a single ``world.step(render=True)`` in the substep loop
+        only reliably refreshes the PRIMARY render product; secondary cameras'
+        ``get_rgba`` then returns a stale/blank buffer (the long-standing
+        single-camera limitation). ONE extra render-only tick here lets Kit flush
+        the remaining render products before read-back.
+
+        Kept deliberately LIGHT: a single ``SimulationApp.update()`` (render
+        only -- it does NOT advance physics, so the cube/arm don't drift between
+        the action and the observation), falling back to one
+        ``world.step(render=True)`` if the app handle is unavailable. Driving
+        multiple extra render ticks per recorded frame hammered the RTX
+        Hydra-texture pipeline (``libomni.hydratexture``) and crashed the kit
+        over a full multi-episode session, so we do the minimum needed to flush
+        the secondary render products. Main-thread only (renderer constraint).
+        """
+        if not self._world_created or self._world is None:
+            return
+        # Light render-only refresh (no physics advance, avoids the Hydra-texture
+        # overload that a heavier per-frame render loop caused). Prefer
+        # SimulationApp.update(); fall back to a single world.step(render=True).
+        app = getattr(self, "_app", None)
+        update = getattr(app, "update", None) if app is not None else None
+        for _ in range(max(1, n)):
+            if callable(update):
+                update()
+            else:
+                self._world.step(render=True)
 
     def _converge_render(self, n: int = 8) -> None:
         """Render ``n`` ticks while HOLDING the robots at their current pose.
