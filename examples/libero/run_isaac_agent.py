@@ -702,9 +702,43 @@ def main() -> None:
         # LIBERO's `agentview` uses on MuJoCo. With #61 + #62 merged it's
         # a real `isaacsim.sensors.camera.Camera` whose frames feed both
         # `--policy=groot` and the rollout-video recorder armed below.
-        result = _sim.add_camera(name="image", position=[2.0, 0.0, 1.5], target=[0.0, 0.0, 0.5], fov=60.0)
+        recording_camera = "image"
+        result = _sim.add_camera(name=recording_camera, position=[2.0, 0.0, 1.5], target=[0.0, 0.0, 0.5], fov=60.0)
         if result.get("status") != "success":
             raise RuntimeError(f"add_camera failed: {result}")
+
+        # Warm up the RTX render product before recording. A camera added
+        # after the last world step has an empty render product: its first
+        # `get_rgba()` returns a malformed `(0,)` buffer and `render()`
+        # surfaces a structured "RTX render product likely hasn't accumulated
+        # a frame yet" error (simulation.py:2135-2141). If we start recording
+        # immediately, every `on_frame` call hits that error, the recorder
+        # buffer stays empty for the whole rollout, and `stop_cameras_recording`
+        # writes a 0-frame mp4 that imageio silently drops -- the file never
+        # lands on disk despite a "success" status line.
+        #
+        # Step + render the world a few times until `render(camera_name="image")`
+        # returns a real (non-error) frame, mirroring isaac_gs/render_demo.py's
+        # `sim.step(5)`-before-render pattern. `sim.step` under
+        # render_mode="rtx_realtime" calls `world.step(render=True)`, so the RTX
+        # render product accumulates samples each iteration. Bounded so a host
+        # that never populates fails loudly instead of recording blank frames.
+        _RTX_WARMUP_MAX_ITERS = 10
+        warmed_up = False
+        for _ in range(_RTX_WARMUP_MAX_ITERS):
+            _sim.step(1)
+            probe = _sim.render(camera_name=recording_camera)
+            if probe.get("status") == "success":
+                warmed_up = True
+                break
+        if not warmed_up:
+            raise RuntimeError(
+                f"RTX render product for camera {recording_camera!r} never "
+                f"accumulated a frame after {_RTX_WARMUP_MAX_ITERS} warm-up "
+                "step+render iterations; recording would produce a 0-frame "
+                f"(dropped) mp4. Last render probe: {probe}"
+            )
+        print(f"[setup] RTX camera {recording_camera!r} warmed up; render product populated")
 
         # Resolve the LIBERO task. Same default-aspirational fallback
         # as run_mujoco_agent.py / run_isaac.py. Keep the CLI-requested
@@ -750,7 +784,6 @@ def main() -> None:
             f"--seed={args.seed}--policy={args.policy}--backend=isaac--agent"
         )
         video_dir = _date_dir()
-        recording_camera = "image"
         rec = _sim.start_cameras_recording(
             cameras=[recording_camera],
             output_dir=video_dir,

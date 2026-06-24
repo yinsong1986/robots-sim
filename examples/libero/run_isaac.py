@@ -662,14 +662,48 @@ def main() -> None:
         # ``render(camera_name="image")`` returns real RGB frames keyed off
         # it. Those frames feed both ``--policy=groot`` (which reads images)
         # and the rollout-video recorder wired below.
+        recording_camera = "image"
         result = sim.add_camera(
-            name="image",
+            name=recording_camera,
             position=[2.0, 0.0, 1.5],
             target=[0.0, 0.0, 0.5],
             fov=60.0,
         )
         if result.get("status") != "success":
             raise RuntimeError(f"add_camera failed: {result}")
+
+        # Warm up the RTX render product before recording. A camera added
+        # after the last world step has an empty render product: its first
+        # `get_rgba()` returns a malformed `(0,)` buffer and `render()`
+        # surfaces a structured "RTX render product likely hasn't accumulated
+        # a frame yet" error (simulation.py:2135-2141). If we start recording
+        # immediately, every `on_frame` call hits that error, the recorder
+        # buffer stays empty for the whole rollout, and `stop_cameras_recording`
+        # writes a 0-frame mp4 that imageio silently drops -- the file never
+        # lands on disk despite a "success" status line.
+        #
+        # Step + render the world a few times until `render(camera_name="image")`
+        # returns a real (non-error) frame, mirroring isaac_gs/render_demo.py's
+        # `sim.step(5)`-before-render pattern. `sim.step` under
+        # render_mode="rtx_realtime" calls `world.step(render=True)`, so the RTX
+        # render product accumulates samples each iteration. Bounded so a host
+        # that never populates fails loudly instead of recording blank frames.
+        _RTX_WARMUP_MAX_ITERS = 10
+        warmed_up = False
+        for _ in range(_RTX_WARMUP_MAX_ITERS):
+            sim.step(1)
+            probe = sim.render(camera_name=recording_camera)
+            if probe.get("status") == "success":
+                warmed_up = True
+                break
+        if not warmed_up:
+            raise RuntimeError(
+                f"RTX render product for camera {recording_camera!r} never "
+                f"accumulated a frame after {_RTX_WARMUP_MAX_ITERS} warm-up "
+                "step+render iterations; recording would produce a 0-frame "
+                f"(dropped) mp4. Last render probe: {probe}"
+            )
+        print(f"[setup] RTX camera {recording_camera!r} warmed up; render product populated")
 
         # Keep the CLI-requested task distinct from the resolved one. The
         # default placeholder transparently falls back to the first registered
@@ -691,7 +725,6 @@ def main() -> None:
             f"--seed={args.seed}--policy={args.policy}--backend=isaac"
         )
         video_dir = _date_dir()
-        recording_camera = "image"
 
         # Arm the synchronous Isaac recorder. Unlike MuJoCo's daemon-thread
         # recorder, IsaacSimulation captures frames on the eval thread via
