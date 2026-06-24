@@ -1627,6 +1627,39 @@ class TestRenderFramePathPhase2:
         assert "rgb" not in result
         assert "depth" not in result
 
+    def test_phase2_camera_zero_dim_rgb_returns_error_envelope(self) -> None:
+        """A not-yet-warmed RTX render product whose ``get_rgba`` returns a
+        0-dimensional (scalar) array -> structured error envelope, not an
+        unhandled ``IndexError``.
+
+        Regression pin for #140: with ``rtx_realtime`` enabled (#138), the
+        example warm-up loop calls ``render()`` before the RTX render
+        product has accumulated a frame; ``get_rgba()`` returns a 0-D
+        array, so ``np.asarray(rgba)[..., :3]`` raised
+        ``IndexError: too many indices for array: array is 0-dimensional``
+        *before* the shape guard could convert it -- and ``IndexError``
+        was not in the cleanup ``except`` tuple, so it crashed the script
+        end-to-end. ``render()`` must instead return ``status == "error"``
+        so the warm-up loop can retry.
+        """
+        import numpy as np
+
+        from strands_robots_sim.isaac.simulation import _CameraState
+
+        sim = self._make_sim()
+        handle = MagicMock()
+        # 0-D scalar buffer: what an unwarmed RTX render product yields.
+        handle.get_rgba.return_value = np.asarray(np.float32(0.0))
+        cs = _CameraState(name="cold0d", prim_path="/World/Cameras/cold0d", width=320, height=240)
+        cs.handle = handle
+        sim._cameras["cold0d"] = cs
+
+        result = sim.render("cold0d")
+        assert result["status"] == "error"
+        assert "malformed RGB buffer" in result["content"][0]["text"]
+        assert "rgb" not in result
+        assert "depth" not in result
+
     def test_phase2_camera_get_depth_failure_returns_error_envelope(self) -> None:
         """Pin failure path also covers ``get_depth`` raising independently
         of ``get_rgba``.
