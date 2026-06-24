@@ -28,18 +28,21 @@ LIBERO benchmark on Isaac is NOT yet runnable end-to-end
 --------------------------------------------------------
 The agent's ``evaluate_isaac_benchmark`` tool call routes through the
 same ``IsaacSimulation.evaluate_benchmark`` path as ``run_isaac.py``,
-so it hits the same blocker: ``LiberoAdapter.on_episode_start`` calls
-``sim.load_scene(...)`` and ``IsaacSimulation.load_scene`` is not yet
-implemented (BDDL/MJCF -> USD scene realization is the substantive
-remaining work for LIBERO-on-Isaac -- tracked in
-`#116 <https://github.com/strands-labs/robots-sim/issues/116>`_). The
-eval aborts at episode 0; the agent surfaces the ``load_scene``
-fail-fast message in its summary, and this script **exits non-zero**
-(the ``__main__`` guard forces ``os._exit(1)`` so Isaac's
-SimulationApp fast-shutdown can't swallow the failure into exit 0).
-Use ``examples/libero/run_mujoco_agent.py`` for an end-to-end LIBERO
-agent demo today, or drive the Isaac backend directly via the manual
-``create_world`` -> ``add_robot`` -> ``add_object`` -> ``add_camera``
+so it runs the same way: ``LiberoAdapter.on_episode_start`` calls
+``sim.load_scene(...)`` and ``IsaacSimulation.load_scene`` now realizes
+the LIBERO/BDDL-compiled MJCF as USD prims on the Isaac stage (the
+substantive LIBERO-on-Isaac work -- implemented in
+`#129 <https://github.com/strands-labs/robots-sim/issues/129>`_, which
+superseded the fail-fast stub PR #117 shipped for the closed #116). The
+eval completes end-to-end; the agent surfaces the ``success_rate`` in
+its summary, and this script **exits non-zero** only on a genuine eval
+error (the ``__main__`` guard forces ``os._exit(1)`` so Isaac's
+SimulationApp fast-shutdown can't swallow a failure into exit 0). A
+*meaningful* (non-zero) ``success_rate`` also needs the articulation
+fix (#123). Use ``examples/libero/run_mujoco_agent.py`` for the
+CPU-friendly reference path, or drive the Isaac backend directly via
+the manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
+``add_camera``
 -> ``step`` -> ``render`` quickstart in ``docs/index.md`` (which works
 end-to-end on Isaac Sim 6.0).
 
@@ -194,10 +197,9 @@ _on_frame: Any = None
 # envelope. The agent consumes the tool's dict and folds it into a
 # natural-language summary, so ``main()`` can't see the raw
 # ``{"status": ...}`` directly. Stashing it here lets ``main()``
-# deterministically fail-fast (non-zero exit) when the eval errored --
-# e.g. the current ``IsaacSimulation.load_scene`` fail-fast that aborts
-# the LIBERO benchmark at episode 0 (#116). Without this, the agent
-# would happily summarise the failure and the script would still exit 0.
+# deterministically fail-fast (non-zero exit) when the eval errored.
+# Without this, the agent would happily summarise the failure and the
+# script would still exit 0.
 _last_eval_result: dict[str, Any] | None = None
 
 
@@ -460,7 +462,7 @@ def evaluate_isaac_benchmark(
         on_frame=_on_frame,
     )
     # Stash the raw envelope so main() can fail-fast on an eval error
-    # the agent would otherwise only mention in prose (#116).
+    # the agent would otherwise only mention in prose.
     global _last_eval_result
     _last_eval_result = result
     return result
@@ -781,10 +783,9 @@ def main() -> None:
 
         # Fail-fast (non-zero exit) if the agent's eval tool call errored.
         # The agent only summarises the failure in prose; main() inspects
-        # the raw envelope the tool stashed so a blocked LIBERO-on-Isaac
-        # eval (e.g. the IsaacSimulation.load_scene fail-fast, #116) is
-        # visible to the exit status / CI rather than swallowed into the
-        # agent's natural-language report + a misleading exit 0.
+        # the raw envelope the tool stashed so a genuine LIBERO-on-Isaac
+        # eval error is visible to the exit status / CI rather than
+        # swallowed into the agent's natural-language report + exit 0.
         if _last_eval_result is None:
             raise RuntimeError(
                 "Agent did not invoke evaluate_isaac_benchmark (no eval result captured). "
@@ -815,10 +816,9 @@ if __name__ == "__main__":
     # Force a non-zero exit on failure even when Isaac Sim's SimulationApp
     # fast-shutdown has registered an atexit/_exit hook that would
     # otherwise swallow the interpreter's normal non-zero status into a
-    # misleading exit 0 (#116 secondary). ``os._exit(1)`` bypasses atexit
-    # handlers (including SimulationApp's), so a failed eval -- e.g. the
-    # current ``IsaacSimulation.load_scene`` fail-fast that aborts the
-    # LIBERO benchmark at episode 0 -- is visible to the exit status / CI.
+    # misleading exit 0. ``os._exit(1)`` bypasses atexit handlers
+    # (including SimulationApp's), so a failed eval is visible to the exit
+    # status / CI (scene loading itself is now implemented, #129).
     import sys
     import traceback
 

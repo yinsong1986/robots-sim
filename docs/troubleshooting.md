@@ -218,6 +218,78 @@ Track the rollout in the umbrella
 and use `examples/libero/run_isaac.py` (programmatic) for matrix-quality
 numbers; the agent file is for demos.
 
+## `--policy groot` eval failures
+
+Running the LIBERO examples with `--policy groot`
+(`examples/libero/run_mujoco.py`, `run_mujoco_agent.py`) brings up the
+GR00T-N1.7 VLA in the `nvcr.io/nvidia/isaac-gr00t` container. Three
+setup gotchas trip up first-time runs — the first two fail loudly, the
+third silently zeroes the score. See the
+[`--policy groot` prerequisites](https://github.com/strands-labs/robots-sim/blob/main/examples/README.md#-policy-groot-prerequisites--gotchas)
+in the examples README for the overview.
+
+### `refusing to mount … under protected host path '/home'`
+
+**Symptom:** `start_container` aborts during the GR00T lifecycle with a
+message about refusing to bind-mount a path under `/home`.
+
+**Cause:** `gr00t_inference` refuses to bind-mount any checkpoint cache
+under `/home` (a "protected host path" guard). The historical default
+checkpoint location lived under `/home`, so the two defaults were
+mutually inconsistent
+([#125](https://github.com/strands-labs/robots-sim/issues/125)).
+
+**Fix:** The example drivers now default to a non-`/home` cache
+(fixed in [#126](https://github.com/strands-labs/robots-sim/pull/126)),
+so the OOTB run works. If you override the location, keep it off
+`/home`:
+
+```bash
+python examples/libero/run_mujoco.py --policy groot --checkpoint-dir /tmp/groot-ck
+# or, equivalently:
+export STRANDS_ROBOTS_CHECKPOINT_DIR=/tmp/groot-ck
+```
+
+### `ImportError: 'zmq' is required for GR00T service inference`
+
+**Symptom:** The eval fails *after* the GR00T model loads (so the
+container is up and the checkpoint downloaded) with this `ImportError`.
+
+**Cause:** The GR00T ZMQ client needs `pyzmq`, which the policy extra
+doesn't always pull in.
+
+**Fix:**
+
+```bash
+pip install pyzmq
+```
+
+### `success_rate = 0.0` with a buried `numba` / `coverage` warning
+
+**Symptom:** A `--policy groot` run completes with `success_rate=0` even
+though the container, checkpoint download, and ZMQ service all came up
+cleanly. The only clue is a buried `WARNING` about the OSC controller
+failing to install, preceded by a `numba` import error.
+
+**Cause:** When both `numba` and `coverage>=7` are installed in the
+eval environment, `import numba` fails because
+`numba/misc/coverage_support.py` subclasses the removed
+`coverage.types.Tracer`. That makes the LIBERO adapter's OSC controller
+fail to install, so **GR00T's actions silently no-op** — the policy is
+fine, but no torques reach the robot, so every episode fails. It's easy
+to misread this as a bad policy.
+
+**Fix:** Remove the conflicting `coverage` (or pin `coverage<7`) in the
+eval environment:
+
+```bash
+pip uninstall coverage      # or: pip install 'coverage<7'
+```
+
+The same run then returns `success_rate=1.00`. The silent-degrade
+behaviour (no hard error, just a buried warning) is tracked upstream at
+[`strands-labs/robots#522`](https://github.com/strands-labs/robots/issues/522).
+
 ## Where to file bugs
 
 - New issue: <https://github.com/strands-labs/robots-sim/issues/new>.

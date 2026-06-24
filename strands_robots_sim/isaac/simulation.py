@@ -173,6 +173,39 @@ logger = logging.getLogger(__name__)
 # A unit test pins this mapping so docs and code can't drift apart again.
 _SHAPE_ALIASES: dict[str, str] = {"cuboid": "box"}
 
+
+def _rgb_png_block(rgb: "np.ndarray") -> dict[str, Any] | None:
+    """Encode an RGB ndarray as a render ``content[].image`` PNG block.
+
+    Mirrors the MuJoCo backend's emission: raw PNG bytes in
+    ``source.bytes`` (NOT base64 -- the Bedrock Converse API base64-encodes
+    on the wire and rejects a pre-encoded string with "Could not process
+    image"). Emitting this block on every ``render()`` success path makes
+    the Isaac frame transport match MuJoCo so the shared
+    ``PolicyRunner._extract_frame_ndarray`` (which decodes ``content[].image``
+    only) can pull frames for video recording (#127).
+
+    Returns ``None`` if PIL is unavailable or encoding fails, so
+    ``render()`` degrades to the legacy rgb-only envelope rather than
+    raising -- same lazy-PIL discipline as ``_resize_rgb`` (PIL stays out
+    of module import; Isaac's bundled python may lack it).
+    """
+    try:
+        import io
+
+        from PIL import Image  # lazy: keep heavy import out of module load
+
+        arr = np.asarray(rgb)[..., :3].astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        return {"image": {"format": "png", "source": {"bytes": buf.getvalue()}}}
+    except (ImportError, ValueError, OSError, TypeError, AttributeError) as e:
+        # PIL absent (ImportError) or encode failure -- never let frame
+        # telemetry break render; mirrors the render() except-clause shape.
+        logger.warning("render: PNG frame encode failed (%s); content[].image omitted", e)
+        return None
+
+
 # Module-level singleton tracking for SimulationApp
 _SIMULATION_APP: Any = None
 _SIMULATION_APP_LOCK = threading.Lock()
@@ -516,6 +549,11 @@ class IsaacSimulation(SimEngine):
         self._cameras: dict[str, _CameraState] = {}
         self._objects: dict[str, _ObjectState] = {}
         self._prim_registry: list[str] = []  # track all created prims for cleanup
+        # Names of objects realized by load_scene (LIBERO/BDDL scene). Kept
+        # separate from _objects so a per-episode load_scene can clear only
+        # the prior scene's prims (idempotent reload) without disturbing
+        # objects added manually via add_object.
+        self._scene_objects: set[str] = set()
         # Per-camera output size (RTX cameras render at >= _MIN_RENDER_PX
         # wide so DLSS doesn't ghost a moving arm; captured frames are
         # downscaled to the size the caller asked for before return).
@@ -1513,60 +1551,127 @@ class IsaacSimulation(SimEngine):
     # --- SimEngine: Scene loading -------------------------------------------
 
     def load_scene(self, scene_path: str) -> dict[str, Any]:
-        """Load a complete scene from file -- NOT yet supported on Isaac.
+        """Realize a LIBERO/BDDL task scene as USD prims on the Isaac stage.
 
         The ``SimEngine`` contract lets each backend realize a complete
         scene (objects, poses, fixtures) from a file. The MuJoCo backend
-        overrides this to parse a LIBERO/BDDL-generated MJCF and recompile
-        the live spec; ``LiberoAdapter.on_episode_start`` relies on it to
-        instantiate every task's scene.
+        parses a LIBERO/BDDL-generated MJCF and recompiles the live spec;
+        ``LiberoAdapter.on_episode_start`` relies on this to instantiate
+        each task's scene. This Isaac override translates the same
+        robosuite-compiled MJCF into Isaac stage prims so the LIBERO eval
+        runs end-to-end on the Isaac backend (closes the substantive
+        LIBERO-on-Isaac gap that PR #117 deferred with a fail-fast stub --
+        see `#129 <https://github.com/strands-labs/robots-sim/issues/129>`_).
 
-        Isaac realizes scenes as USD prims on the stage, which requires a
-        BDDL/MJCF -> USD translation layer that does not exist yet. Until
-        that lands (the substantive remaining work for LIBERO-on-Isaac --
-        see `#116 <https://github.com/strands-labs/robots-sim/issues/116>`_),
-        this method **fails fast** with a clear, structured error rather
-        than silently no-op'ing or rendering an empty scene.
+        Translation layer (BDDL/MJCF -> USD):
+            * The ``scene_path`` is a robosuite-compiled LIBERO MJCF XML
+              (e.g. ``~/.strands_robots/scene_cache/libero/<sha>.xml``).
+            * :func:`load_mjcf_scene_objects` walks the ``<worldbody>``,
+              skips the floor (the ground plane is created by
+              :meth:`create_world`) and the Panda robot (the adapter loads
+              it separately via :meth:`add_robot`), and returns one
+              :class:`SceneObject` per task object / fixture.
+            * LIBERO object meshes aren't portable to the Isaac stage, so
+              each object is approximated by a box primitive sized to the
+              axis-aligned bounding box of its collision geoms and placed
+              at its MJCF body pose. That's faithful enough for
+              rollout-video parity with the MuJoCo driver.
+            * Each object is realized via :meth:`add_object` (static
+              fixtures -> ``Fixed*``; movable objects -> ``Dynamic*``).
 
-        Why a structured error envelope (not ``raise``): every other Isaac
-        backend entry point returns ``{"status": "error", "content": [...]}``
-        on a recoverable failure, and ``LiberoAdapter.on_episode_start``
-        already converts an error envelope from ``load_scene`` into a
-        descriptive ``RuntimeError`` -- so the LIBERO driver surfaces this
-        message verbatim instead of an opaque ``NotImplementedError`` from
-        the base ``SimEngine`` stub.
+        Idempotency: a fresh ``load_scene`` first removes any objects left
+        over from a prior episode's scene (tracked in ``_scene_objects``)
+        so per-episode reloads don't accumulate duplicate prims or hit the
+        "object already exists" guard in :meth:`add_object`.
 
         Parameters
         ----------
         scene_path : str
-            Path to the scene file the caller wanted to load. Echoed back
-            in the error text so the abort is traceable to a specific
-            task scene.
+            Path to the compiled LIBERO MJCF scene file.
 
         Returns
         -------
         dict
-            ``{"status": "error", "content": [...]}`` envelope explaining
-            that Isaac scene loading is not yet implemented and pointing at
-            the supported alternatives (the MuJoCo LIBERO driver, or the
-            manual ``create_world`` -> ``add_robot`` -> ``add_object`` ->
-            ``add_camera`` quickstart which works end-to-end on Isaac).
+            Standard ``{"status", "content": [{"text", "json"}]}``
+            envelope. On success ``json`` carries the realized object
+            count and names so ``LiberoAdapter.on_episode_start`` proceeds.
+            On a recoverable failure (no world, missing/malformed file)
+            returns ``{"status": "error", ...}``; the adapter converts that
+            into a descriptive ``RuntimeError``.
         """
-        msg = (
-            "LIBERO scene loading not yet supported on the Isaac backend "
-            "(IsaacSimulation.load_scene is unimplemented). Realizing a "
-            "LIBERO/BDDL task scene as USD prims on the Isaac stage is the "
-            "substantive remaining work for LIBERO-on-Isaac -- tracked in "
-            "strands-labs/robots-sim#116. "
-            f"(requested scene_path={scene_path!r}). "
-            "Workarounds: run the LIBERO benchmark on the MuJoCo backend "
-            "(examples/libero/run_mujoco.py), or use the Isaac backend "
-            "directly via the manual create_world -> add_robot -> add_object "
-            "-> add_camera -> step -> render quickstart (docs/index.md), "
-            "which works end-to-end on Isaac Sim 6.0."
-        )
-        logger.error("IsaacSimulation.load_scene: %s", msg)
-        return {"status": "error", "content": [{"text": msg}]}
+        from strands_robots_sim.isaac.loaders import load_mjcf_scene_objects
+
+        with self._lock:
+            if not self._world_created:
+                msg = "Cannot load scene: no world created. Call create_world() " f"before load_scene({scene_path!r})."
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            if not scene_path or not os.path.exists(scene_path):
+                msg = f"Scene file not found: {scene_path!r}"
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            # Parse the MJCF -> a backend-agnostic list of SceneObjects.
+            try:
+                scene_objects = load_mjcf_scene_objects(scene_path)
+            except (FileNotFoundError, ValueError) as e:
+                msg = f"Failed to parse LIBERO scene {scene_path!r}: {e}"
+                logger.error("IsaacSimulation.load_scene: %s", msg)
+                return {"status": "error", "content": [{"text": msg}]}
+
+            # Clear any objects realized by a prior load_scene so per-episode
+            # reloads are idempotent (no duplicate prims / no "already exists").
+            for prior_name in list(self._scene_objects):
+                if prior_name in self._objects:
+                    self.remove_object(prior_name)
+                self._scene_objects.discard(prior_name)
+
+            realized: list[str] = []
+            skipped: list[dict[str, Any]] = []
+            for obj in scene_objects:
+                # ``add_object`` rejects duplicate names; if a manually-added
+                # object shadows a scene object, skip it rather than abort.
+                if obj.name in self._objects:
+                    skipped.append({"name": obj.name, "reason": "name already in use"})
+                    continue
+                result = self.add_object(
+                    name=obj.name,
+                    shape="box",
+                    position=list(obj.position),
+                    orientation=list(obj.quat),
+                    size=list(obj.size),
+                    mass=0.1,
+                    is_static=obj.is_static,
+                )
+                if result.get("status") == "success":
+                    realized.append(obj.name)
+                    self._scene_objects.add(obj.name)
+                else:
+                    text = (result.get("content") or [{}])[0].get("text", "")
+                    skipped.append({"name": obj.name, "reason": text})
+
+            summary = (
+                f"Loaded LIBERO scene from {os.path.basename(scene_path)}: "
+                f"realized {len(realized)} object(s) as Isaac stage prims"
+            )
+            if skipped:
+                summary += f" ({len(skipped)} skipped)"
+            logger.info("IsaacSimulation.load_scene: %s", summary)
+            return {
+                "status": "success",
+                "content": [
+                    {
+                        "text": summary,
+                        "json": {
+                            "scene_path": scene_path,
+                            "realized": realized,
+                            "skipped": skipped,
+                            "object_count": len(realized),
+                        },
+                    }
+                ],
+            }
 
     # --- SimEngine: Introspection / Removal ---------------------------------
 
@@ -2005,6 +2110,14 @@ class IsaacSimulation(SimEngine):
             also carries a ``json`` block with the resolved camera
             ``resolution``, ``prim_path``, and the boolean ``rtx`` flag
             so an agent can route on the path without parsing text.
+
+            Every success path also appends a
+            ``{"image": {"format": "png", "source": {"bytes": <raw PNG>}}}``
+            content block (raw PNG bytes, matching the MuJoCo backend)
+            so the shared ``PolicyRunner._extract_frame_ndarray`` can pull
+            frames for video recording (#127). The block is omitted (and a
+            warning logged) if PIL is unavailable; ``rgb``/``depth`` are
+            unaffected.
         """
         with self._lock:
             if not self._world_created:
@@ -2013,25 +2126,42 @@ class IsaacSimulation(SimEngine):
             w = width or self._config.camera_width
             h = height or self._config.camera_height
 
+            def _finish(env: dict[str, Any]) -> dict[str, Any]:
+                # Attach a content[].image PNG block mirroring the MuJoCo
+                # backend so the shared PolicyRunner._extract_frame_ndarray
+                # can pull frames for video recording (#127). rgb/depth stay
+                # top-level for direct numeric consumers (e.g. isaac_gs).
+                # The error path carries no rgb, so this is a no-op there.
+                rgb_arr = env.get("rgb")
+                if rgb_arr is not None:
+                    block = _rgb_png_block(rgb_arr)
+                    if block is not None:
+                        env.setdefault("content", []).append(block)
+                return env
+
             if self._config.render_mode == "headless":
                 # Return blank frames in headless mode. Most CI flows
                 # land here; Isaac's RTX path-tracer is unavailable.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                    "depth": np.zeros((h, w), dtype=np.float32),
-                    "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                        "depth": np.zeros((h, w), dtype=np.float32),
+                        "content": [{"text": f"Rendered (headless, no RTX): {w}x{h}"}],
+                    }
+                )
 
             if camera_name not in self._cameras:
                 # No camera configured — return blank. Caller probably
                 # forgot to call add_camera or typo'd the name.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                    "depth": np.zeros((h, w), dtype=np.float32),
-                    "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((h, w, 3), dtype=np.uint8),
+                        "depth": np.zeros((h, w), dtype=np.float32),
+                        "content": [{"text": f"Rendered (no camera): {w}x{h}"}],
+                    }
+                )
 
             cam = self._cameras[camera_name]
 
@@ -2041,12 +2171,16 @@ class IsaacSimulation(SimEngine):
                 # registered resolution rather than the method's
                 # ``width`` / ``height`` arguments, since the camera's
                 # resolution is what the caller asked for at add_camera.
-                return {
-                    "status": "success",
-                    "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
-                    "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
-                    "content": [{"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}],
-                }
+                return _finish(
+                    {
+                        "status": "success",
+                        "rgb": np.zeros((cam.height, cam.width, 3), dtype=np.uint8),
+                        "depth": np.zeros((cam.height, cam.width), dtype=np.float32),
+                        "content": [
+                            {"text": (f"Rendered (Phase-1 camera, no RTX handle): " f"{cam.width}x{cam.height}")}
+                        ],
+                    }
+                )
 
             # Phase-2 RTX path: pull real frames from the Camera handle.
             try:
@@ -2111,17 +2245,19 @@ class IsaacSimulation(SimEngine):
                 "resolution": [int(rgb.shape[1]), int(rgb.shape[0])],
                 "render_mode": self._config.render_mode,
             }
-            return {
-                "status": "success",
-                "rgb": rgb,
-                "depth": depth,
-                "content": [
-                    {
-                        "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
-                        "json": render_info,
-                    }
-                ],
-            }
+            return _finish(
+                {
+                    "status": "success",
+                    "rgb": rgb,
+                    "depth": depth,
+                    "content": [
+                        {
+                            "text": (f"Rendered (RTX {self._config.render_mode}): " f"{cam.width}x{cam.height}"),
+                            "json": render_info,
+                        }
+                    ],
+                }
+            )
 
     def add_camera(
         self,
