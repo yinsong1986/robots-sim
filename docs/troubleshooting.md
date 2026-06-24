@@ -225,7 +225,7 @@ Running the LIBERO examples with `--policy groot`
 GR00T-N1.7 VLA in the `nvcr.io/nvidia/isaac-gr00t` container. Three
 setup gotchas trip up first-time runs — the first two fail loudly, the
 third silently zeroes the score. See the
-[`--policy groot` prerequisites](../examples/README.md#-policy-groot-prerequisites--gotchas)
+[`--policy groot` prerequisites](https://github.com/strands-labs/robots-sim/blob/main/examples/README.md#-policy-groot-prerequisites--gotchas)
 in the examples README for the overview.
 
 ### `refusing to mount … under protected host path '/home'`
