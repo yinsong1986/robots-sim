@@ -108,7 +108,7 @@ the table for reference.
 | Example | Backend | `n_envs` | Wall-time @ success-rate | Notes |
 |---|---|---|---|---|
 | [`libero/run_mujoco.py`](libero/run_mujoco.py) | MuJoCo (in `strands-robots`) | 1 | ~9 s/ep @ 1.00 (groot, ZMQ client)[^1] | Reliably reaches 5/5 against post-[#188](https://github.com/strands-labs/robots/pull/188) `strands-robots`; macOS / CPU OK |
-| [`libero/run_isaac.py`](libero/run_isaac.py) | Isaac Sim | 1 | _measured by [`libero_backend_matrix.py`](libero/libero_backend_matrix.py)_ | RTX path-traced; loads a real Franka USD via `add_robot(usd_path=...)`. End-to-end validation landed in [PR #74](https://github.com/strands-labs/robots-sim/pull/74). |
+| [`libero/run_isaac.py`](libero/run_isaac.py) | Isaac Sim | 1 | _not yet measured — blocked on [#140](https://github.com/strands-labs/robots-sim/issues/140)_ | RTX real-time (`render_mode="rtx_realtime"`); loads a real Franka USD via `add_robot(usd_path=...)`. Data-plane slices landed in [PR #74](https://github.com/strands-labs/robots-sim/pull/74), but `run_isaac.py` currently crashes with an `IndexError` in `render()` during RTX warm-up before `evaluate_benchmark` runs, so **end-to-end validation does not hold today** ([#140](https://github.com/strands-labs/robots-sim/issues/140)). |
 
 IsaacLab-style fleet RL (n_envs=4096) is surfaced by the flagship
 matrix driver as a separate `run_isaac_fleet.py` row (`isaac-4096`),
@@ -238,16 +238,20 @@ python examples/libero/run_isaac.py --policy groot --port 8000 --n-episodes 50
 > diagnostic from `IsaacSimulation.is_available()` rather than crashing
 > on the first `omni.*` import.
 
-> **Status (landing):** Phase-2 data-plane slices (`add_camera`, render
-> frame-path, USD-load, URDF-load) are merged on `main`. End-to-end
-> validation of `run_isaac.py` + `run_isaac_agent.py` against an Isaac
-> Sim 6.0 install — including the `is_available()` namespace-shim, the
-> port from `omni.isaac.*` to `isaacsim.*`, and the matrix wall-time @
-> success-rate number above — landed in
-> [PR #74](https://github.com/strands-labs/robots-sim/pull/74). On a
-> non-Isaac host both scripts still exit early with a structured
-> diagnostic via `IsaacSimulation.is_available()` rather than crashing
-> on the first import.
+> **Status (in progress — blocked on [#140](https://github.com/strands-labs/robots-sim/issues/140)):**
+> Phase-2 data-plane slices (`add_camera`, render frame-path, USD-load,
+> URDF-load) are merged on `main`, including the `is_available()`
+> namespace-shim and the port from `omni.isaac.*` to `isaacsim.*`
+> ([PR #74](https://github.com/strands-labs/robots-sim/pull/74)).
+> **End-to-end validation does not hold today:** `run_isaac.py`
+> currently crashes with an `IndexError` in `render()` during the RTX
+> warm-up loop before `evaluate_benchmark` runs
+> ([#140](https://github.com/strands-labs/robots-sim/issues/140)), so the
+> matrix wall-time @ success-rate number for the Isaac row is not yet
+> measured. On a non-Isaac host both scripts still exit early with a
+> structured diagnostic via `IsaacSimulation.is_available()` rather than
+> crashing on the first import. Once #140 is fixed and `run_isaac.py`
+> runs end-to-end, this row reverts to validated wording.
 
 ## Running the matrix
 
@@ -268,7 +272,7 @@ never crashes the matrix.
 python examples/libero/libero_backend_matrix.py
 
 # 2) Limit which backend rows are attempted (faster smoke runs):
-python examples/libero/libero_backend_matrix.py --backends mujoco
+python examples/libero/libero_backend_matrix.py --backends mujoco,isaac-1
 
 # 3) Real eval against the matching `libero_<suite>/` GR00T
 #    sub-checkpoint (each driver auto-orchestrates its own GR00T
@@ -316,7 +320,7 @@ isaac-1                 --          --  skip (Isaac Sim is not available on this
 === /libero_backend_matrix ===
 ```
 
-Pass `--backends mujoco,isaac` to attempt only a subset, and
+Pass `--backends mujoco,isaac-1` to attempt only a subset, and
 `--per-backend-timeout 1200` to allow longer-running drivers (the
 default 600 s is generous for 10-episode mock smoke; full
 `--policy=groot` runs at 50 episodes can need more).
