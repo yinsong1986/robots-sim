@@ -741,7 +741,50 @@ def main() -> None:
         )
         if rec.get("status") != "success":
             raise RuntimeError(f"start_cameras_recording failed: {rec}")
-        on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+        base_on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+
+        # The library `on_frame` closure is best-effort per the sim API: a
+        # transient bad render (e.g. a `(0,)`-shaped RTX buffer when the
+        # render product hasn't accumulated a sample for *this* step yet)
+        # is silently skipped -- it bumps an internal error counter and
+        # drops the frame rather than raising. Across a whole rollout a run
+        # of such skips can leave the buffer empty, and `stop_cameras_recording`
+        # then writes a 0-frame mp4 that imageio drops -- the exact failure
+        # this PR set out to kill. The warm-up loop above guards the *first*
+        # frame, but mid-rollout RTX hiccups are not covered by it.
+        #
+        # Wrap the library closure so a skipped frame is retried (step +
+        # re-render) up to N times before giving up on that step. We detect
+        # a skip by watching the per-camera buffer length: if it didn't grow
+        # after calling the library closure, the frame was dropped, so we
+        # step+render once more and retry. A small, bounded retry budget keeps
+        # a steady-state RTX stall from silently producing a blank video while
+        # not turning a single transient hiccup into a hard failure. The
+        # fail-loud backstop is the post-rollout zero-frame assertion below.
+        _ON_FRAME_MAX_RETRIES = 3
+        retry_stats = {"skipped": 0, "retried": 0, "recovered": 0}
+
+        def _buffer_len() -> int:
+            st = getattr(sim, "_cams_rec_state", None)
+            if not st:
+                return 0
+            return len(st.get("buffers", {}).get(recording_camera, []))
+
+        def on_frame(step: int, observation: dict, action: dict) -> None:
+            before = _buffer_len()
+            base_on_frame(step, observation, action)
+            if _buffer_len() > before:
+                return
+            # Frame was skipped (bad/missing render). Retry step+render.
+            retry_stats["skipped"] += 1
+            for _ in range(_ON_FRAME_MAX_RETRIES):
+                retry_stats["retried"] += 1
+                sim.step(1)
+                base_on_frame(step, observation, action)
+                if _buffer_len() > before:
+                    retry_stats["recovered"] += 1
+                    return
+
         video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
 
         t0 = time.time()
@@ -761,6 +804,38 @@ def main() -> None:
             stop = sim.stop_cameras_recording()
             print(f"[recording] {stop['content'][0]['text']}")
         wall_time = time.time() - t0
+
+        # Fail loud if the rollout captured zero frames. `stop_cameras_recording`
+        # always returns status="success" (it's best-effort and idempotent),
+        # and imageio silently drops a 0-frame mp4 -- so without this check a
+        # blank rollout would ship a "success" line pointing at a file that
+        # never landed on disk. Inspect the per-camera artifact frame count
+        # and raise rather than emit a misleading grep-stable success line.
+        stop_json = next((c["json"] for c in stop.get("content", []) if "json" in c), None)
+        frames_written = 0
+        frame_errors = 0
+        if stop_json is not None:
+            for art in stop_json.get("artifacts", []):
+                if art.get("camera") == recording_camera:
+                    frames_written = int(art.get("frames", 0))
+                    frame_errors = int(art.get("errors", 0))
+                    break
+        if retry_stats["skipped"]:
+            print(
+                f"[recording] on_frame retries: {retry_stats['skipped']} skipped, "
+                f"{retry_stats['retried']} step+render retries, "
+                f"{retry_stats['recovered']} recovered "
+                f"(max {_ON_FRAME_MAX_RETRIES}/frame)"
+            )
+        if frames_written == 0:
+            raise RuntimeError(
+                f"rollout recorded 0 frames for camera {recording_camera!r} "
+                f"({frame_errors} per-frame render errors, "
+                f"{retry_stats['skipped']} skipped frames not recovered by "
+                f"{_ON_FRAME_MAX_RETRIES} step+render retries each). "
+                "imageio drops a 0-frame mp4, so no video would land at "
+                f"{video_path!r}; failing loud instead of shipping a blank rollout."
+            )
 
         if result.get("status") != "success":
             raise RuntimeError(f"evaluate_benchmark failed: {result}")
