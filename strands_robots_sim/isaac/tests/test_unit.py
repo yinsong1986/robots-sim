@@ -2469,6 +2469,15 @@ def _patched_isaac_urdf_modules() -> "tuple[MagicMock, MagicMock, MagicMock, Mag
 
     urdf_importer_mod = MagicMock()
     urdf_importer_mod._urdf.acquire_urdf_interface.return_value = urdf_iface_mod
+    # The Isaac Sim 6.0 high-level ``URDFImporter`` / ``URDFImporterConfig`` API
+    # is intentionally absent on this mock so that ``from
+    # isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig``
+    # raises ImportError inside ``_load_urdf_robot`` and the method falls back to
+    # the legacy ``_urdf`` parse/import interface these Phase-2 tests exercise.
+    # (The 6.0 class path is GPU-validated separately; MagicMock can't model it
+    # meaningfully since it satisfies any attribute access.)
+    del urdf_importer_mod.URDFImporter
+    del urdf_importer_mod.URDFImporterConfig
 
     articulations_mod = MagicMock()
     art_handle = MagicMock(name="Articulation_handle")

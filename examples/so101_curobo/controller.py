@@ -77,9 +77,17 @@ class SO101CuroboDemo:
         repo_id: str = "local/so101_curobo_pickplace",
         root: Optional[str] = None,
         prefer_planner: str = "auto",
-        # 40 fps = 1 / cuRobo interpolation_dt (0.025 s) -> the recorded video plays
-        # the trajectory at real time (~15 s); 20 fps made it play at half speed.
+        # Recorded-video playback rate. cuRobo interpolates its plan at a fixed
+        # 0.025 s per waypoint, and the executor records one frame per waypoint,
+        # so 1/0.025 = 40 fps makes the saved video play the planned motion at
+        # REAL TIME (a 435-waypoint plan = ~10.9 s of motion = ~10.9 s of video).
+        # (An earlier attempt derived fps from the MuJoCo sim timestep *
+        # n_substeps; that is unrelated to the planned trajectory timing and made
+        # playback ~2.5x too fast.) The scripted fallback has no time basis (coarse
+        # keyframes), so its short clips look fast regardless -- that's a fallback
+        # artifact, not the playback rate.
         fps: int = 40,
+        n_substeps: int = 5,
         camera_size: tuple = (640, 480),
         record_images: bool = True,
         planner_kwargs: Optional[dict] = None,
@@ -89,6 +97,7 @@ class SO101CuroboDemo:
         self.root = root
         self.prefer_planner = prefer_planner
         self.fps = fps
+        self.n_substeps = n_substeps
         self.camera_size = camera_size
         self.record_images = record_images
         # Extra kwargs forwarded to make_planner (e.g. cuRobo urdf_path/asset_path).
@@ -102,6 +111,8 @@ class SO101CuroboDemo:
         self.current_camera = "front"
         self._built = False
         self._backend_note = ""
+        self._home_q = None
+        self._home_snapshot = None
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -144,6 +155,21 @@ class SO101CuroboDemo:
             self.scene = build_pick_place_scene(
                 self.sim, camera_size=self.camera_size, backend=backend, robot_urdf=robot_urdf
             )
+            # Physical grasp path: when the arm has real position drives (the
+            # MuJoCo-actuated path OR the Isaac PhysX articulation), drive it via
+            # send_action and let the gripper physically clamp the cube -- no
+            # kinematic teleport or attach-carry. Only the actuator-less MuJoCo
+            # URDF path falls back to the kinematic carry.
+            actuated = bool(getattr(self.scene, "actuated", False))
+            is_isaac = self.backend in ("isaac", "isaacsim", "isaac_sim", "nvidia")
+            physical = actuated or is_isaac
+            # The force-controlled arm needs more physics substeps per waypoint
+            # than the kinematic teleport: enough for the position drive to track
+            # each setpoint and for the gripper to fully clamp the cube. 12 * dt
+            # (0.002) = 0.024 s ~ cuRobo's 0.025 s/waypoint, so playback stays
+            # ~real-time too. The kinematic path keeps the lighter 5.
+            if physical and self.n_substeps < 12:
+                self.n_substeps = 12
             self.collector = LeRobotDataCollector(
                 self.sim,
                 self.scene,
@@ -152,12 +178,26 @@ class SO101CuroboDemo:
                 root=self.root,
                 cameras=self.scene.cameras,
                 record_images=self.record_images,
-                kinematic=bool(robot_urdf),  # URDF arm has no actuators -> kinematic
-                grasp_attach=bool(robot_urdf),  # kinematic grasp for the cuRobo path
-                base_sign=(-1.0 if self.backend in ("isaac", "isaacsim", "isaac_sim", "nvidia") else 1.0),
+                kinematic=(bool(robot_urdf) and not physical),
+                grasp_attach=(bool(robot_urdf) and not physical),
+                base_sign=(-1.0 if is_isaac else 1.0),
+                # Isaac hybrid: physically grasp+lift the cube (real PhysX), then
+                # kinematically carry it through the place traverse to the bin
+                # (the 5-DOF friction grip can't reliably hold the cube through
+                # the sideways move, so the transport is scripted while the
+                # pick+lift stays real). Success requires a genuine physical lift.
+                hybrid_carry=is_isaac,
             )
             if self.scene.cameras:
                 self.current_camera = self.scene.cameras[0]
+            # Capture the clean rest pose + physics state now so every
+            # single-shot plan_and_execute can reset to a known, collision-free
+            # start (matching the per-episode reset in record_dataset). Without
+            # this the 2nd "Plan & execute" click starts from the previous
+            # episode's final arm pose / moved cube, which cuRobo rejects as
+            # "start state in collision" -> scripted fallback (success=False).
+            self._home_q = self.collector.home_q()
+            self._home_snapshot = self.collector._snapshot_state()
             self._built = True
             logger.info("Demo built: %s | planner=%s", self.scene.pretty(), self.planner.name)
             return self
@@ -188,12 +228,23 @@ class SO101CuroboDemo:
             base_sign=base_sign,
         )
 
-    def plan_and_execute(self, task: str = "pick up the red cube and place it in the bin", n_substeps: int = 5) -> str:
+    def plan_and_execute(
+        self, task: str = "pick up the red cube and place it in the bin", n_substeps: Optional[int] = None
+    ) -> str:
         """Plan a pick-and-place, execute it, and record one LeRobot episode."""
         with self._lock:
             self._require()
+            n_substeps = self.n_substeps if n_substeps is None else n_substeps
 
             def _work() -> str:
+                # Reset to the clean rest pose + cube start before planning so
+                # each click starts from a known, collision-free state (else the
+                # previous episode's final arm pose / moved cube makes cuRobo
+                # report "start state in collision" -> scripted fallback).
+                try:
+                    self.collector.reset_world(home_q=self._home_q, snapshot=self._home_snapshot)
+                except Exception:  # noqa: BLE001 - reset is best-effort
+                    logger.debug("pre-plan reset failed (non-fatal)", exc_info=True)
                 try:
                     traj = self._plan()
                 except RuntimeError as exc:  # cuRobo not wired -> actionable message
@@ -229,11 +280,12 @@ class SO101CuroboDemo:
         n_episodes: int = 5,
         task: str = "pick up the red cube and place it in the bin",
         randomize: bool = True,
-        n_substeps: int = 5,
+        n_substeps: Optional[int] = None,
         on_episode=None,
     ) -> Dict[str, Any]:
         with self._lock:
             self._require()
+            n_substeps = self.n_substeps if n_substeps is None else n_substeps
 
             def _work() -> Dict[str, Any]:
                 return self.collector.record_dataset(
@@ -243,6 +295,8 @@ class SO101CuroboDemo:
                     randomize=randomize,
                     n_substeps=n_substeps,
                     on_episode=on_episode,
+                    home_q=self._home_q,
+                    snapshot=self._home_snapshot,
                 )
 
             # Run the whole multi-episode job on the main (pump) thread for the
@@ -261,10 +315,30 @@ class SO101CuroboDemo:
                 obs = self.sim.get_observation(self.scene.robot_name)
                 img = obs.get(cam)
                 if img is not None and hasattr(img, "shape"):
-                    return np.asarray(img)[:, :, :3]
+                    return self._crop_black_band(np.asarray(img)[:, :, :3])
             except Exception:  # noqa: BLE001 - rendering needs GL/EGL
                 logger.debug("render failed for %s", cam, exc_info=True)
             return None
+
+    @staticmethod
+    def _crop_black_band(img: "np.ndarray") -> "np.ndarray":
+        """Crop a hard black bottom band off a frame (Isaac headless RTX leaves
+        the lower part of the camera buffer unrendered). Keeps the rendered
+        region; returns the input unchanged if there's no significant band."""
+        try:
+            if img.ndim != 3 or img.shape[0] < 8:
+                return img
+            h = img.shape[0]
+            rowmean = img.reshape(h, -1).mean(axis=1)
+            content = np.where(rowmean > 6.0)[0]
+            if content.size == 0:
+                return img
+            last = int(content.max()) + 1
+            if last >= h - max(2, int(0.01 * h)) or last < h // 2:
+                return img
+            return img[:last]
+        except Exception:  # noqa: BLE001
+            return img
 
     def set_camera(self, camera: str) -> str:
         with self._lock:
@@ -297,6 +371,38 @@ class SO101CuroboDemo:
         src = max(matches, key=os.path.getmtime)
         return self._h264(src, cam)
 
+    def _content_crop_filter(self, src: str) -> Optional[str]:
+        """Return an ffmpeg ``-vf`` that crops a black band off ``src``, or None.
+
+        The Isaac headless RTX camera fills only the top portion of the frame
+        height; the rest is a hard black band. Read one frame, find the last row
+        with real content, and build a ``crop=...,scale=...`` filter that keeps
+        only the rendered region (scaled back to the original size for a stable
+        player). Returns None (no crop) if no significant band is found.
+        """
+        try:
+            import imageio.v3 as iio
+            import numpy as np
+
+            frames = iio.imread(src, plugin="pyav")
+            if frames is None or len(frames) == 0:
+                return None
+            f = np.asarray(frames[len(frames) // 2])[..., :3]
+            h, w = f.shape[:2]
+            rowmean = f.reshape(h, -1).mean(axis=1)
+            content = np.where(rowmean > 6.0)[0]
+            if content.size == 0:
+                return None
+            last = int(content.max()) + 1
+            # Only crop a meaningful band (> 8% of height) while keeping > half.
+            if last >= h - max(2, int(0.01 * h)) or last < h // 2:
+                return None
+            ch = last - (last % 2)  # even height for yuv420p
+            return f"crop={w}:{ch}:0:0,scale={w}:{h}"
+        except Exception:  # noqa: BLE001 - cropping is best-effort
+            logger.debug("content-crop analysis failed", exc_info=True)
+            return None
+
     def _h264(self, src: str, cam: str) -> Optional[str]:
         """Transcode ``src`` (LeRobot AV1) to a cached H.264 mp4 for browser playback."""
         import os
@@ -313,9 +419,18 @@ class SO101CuroboDemo:
         out = os.path.join(tempfile.gettempdir(), f"so101_{cam}_{mtime}.mp4")
         if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
             return out
+        # The Isaac headless RTX render product fills only part of the camera
+        # frame height, leaving a hard black band (rows below the rendered
+        # region). Auto-detect the content height and crop the band so the video
+        # shows the scene full-bleed instead of a black-padded image. Best-effort.
+        vf = self._content_crop_filter(src)
         try:
+            cmd = [ffmpeg, "-y", "-i", src]
+            if vf:
+                cmd += ["-vf", vf]
+            cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
             subprocess.run(
-                [ffmpeg, "-y", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out],
+                cmd,
                 check=True,
                 capture_output=True,
                 timeout=120,
