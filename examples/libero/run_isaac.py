@@ -615,11 +615,17 @@ def main() -> None:
         policy_kwargs = {"policy_provider": "mock"}
 
     # Construct the Isaac sim. headless=True avoids opening a Kit
-    # viewport (the GR00T eval doesn't need an interactive GUI). The
-    # IsaacConfig dataclass is a pure-Python construct (no omni.*
+    # viewport (the GR00T eval doesn't need an interactive GUI); it does
+    # NOT control the render pipeline. render_mode="rtx_realtime" makes
+    # render() take the RTX frame path instead of short-circuiting to
+    # zero-filled (blank) frames in the default render_mode="headless",
+    # which is what produced all-black rollout MP4s. (Allowed modes:
+    # "headless", "rtx_realtime", "rtx_pathtracing" -- see config.py.
+    # STRANDS_ISAAC_RTX_PATHTRACING=1 upgrades to photoreal pathtracing.)
+    # The IsaacConfig dataclass is a pure-Python construct (no omni.*
     # imports), so this constructor is cheap and runs on a non-Isaac
     # host — the actual SimulationApp boot happens inside create_world().
-    sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1))
+    sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1, render_mode="rtx_realtime"))
     try:
         result = sim.create_world()
         if result.get("status") != "success":
@@ -656,14 +662,48 @@ def main() -> None:
         # ``render(camera_name="image")`` returns real RGB frames keyed off
         # it. Those frames feed both ``--policy=groot`` (which reads images)
         # and the rollout-video recorder wired below.
+        recording_camera = "image"
         result = sim.add_camera(
-            name="image",
+            name=recording_camera,
             position=[2.0, 0.0, 1.5],
             target=[0.0, 0.0, 0.5],
             fov=60.0,
         )
         if result.get("status") != "success":
             raise RuntimeError(f"add_camera failed: {result}")
+
+        # Warm up the RTX render product before recording. A camera added
+        # after the last world step has an empty render product: its first
+        # `get_rgba()` returns a malformed `(0,)` buffer and `render()`
+        # surfaces a structured "RTX render product likely hasn't accumulated
+        # a frame yet" error (simulation.py:2135-2141). If we start recording
+        # immediately, every `on_frame` call hits that error, the recorder
+        # buffer stays empty for the whole rollout, and `stop_cameras_recording`
+        # writes a 0-frame mp4 that imageio silently drops -- the file never
+        # lands on disk despite a "success" status line.
+        #
+        # Step + render the world a few times until `render(camera_name="image")`
+        # returns a real (non-error) frame, mirroring isaac_gs/render_demo.py's
+        # `sim.step(5)`-before-render pattern. `sim.step` under
+        # render_mode="rtx_realtime" calls `world.step(render=True)`, so the RTX
+        # render product accumulates samples each iteration. Bounded so a host
+        # that never populates fails loudly instead of recording blank frames.
+        _RTX_WARMUP_MAX_ITERS = 10
+        warmed_up = False
+        for _ in range(_RTX_WARMUP_MAX_ITERS):
+            sim.step(1)
+            probe = sim.render(camera_name=recording_camera)
+            if probe.get("status") == "success":
+                warmed_up = True
+                break
+        if not warmed_up:
+            raise RuntimeError(
+                f"RTX render product for camera {recording_camera!r} never "
+                f"accumulated a frame after {_RTX_WARMUP_MAX_ITERS} warm-up "
+                "step+render iterations; recording would produce a 0-frame "
+                f"(dropped) mp4. Last render probe: {probe}"
+            )
+        print(f"[setup] RTX camera {recording_camera!r} warmed up; render product populated")
 
         # Keep the CLI-requested task distinct from the resolved one. The
         # default placeholder transparently falls back to the first registered
@@ -685,7 +725,6 @@ def main() -> None:
             f"--seed={args.seed}--policy={args.policy}--backend=isaac"
         )
         video_dir = _date_dir()
-        recording_camera = "image"
 
         # Arm the synchronous Isaac recorder. Unlike MuJoCo's daemon-thread
         # recorder, IsaacSimulation captures frames on the eval thread via
@@ -702,7 +741,50 @@ def main() -> None:
         )
         if rec.get("status") != "success":
             raise RuntimeError(f"start_cameras_recording failed: {rec}")
-        on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+        base_on_frame = next(c["json"]["on_frame"] for c in rec["content"] if "json" in c)
+
+        # The library `on_frame` closure is best-effort per the sim API: a
+        # transient bad render (e.g. a `(0,)`-shaped RTX buffer when the
+        # render product hasn't accumulated a sample for *this* step yet)
+        # is silently skipped -- it bumps an internal error counter and
+        # drops the frame rather than raising. Across a whole rollout a run
+        # of such skips can leave the buffer empty, and `stop_cameras_recording`
+        # then writes a 0-frame mp4 that imageio drops -- the exact failure
+        # this PR set out to kill. The warm-up loop above guards the *first*
+        # frame, but mid-rollout RTX hiccups are not covered by it.
+        #
+        # Wrap the library closure so a skipped frame is retried (step +
+        # re-render) up to N times before giving up on that step. We detect
+        # a skip by watching the per-camera buffer length: if it didn't grow
+        # after calling the library closure, the frame was dropped, so we
+        # step+render once more and retry. A small, bounded retry budget keeps
+        # a steady-state RTX stall from silently producing a blank video while
+        # not turning a single transient hiccup into a hard failure. The
+        # fail-loud backstop is the post-rollout zero-frame assertion below.
+        _ON_FRAME_MAX_RETRIES = 3
+        retry_stats = {"skipped": 0, "retried": 0, "recovered": 0}
+
+        def _buffer_len() -> int:
+            st = getattr(sim, "_cams_rec_state", None)
+            if not st:
+                return 0
+            return len(st.get("buffers", {}).get(recording_camera, []))
+
+        def on_frame(step: int, observation: dict, action: dict) -> None:
+            before = _buffer_len()
+            base_on_frame(step, observation, action)
+            if _buffer_len() > before:
+                return
+            # Frame was skipped (bad/missing render). Retry step+render.
+            retry_stats["skipped"] += 1
+            for _ in range(_ON_FRAME_MAX_RETRIES):
+                retry_stats["retried"] += 1
+                sim.step(1)
+                base_on_frame(step, observation, action)
+                if _buffer_len() > before:
+                    retry_stats["recovered"] += 1
+                    return
+
         video_path = os.path.join(video_dir, f"{rec_name}__{recording_camera}.mp4")
 
         t0 = time.time()
@@ -722,6 +804,38 @@ def main() -> None:
             stop = sim.stop_cameras_recording()
             print(f"[recording] {stop['content'][0]['text']}")
         wall_time = time.time() - t0
+
+        # Fail loud if the rollout captured zero frames. `stop_cameras_recording`
+        # always returns status="success" (it's best-effort and idempotent),
+        # and imageio silently drops a 0-frame mp4 -- so without this check a
+        # blank rollout would ship a "success" line pointing at a file that
+        # never landed on disk. Inspect the per-camera artifact frame count
+        # and raise rather than emit a misleading grep-stable success line.
+        stop_json = next((c["json"] for c in stop.get("content", []) if "json" in c), None)
+        frames_written = 0
+        frame_errors = 0
+        if stop_json is not None:
+            for art in stop_json.get("artifacts", []):
+                if art.get("camera") == recording_camera:
+                    frames_written = int(art.get("frames", 0))
+                    frame_errors = int(art.get("errors", 0))
+                    break
+        if retry_stats["skipped"]:
+            print(
+                f"[recording] on_frame retries: {retry_stats['skipped']} skipped, "
+                f"{retry_stats['retried']} step+render retries, "
+                f"{retry_stats['recovered']} recovered "
+                f"(max {_ON_FRAME_MAX_RETRIES}/frame)"
+            )
+        if frames_written == 0:
+            raise RuntimeError(
+                f"rollout recorded 0 frames for camera {recording_camera!r} "
+                f"({frame_errors} per-frame render errors, "
+                f"{retry_stats['skipped']} skipped frames not recovered by "
+                f"{_ON_FRAME_MAX_RETRIES} step+render retries each). "
+                "imageio drops a 0-frame mp4, so no video would land at "
+                f"{video_path!r}; failing loud instead of shipping a blank rollout."
+            )
 
         if result.get("status") != "success":
             raise RuntimeError(f"evaluate_benchmark failed: {result}")
