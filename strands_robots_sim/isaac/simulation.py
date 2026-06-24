@@ -2929,7 +2929,7 @@ class IsaacSimulation(SimEngine):
             if hasattr(cfg, "joint_drive_type"):
                 try:
                     cfg.joint_drive_type = "position"
-                except Exception:  # noqa: BLE001 - enum vs str varies; leave default
+                except (AttributeError, TypeError, ValueError):  # enum vs str varies; leave default
                     pass
             # Strong position-drive gains so the arm holds against gravity and
             # tracks commanded joint targets (the bare SO-101 URDF has no
@@ -2939,13 +2939,13 @@ class IsaacSimulation(SimEngine):
                 if hasattr(cfg, attr):
                     try:
                         setattr(cfg, attr, val)
-                    except Exception:  # noqa: BLE001
+                    except (AttributeError, TypeError, ValueError):
                         pass
             importer = URDFImporter(config=cfg) if _accepts_config_kw(URDFImporter) else URDFImporter()
             if hasattr(importer, "config"):
                 try:
                     importer.config = cfg
-                except Exception:  # noqa: BLE001
+                except (AttributeError, TypeError):
                     pass
             # Isaac Sim 6.0 ``import_urdf()`` converts URDF -> USD on disk and
             # returns the USD path (NOT a live-stage prim path). Reference that
@@ -2983,7 +2983,6 @@ class IsaacSimulation(SimEngine):
             imported_prim_path = urdf_iface.import_robot(urdf_root, urdf_filename, urdf_robot, import_config, "")
             if not imported_prim_path:
                 raise RuntimeError(f"URDF import failed for {urdf_path!r} via _urdf.import_robot")
-
 
         # Step 2b: bind the imported prim to our caller-requested
         # ``prim_path``. The ``import_robot`` call adds prims at
@@ -3028,10 +3027,10 @@ class IsaacSimulation(SimEngine):
                 if callable(set_max):
                     try:
                         set_max(np.full(ndof, 1.0e3, dtype=float))
-                    except Exception:  # noqa: BLE001
+                    except (RuntimeError, ValueError, TypeError, IndexError):
                         # Some builds expect a (M, K) batch for the view.
                         set_max(np.full((1, ndof), 1.0e3, dtype=float))
-        except Exception:  # noqa: BLE001 - gain set is best-effort
+        except (AttributeError, TypeError, ValueError, RuntimeError, IndexError):  # gain set is best-effort
             logger.debug("set drive gains failed (non-fatal)", exc_info=True)
         # Stash the importer's actual landing path on the articulation
         # handle as a sidecar attribute so the caller (``add_robot``)
@@ -3343,7 +3342,7 @@ class IsaacSimulation(SimEngine):
                                 if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
                                     op.Set(Gf.Quatf(float(ori[0]), float(ori[1]), float(ori[2]), float(ori[3])))
                                     break
-                except Exception:  # noqa: BLE001
+                except (AttributeError, TypeError, ValueError, RuntimeError):
                     logger.debug("move_object USD xform write skipped", exc_info=True)
         except (RuntimeError, ValueError, AttributeError, TypeError) as exc:
             return {"status": "error", "content": [{"text": f"move_object failed: {type(exc).__name__}: {exc}"}]}

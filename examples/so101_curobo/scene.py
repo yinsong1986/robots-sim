@@ -304,7 +304,7 @@ def _actuate_arm(sim, robot_name: str) -> bool:
             a.gainprm[0] = kp
             a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
             a.biasprm[1] = -kp
-            a.biasprm[2] = -2.0 * (kp ** 0.5)
+            a.biasprm[2] = -2.0 * (kp**0.5)
             a.ctrllimited = 1
             a.ctrlrange[0] = -3.2
             a.ctrlrange[1] = 3.2
@@ -399,8 +399,13 @@ def _add_open_top_bin(sim, place_position, is_isaac: bool) -> None:
     def _box(name, pos, half):
         size = [2.0 * h for h in half] if is_isaac else list(half)
         r = sim.add_object(
-            name=name, shape="box", position=pos, size=size,
-            color=g, mass=1.0, is_static=True,
+            name=name,
+            shape="box",
+            position=pos,
+            size=size,
+            color=g,
+            mass=1.0,
+            is_static=True,
         )
         if _status(r) != "success":
             logger.info("bin part %r not added (non-fatal): %s", name, r)
@@ -499,7 +504,6 @@ def _apply_isaac_grip_friction(sim, robot_name: str) -> bool:
     best-effort.
     """
     try:
-        import omni.usd  # type: ignore[import-not-found]
         from isaacsim.core.api.materials import PhysicsMaterial  # type: ignore[import-not-found]
         from isaacsim.core.utils.prims import get_prim_at_path  # type: ignore[import-not-found]
         from pxr import Usd, UsdShade  # type: ignore[import-not-found]
@@ -510,7 +514,6 @@ def _apply_isaac_grip_friction(sim, robot_name: str) -> bool:
             dynamic_friction=3.5,
             restitution=0.0,
         )
-        stage = omni.usd.get_context().get_stage()
 
         def _bind(prim_path: str) -> None:
             prim = get_prim_at_path(prim_path)

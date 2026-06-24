@@ -523,9 +523,12 @@ class CuroboMotionPlanner:
                 out[j] = 0.65 * home_arm[j] + 0.35 * out[j]
         return out
 
-    def _plan_segment(self, start_arm_q, goal_xyz, goal_quat, orient: bool = False, apply_tcp: bool = True) -> List[List[float]]:
+    def _plan_segment(
+        self, start_arm_q, goal_xyz, goal_quat, orient: bool = False, apply_tcp: bool = True
+    ) -> List[List[float]]:
         import torch
         from curobo.types import GoalToolPose, JointState, ToolPoseCriteria
+
         jn = self._arm_joint_names
         start = JointState.from_position(
             torch.tensor([start_arm_q], dtype=torch.float32, device=self.device), joint_names=jn

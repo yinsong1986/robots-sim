@@ -228,7 +228,9 @@ class SO101CuroboDemo:
             base_sign=base_sign,
         )
 
-    def plan_and_execute(self, task: str = "pick up the red cube and place it in the bin", n_substeps: Optional[int] = None) -> str:
+    def plan_and_execute(
+        self, task: str = "pick up the red cube and place it in the bin", n_substeps: Optional[int] = None
+    ) -> str:
         """Plan a pick-and-place, execute it, and record one LeRobot episode."""
         with self._lock:
             self._require()

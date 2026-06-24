@@ -156,6 +156,7 @@ class LeRobotDataCollector:
         # cube renders a few cm off its logical coords relative to the bin).
         # Tunable via SO101_CUBE_RENDER_OFFSET="x,y".
         import os as _os_off
+
         _off_env = _os_off.environ.get("SO101_CUBE_RENDER_OFFSET", "")
         try:
             _ox, _oy = (float(v) for v in _off_env.split(","))
@@ -280,9 +281,8 @@ class LeRobotDataCollector:
         if snap is None:
             return
         try:
-            import numpy as np
-
             import mujoco
+            import numpy as np
 
             m = getattr(self.sim, "mj_model", None)
             d = getattr(self.sim, "mj_data", None)
@@ -292,7 +292,7 @@ class LeRobotDataCollector:
             # the live qpos/qvel must NOT be carried back in. The snapshot was
             # captured clean at build, so restore it wholesale and hard-zero qvel
             # + qacc + warmstart so no residual instability survives the reset.
-            qpos, qvel = np.asarray(snap[0], dtype=d.qpos.dtype), np.asarray(snap[1], dtype=d.qvel.dtype)
+            qpos = np.asarray(snap[0], dtype=d.qpos.dtype)
             qpos = np.nan_to_num(qpos, nan=0.0, posinf=0.0, neginf=0.0)
             d.qpos[:] = qpos
             d.qvel[:] = 0.0
@@ -625,7 +625,6 @@ class LeRobotDataCollector:
         hy_lifted = False
         hy_released = False
         hy_grasped = False
-        hy_carry_phases = {"place", "place_down"}
         self._hybrid_drop_xy = None
         # Track the cube's max height to detect a genuine pick (lifted clear of
         # the table). Used by the success check so a failed grasp that leaves the
@@ -635,7 +634,6 @@ class LeRobotDataCollector:
         self._cube_max_z = self._cube_start_z
         grasp_local: Optional[List[float]] = None  # cube pos in tool-frame coords (carried)
         rest_local: Optional[List[float]] = None  # where the cube rested, tool-frame coords
-        grasp_phases = {"grasp", "close", "lift", "place", "place_down"}
         # Phases where the gripper is gripping (jaws closed on the cube). Detect
         # "closed" by PHASE, not by a value threshold: the SO-101 gripper joint's
         # closing direction is the LOW end of its range, but the old
@@ -777,9 +775,7 @@ class LeRobotDataCollector:
                 # surface (collider still off so the opening jaw can't bat it).
                 if self._hybrid_drop_xy is not None and not hy_released:
                     dx, dy = self._hybrid_drop_xy
-                    self.sim.move_object(
-                        self.scene.cube_name, position=[dx, dy, self._rest_z_at(dx, dy)]
-                    )
+                    self.sim.move_object(self.scene.cube_name, position=[dx, dy, self._rest_z_at(dx, dy)])
                     self._zero_cube_velocity()
 
             if has_grip:
@@ -858,7 +854,6 @@ class LeRobotDataCollector:
         # record a few extra frames of the settle.
         if has_grip and self.kinematic and trajectory.waypoints:
             last = trajectory.waypoints[-1]
-            last_phase = trajectory.phases[-1] if trajectory.phases else ""
             for _ in range(8):
                 self.sim.set_joint_positions(last, robot_name=robot)
                 self.sim.step(max(1, n_substeps))
@@ -887,9 +882,7 @@ class LeRobotDataCollector:
                 action = last if s < 3 else home
                 self.sim.send_action(action, robot_name=robot, n_substeps=n_substeps)
                 if drop_xy is not None:
-                    self.sim.move_object(
-                        self.scene.cube_name, position=[drop_xy[0], drop_xy[1], rest_z]
-                    )
+                    self.sim.move_object(self.scene.cube_name, position=[drop_xy[0], drop_xy[1], rest_z])
                     self._zero_cube_velocity()
                 obs = self.sim.get_observation(robot, skip_images=not self.record_images)
                 recorder.add_frame(observation=obs, action=last, task=task)
@@ -931,9 +924,7 @@ class LeRobotDataCollector:
         # (the Isaac kinematic-carry path reads the cube via PhysX where the
         # carried lift may not register in the USD pose). ``lifted`` still counts
         # as a positive signal when available.
-        start_place_d = (
-            math.dist(cube_start[:2], self.scene.place_position[:2]) if cube_start is not None else None
-        )
+        start_place_d = math.dist(cube_start[:2], self.scene.place_position[:2]) if cube_start is not None else None
         approached_bin = start_place_d is not None and (start_place_d - place_d) > self.move_threshold
         success = bool(placed and moved and (lifted or approached_bin))
         # Hybrid path: require a genuine physical GRASP (the jaws actually closed
