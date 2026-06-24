@@ -615,11 +615,17 @@ def main() -> None:
         policy_kwargs = {"policy_provider": "mock"}
 
     # Construct the Isaac sim. headless=True avoids opening a Kit
-    # viewport (the GR00T eval doesn't need an interactive GUI). The
-    # IsaacConfig dataclass is a pure-Python construct (no omni.*
+    # viewport (the GR00T eval doesn't need an interactive GUI); it does
+    # NOT control the render pipeline. render_mode="rtx_realtime" makes
+    # render() take the RTX frame path instead of short-circuiting to
+    # zero-filled (blank) frames in the default render_mode="headless",
+    # which is what produced all-black rollout MP4s. (Allowed modes:
+    # "headless", "rtx_realtime", "rtx_pathtracing" -- see config.py.
+    # STRANDS_ISAAC_RTX_PATHTRACING=1 upgrades to photoreal pathtracing.)
+    # The IsaacConfig dataclass is a pure-Python construct (no omni.*
     # imports), so this constructor is cheap and runs on a non-Isaac
     # host — the actual SimulationApp boot happens inside create_world().
-    sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1))
+    sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1, render_mode="rtx_realtime"))
     try:
         result = sim.create_world()
         if result.get("status") != "success":

@@ -671,7 +671,12 @@ def main() -> None:
 
     server_handle = _bring_up_gr00t_server(args, suite)
 
-    _sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1))
+    # render_mode="rtx_realtime" makes render() take the RTX frame path
+    # instead of returning zero-filled (blank) frames in the default
+    # render_mode="headless" -- the latter produced all-black rollout
+    # MP4s. headless=True only suppresses the Kit viewport, not the
+    # render pipeline. (STRANDS_ISAAC_RTX_PATHTRACING=1 -> photoreal.)
+    _sim = IsaacSimulation(IsaacConfig(headless=True, num_envs=1, render_mode="rtx_realtime"))
     try:
         result = _sim.create_world()
         if result.get("status") != "success":
