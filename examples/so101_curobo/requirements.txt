@@ -14,10 +14,15 @@ numpy
 
 # --- Optional, NOT pip-installable here (install out-of-band) ---------------
 # cuRobo (collision-aware planning, issue #67 T3/T4/T5). Needs an NVIDIA GPU
-# (> Turing) and driver >= 580.65.06 for the latest release:
-#   git clone https://github.com/NVlabs/curobo && cd curobo
-#   uv venv --python 3.11 && source .venv/bin/activate && uv pip install .[cu12-torch]
+# (> Turing). NVIDIA's docs recommend driver >= 580.65.06 for the latest
+# release, but this example is validated on driver 550 / CUDA 12.4 / L4 — treat
+# 550 as the validated minimum here and 580 as the upstream recommendation.
 #
+# Canonical install recipe lives in the README (do not duplicate/diverge here):
+#   examples/so101_curobo/README.md  → "Flipping to Isaac + cuRobo"
+# It clones NVlabs/curobo, `pip install -e . --no-build-isolation`, then the
+# required `pip install 'cuda-core[cu12]'` runtime kernel backend. `uv` users
+# can swap in `uv venv --python 3.11` for the venv step.
 # Isaac Sim runtime (~30 GB; backend registration is issue #67 T1).
 # Targets Isaac Sim 6.0 (Python 3.12) — the interpreter `strands-robots>=0.4.0`
 # requires; see #98 / #101 / PR #102:
