@@ -66,6 +66,37 @@ def run_smoke(n_episodes: int = 2, tmp_root: str | None = None) -> dict:
     }
 
 
+def run_rerun(repo_id: str = "local/so101_curobo_rerun_smoke", root: str | None = None) -> dict:
+    """Record the SAME dataset twice (issue #143 repro).
+
+    The first run creates the dataset dir; the second must NOT raise
+    ``FileExistsError`` from ``LeRobotDataset.create``. Defaults ``root=None`` so
+    this exercises the HF-cache default path (the exact case the documented
+    ``app.py`` command hits, which #143 reported failing on the 2nd run).
+    """
+    from examples.so101_curobo.controller import SO101CuroboDemo
+
+    def _once() -> dict:
+        demo = SO101CuroboDemo(
+            backend="mujoco",
+            repo_id=repo_id,
+            root=root,
+            prefer_planner="scripted",
+            record_images=False,
+        ).build()
+        summary = demo.record_dataset(n_episodes=1, randomize=False)
+        demo.close()
+        return summary
+
+    first = _once()
+    assert first.get("status") == "success", first
+    # Second run with the SAME repo_id/root must also succeed (idempotent re-run).
+    second = _once()
+    assert second.get("status") == "success", second
+    assert second["total_frames"] > 0, second
+    return {"first": first, "second": second}
+
+
 def test_smoke_mujoco_pickplace():
     """pytest entry — skips when deps are absent."""
     import pytest
@@ -76,6 +107,23 @@ def test_smoke_mujoco_pickplace():
     out = run_smoke(n_episodes=2)
     assert out["total_frames"] > 0
     assert out["ep0_frames"] > 0
+
+
+def test_rerun_default_root_is_idempotent():
+    """Regression for #143: re-running with the default repo-id/root must not raise.
+
+    Before the fix, the 2nd ``record_dataset`` with the default (HF-cache) root
+    raised ``FileExistsError`` because ``LeRobotDataset.create`` refuses an
+    existing dir. The collector now clears a prior dataset dir at the resolved
+    effective root, so the documented command is idempotently re-runnable.
+    """
+    import pytest
+
+    ok, why = _deps_ok()
+    if not ok:
+        pytest.skip(f"so101_curobo rerun smoke skipped: {why}")
+    out = run_rerun()
+    assert out["second"]["total_frames"] > 0
 
 
 def main() -> int:

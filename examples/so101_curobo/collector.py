@@ -229,6 +229,25 @@ class LeRobotDataCollector:
         else:
             self._reset_episode(home_q if home_q is not None else self.home_q())
 
+    def _default_root(self) -> Optional[str]:
+        """Resolve the on-disk dir LeRobot would use when ``--root`` is unset.
+
+        Mirrors ``LeRobotDataset.create``'s default of ``$HF_LEROBOT_HOME/{repo_id}``
+        so the re-run cleanup in :meth:`_new_recorder` can also clear the HF-cache
+        default (issue #143), not just an explicit ``--root``. Best-effort: returns
+        ``None`` if LeRobot isn't importable, leaving behavior unchanged.
+        """
+        import os
+
+        try:
+            from lerobot.utils.constants import HF_LEROBOT_HOME
+        except Exception:  # noqa: BLE001 - older/newer LeRobot layouts
+            home = os.environ.get("HF_LEROBOT_HOME") or os.path.join(
+                os.path.expanduser("~"), ".cache", "huggingface", "lerobot"
+            )
+            return os.path.join(home, *self.repo_id.split("/"))
+        return os.path.join(str(HF_LEROBOT_HOME), *self.repo_id.split("/"))
+
     def _new_recorder(self, task: str):
         if not self.available():
             raise RuntimeError(LEROBOT_INSTALL_HINT)
@@ -237,12 +256,18 @@ class LeRobotDataCollector:
 
         from strands_robots.dataset_recorder import DatasetRecorder
 
-        # LeRobotDataset.create() requires a non-existent root (mkdir exist_ok=False).
-        # Clear a prior dataset dir (or an empty placeholder, e.g. from mkdtemp) so
-        # "regenerate" works; only touch dirs that look like a dataset or are empty.
-        if self.root and os.path.isdir(self.root):
-            if os.path.isdir(os.path.join(self.root, "meta")) or not os.listdir(self.root):
-                shutil.rmtree(self.root, ignore_errors=True)
+        # LeRobotDataset.create() requires a non-existent root (mkdir exist_ok=False),
+        # so a prior run's dataset dir makes every re-run raise FileExistsError
+        # (issue #143). Resolve the EFFECTIVE root (the HF cache default
+        # ``$HF_LEROBOT_HOME/{repo_id}`` when --root is unset, matching how
+        # LeRobotDataset.create resolves it) and clear a prior dataset dir (or an
+        # empty placeholder, e.g. from mkdtemp) so the documented OOTB command is
+        # idempotently re-runnable. Only touch dirs that look like a dataset or are
+        # empty, so we never blow away an unrelated path the user pointed --root at.
+        effective_root = self.root or self._default_root()
+        if effective_root and os.path.isdir(effective_root):
+            if os.path.isdir(os.path.join(effective_root, "meta")) or not os.listdir(effective_root):
+                shutil.rmtree(effective_root, ignore_errors=True)
 
         # Per-camera (height, width) so the schema matches what render returns.
         cam_dims: Dict[str, tuple] = {}
