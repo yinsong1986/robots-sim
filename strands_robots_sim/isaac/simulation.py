@@ -1079,7 +1079,15 @@ class IsaacSimulation(SimEngine):
             pos = position or [0.0, 0.0, 0.0]
             prim_path = f"{self._config.stage_path}/Robots/{name}"
 
-            # Try procedural first
+            # Procedural lookup is a *fallback*: an explicit usd_path /
+            # urdf_path always wins (parity with the MuJoCo backend and
+            # least-surprise for a caller passing a concrete asset). The
+            # lookup still runs unconditionally (a cheap dict read), but
+            # the procedural branch below is only taken when no explicit
+            # asset path was given (#152). Without the usd_path/urdf_path
+            # guard on that branch, any name colliding with the procedural
+            # registry (franka->panda, so100, g1, ...) would silently
+            # shadow an explicit usd_path/urdf_path.
             lookup_name = data_config or name
             try:
                 from strands_robots_sim.isaac.procedural import get_procedural_robot
@@ -1088,7 +1096,7 @@ class IsaacSimulation(SimEngine):
             except ImportError:
                 procedural = None
 
-            if procedural is not None:
+            if procedural is not None and usd_path is None and urdf_path is None:
                 # Build procedurally via USD API
                 joint_names = procedural.joint_names
                 self._prim_registry.append(prim_path)

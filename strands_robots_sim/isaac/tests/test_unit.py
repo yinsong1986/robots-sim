@@ -3091,3 +3091,148 @@ class TestCamerasRecording:
         assert sim._cams_rec_state is not None
         sim.destroy()
         assert sim._cams_rec_state is None
+
+
+class TestAddRobotExplicitPathPriority:
+    """Regression pins for #152: an explicit ``usd_path`` / ``urdf_path``
+    must take priority over a procedural-registry name collision.
+
+    The bug: ``add_robot`` ran the procedural lookup unconditionally and
+    took the procedural branch first, so a name that aliases a registered
+    procedural robot (``franka`` -> ``panda``, ``so100``, ``g1``, ...)
+    silently shadowed an explicit asset path the caller passed. The fix
+    guards the procedural branch with ``usd_path is None and urdf_path is
+    None`` so explicit assets win (parity with the MuJoCo backend).
+
+    Discriminator: the USD / URDF branches wire the loaded ``Articulation``
+    handle onto ``_RobotState.articulation`` (non-None), whereas the
+    procedural branch leaves ``articulation = None``. Asserting on
+    ``articulation`` therefore proves *which* branch was taken without
+    needing a real Isaac Sim install.
+    """
+
+    def _make_sim(self) -> object:
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        sim._world_created = True
+        sim._world = MagicMock()
+        return sim
+
+    def test_usd_path_wins_over_procedural_name_collision(self) -> None:
+        """``add_robot("franka", usd_path=...)`` must take the USD branch,
+        NOT the procedural branch -- even though ``franka`` resolves in the
+        procedural registry (aliased to ``panda``). Pinned by the presence
+        of the wired Articulation handle.
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="franka", usd_path="/assets/my_franka.usd")
+
+        assert result["status"] == "success"
+        rs = sim._robots["franka"]
+        assert rs.articulation is art_handle, (
+            "#152 regression: add_robot('franka', usd_path=...) took the "
+            "procedural branch (articulation=None) instead of the explicit "
+            "USD branch. Explicit asset paths must win over a procedural "
+            "name collision."
+        )
+        # USD branch joint names come from the mocked Articulation dof_names,
+        # not the procedural registry's panda joints.
+        assert rs.joint_names == ["joint_a", "joint_b", "joint_c"]
+        info = result["content"][0]["json"]
+        assert info["usd_path"] == "/assets/my_franka.usd"
+        assert info["articulation_wired"] is True
+
+    def test_urdf_path_wins_over_procedural_name_collision(self) -> None:
+        """``add_robot("so100", urdf_path=...)`` must take the URDF branch,
+        not procedural. ``so100`` is a registered procedural robot.
+        """
+        sim = self._make_sim()
+        (
+            urdf_iface_mod,
+            urdf_importer_mod,
+            articulations_mod,
+            art_handle,
+            _import_config,
+        ) = _patched_isaac_urdf_modules()
+        sys_mods = _patched_urdf_sys_modules(urdf_iface_mod, urdf_importer_mod, articulations_mod)
+        with patch.dict("sys.modules", sys_mods):
+            result = sim.add_robot(name="so100", urdf_path="/assets/so100.urdf")
+
+        assert result["status"] == "success"
+        rs = sim._robots["so100"]
+        assert rs.articulation is art_handle, (
+            "#152 regression: add_robot('so100', urdf_path=...) took the "
+            "procedural branch (articulation=None) instead of the explicit "
+            "URDF branch."
+        )
+        info = result["content"][0]["json"]
+        assert info["urdf_path"] == "/assets/so100.urdf"
+        assert info["articulation_wired"] is True
+
+    def test_procedural_still_used_when_no_explicit_path(self) -> None:
+        """Guard against over-correction: with no usd_path/urdf_path, a
+        procedural name must STILL resolve via the procedural branch
+        (articulation stays None). Proves the fix only suppresses the
+        procedural branch in the presence of an explicit asset path.
+        """
+        sim = self._make_sim()
+        result = sim.add_robot(name="franka")
+
+        assert result["status"] == "success"
+        assert sim._robots["franka"].articulation is None, (
+            "Procedural fallback regressed: add_robot('franka') with no "
+            "explicit path must still build procedurally (articulation=None)."
+        )
+        assert "procedural" in result["content"][0]["text"].lower()
+
+    def test_data_config_procedural_path_preserved(self) -> None:
+        """``data_config`` is the named procedural-lookup escape hatch; with
+        no explicit usd_path/urdf_path it must still drive the procedural
+        branch. ``data_config='so100'`` resolves even though the robot's own
+        ``name`` does not.
+        """
+        sim = self._make_sim()
+        result = sim.add_robot(name="my_arm", data_config="so100")
+
+        assert result["status"] == "success"
+        assert sim._robots["my_arm"].articulation is None
+        assert "procedural" in result["content"][0]["text"].lower()
+
+    def test_unknown_name_with_usd_path_unaffected(self) -> None:
+        """A non-procedural name + usd_path behaved correctly before the fix
+        and must remain correct after it (no procedural collision in play).
+        """
+        sim = self._make_sim()
+        articulations, stage, art_handle = _patched_isaac_articulation_modules()
+        with patch.dict(
+            "sys.modules",
+            {
+                "isaacsim.core.api.articulations": articulations,
+                "isaacsim.core.utils.stage": stage,
+            },
+        ):
+            result = sim.add_robot(name="totally_custom_bot", usd_path="/assets/custom.usd")
+
+        assert result["status"] == "success"
+        assert sim._robots["totally_custom_bot"].articulation is art_handle
+
+    def test_unknown_name_no_path_still_errors(self) -> None:
+        """A non-procedural name with no asset path must still hit the error
+        branch -- and the error message still interpolates ``lookup_name``,
+        which the fix leaves computed at the top of ``add_robot``.
+        """
+        sim = self._make_sim()
+        result = sim.add_robot(name="totally_custom_bot")
+
+        assert result["status"] == "error"
+        assert "totally_custom_bot" in result["content"][0]["text"]
+        assert "totally_custom_bot" not in sim._robots
