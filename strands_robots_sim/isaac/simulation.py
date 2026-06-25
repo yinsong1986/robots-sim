@@ -596,6 +596,15 @@ class IsaacSimulation(SimEngine):
         # recorder threads. ~1 Hz is a working default validated against
         # the example's Gradio UI on an L4.
         self._idle_render_period = _env_float("SO101_IDLE_RENDER_PERIOD", 1.0)
+        # Number of render-bearing world steps add_camera takes to warm up a
+        # freshly-created RTX camera's render product before returning. Isaac's
+        # RTX pipeline does not accumulate a frame until the world is stepped
+        # with rendering enabled, so the first few ``get_rgba()`` calls on a
+        # brand-new camera return a malformed / empty buffer (shape ``(0,)``).
+        # Stepping a few times inside add_camera means render()/recording see a
+        # valid frame on the very first call instead of dropping frames during
+        # an example's opening rollout. Env-tunable for headroom on slow GPUs.
+        self._camera_warmup_steps = _env_int("STRANDS_ISAAC_CAMERA_WARMUP_STEPS", 10)
 
         logger.info(
             "IsaacSimulation initialized: num_envs=%d, device=%s, headless=%s",
@@ -2282,6 +2291,62 @@ class IsaacSimulation(SimEngine):
                 }
             )
 
+    def _warmup_camera(self, name: str, n_steps: int) -> bool:
+        """Step the world (with rendering) until camera ``name`` yields a frame.
+
+        Isaac's RTX render product does not accumulate a frame until the
+        world is stepped with rendering enabled. A freshly-constructed
+        camera therefore returns a malformed / empty ``get_rgba()`` buffer
+        (shape ``(0,)``) for the first several frames, which makes
+        :meth:`render` return an error envelope and the recording hook drop
+        frames during an example's opening rollout. This steps the world up
+        to ``n_steps`` times, re-rendering each time, and returns as soon as
+        :meth:`render` reports success (a valid frame). Holds the scene
+        static -- it only advances physics by the warm-up steps, which is
+        negligible relative to a rollout.
+
+        Parameters
+        ----------
+        name : str
+            Camera name (already registered in ``self._cameras``).
+        n_steps : int
+            Maximum number of render-bearing world steps to take.
+
+        Returns
+        -------
+        bool
+            ``True`` if the camera produced a valid frame within
+            ``n_steps``; ``False`` if it never warmed up (logged at
+            WARNING so a misconfigured camera is visible). Never raises:
+            a step / render failure is caught and ends the loop, because
+            the camera is already registered and render()'s own 0-D guard
+            still covers a not-yet-ready product.
+        """
+        if self._world is None:
+            return False
+        for i in range(max(1, n_steps)):
+            try:
+                self._world.step(render=True)
+                self._sim_time += self._config.physics_dt
+                self._step_count += 1
+                if self.render(camera_name=name).get("status") == "success":
+                    logger.debug("Camera %r warmed up after %d step(s)", name, i + 1)
+                    return True
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, IndexError) as e:
+                # Stepping / rendering a partially-initialised stage can
+                # raise on surface drift; warm-up is best-effort, so log
+                # and stop rather than failing the already-registered
+                # camera. Programming bugs (NameError) still propagate.
+                logger.debug("Camera %r warm-up step %d failed: %s", name, i + 1, e)
+                break
+        logger.warning(
+            "Camera %r did not produce a valid frame after %d warm-up step(s); "
+            "the first render() may return an error until the RTX product accumulates a frame.",
+            name,
+            n_steps,
+        )
+        return False
+
     def add_camera(
         self,
         name: str = "default",
@@ -2400,6 +2465,19 @@ class IsaacSimulation(SimEngine):
             # Track requested OUTPUT size (may differ from native render
             # size when DLSS upscaling required a larger native frame).
             self._cam_out_size[name] = (out_w, out_h)
+
+            # Warm up the RTX render product: Isaac does not accumulate a
+            # frame until the world is stepped with rendering enabled, so
+            # without this the camera's first ``get_rgba()`` returns a
+            # malformed / empty buffer (shape ``(0,)``) and render() /
+            # recording drop the opening frames of a rollout. Skipped in
+            # headless render mode (no RTX frames are produced there, so
+            # stepping would only burn time). Best-effort: a warm-up step
+            # failure is logged and does not fail add_camera -- the camera
+            # is already registered, and render()'s own 0-D guard still
+            # covers a not-yet-ready product.
+            if self._config.render_mode != "headless" and self._camera_warmup_steps > 0:
+                self._warmup_camera(name, self._camera_warmup_steps)
 
             cam_info = {
                 "name": name,

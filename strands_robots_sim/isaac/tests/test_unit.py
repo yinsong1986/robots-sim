@@ -2086,6 +2086,122 @@ class TestAddCameraPhase2:
         assert "/World/Cameras/front" in sim._prim_registry
 
 
+class TestAddCameraRtxWarmup:
+    """add_camera warms up a fresh RTX render product (issue #77).
+
+    Isaac's RTX pipeline does not accumulate a frame until the world is
+    stepped with rendering enabled, so a brand-new camera's first
+    ``get_rgba()`` returns a malformed / empty buffer (shape ``(0,)``).
+    Without a warm-up, render()/recording drop the opening frames of a
+    rollout and an example's ``--n-episodes 1`` run produces a 0-frame
+    (dropped) MP4. add_camera must step the world a bounded number of
+    times so the camera yields a valid frame before it returns.
+    """
+
+    @staticmethod
+    def _cold_then_warm_handle(cold_calls: int):
+        """A camera handle whose ``get_rgba`` returns a malformed ``(0,)``
+        buffer for the first ``cold_calls`` calls (an un-warmed RTX render
+        product), then valid RGBA frames -- mimicking the real warm-up.
+        """
+        handle = MagicMock(name="Camera_handle")
+        handle.get_horizontal_aperture.return_value = 24.0
+        handle.get_depth.return_value = np.full((48, 64), 1.0, dtype=np.float32)
+        state = {"n": 0}
+
+        def _get_rgba():
+            state["n"] += 1
+            if state["n"] <= cold_calls:
+                return np.zeros((0,), dtype=np.uint8)
+            return np.full((48, 64, 4), 200, dtype=np.uint8)
+
+        handle.get_rgba.side_effect = _get_rgba
+        return handle
+
+    def _make_sim(self, render_mode="rtx_realtime", warmup_steps=10):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation(render_mode=render_mode)
+        sim._world_created = True
+        sim._world = MagicMock()
+        sim._camera_warmup_steps = warmup_steps
+        return sim
+
+    def _patched(self, sim, handle):
+        sensor, viewports, _, _ = _patched_isaac_camera_modules()
+        sensor.Camera.return_value = handle
+        return patch.dict(
+            "sys.modules",
+            {
+                "isaacsim.sensors.camera": sensor,
+                "isaacsim.core.utils.viewports": viewports,
+            },
+        )
+
+    def test_add_camera_steps_world_until_camera_warm(self):
+        """add_camera steps the world (render=True) past the cold frames so
+        the camera produces a valid frame, and the camera is left ready: the
+        next render() succeeds on its first call.
+
+        Pre-fix (no warm-up) this fails -- add_camera never steps, the camera
+        stays cold, and the first render() returns a malformed-buffer error.
+        """
+        sim = self._make_sim(warmup_steps=10)
+        # RTX product needs 3 stepped renders before it accumulates a frame.
+        handle = self._cold_then_warm_handle(cold_calls=3)
+        with self._patched(sim, handle):
+            result = sim.add_camera("front")
+        assert result["status"] == "success"
+        # The world was stepped to drive the warm-up (render=True each step).
+        assert sim._world.step.called
+        assert any(call.kwargs.get("render") is True for call in sim._world.step.call_args_list)
+        # Camera is warm now: the very next render() succeeds immediately.
+        post = sim.render("front")
+        assert post["status"] == "success"
+        assert post["rgb"].shape[0] > 0 and post["rgb"].shape[1] > 0
+
+    def test_add_camera_stops_stepping_once_warm(self):
+        """Warm-up is bounded: it returns as soon as the camera yields a
+        frame rather than always running the full ``_camera_warmup_steps``.
+        """
+        sim = self._make_sim(warmup_steps=10)
+        # Warm on the 1st stepped render -> exactly one warm-up step.
+        handle = self._cold_then_warm_handle(cold_calls=0)
+        with self._patched(sim, handle):
+            sim.add_camera("front")
+        assert sim._world.step.call_count == 1
+
+    def test_headless_skips_warmup(self):
+        """In headless render mode no RTX frames are produced, so add_camera
+        must not step the world (warm-up would only burn time)."""
+        sim = self._make_sim(render_mode="headless", warmup_steps=10)
+        handle = self._cold_then_warm_handle(cold_calls=0)
+        with self._patched(sim, handle):
+            result = sim.add_camera("front")
+        assert result["status"] == "success"
+        sim._world.step.assert_not_called()
+
+    def test_warmup_disabled_when_steps_zero(self):
+        """STRANDS_ISAAC_CAMERA_WARMUP_STEPS=0 disables warm-up entirely."""
+        sim = self._make_sim(warmup_steps=0)
+        handle = self._cold_then_warm_handle(cold_calls=0)
+        with self._patched(sim, handle):
+            result = sim.add_camera("front")
+        assert result["status"] == "success"
+        sim._world.step.assert_not_called()
+
+    def test_warmup_failure_does_not_fail_add_camera(self):
+        """A world.step failure during warm-up is best-effort: the camera is
+        already registered, so add_camera still returns success."""
+        sim = self._make_sim(warmup_steps=10)
+        handle = self._cold_then_warm_handle(cold_calls=99)  # never warms
+        sim._world.step.side_effect = RuntimeError("stage not ready")
+        with self._patched(sim, handle):
+            result = sim.add_camera("front")
+        assert result["status"] == "success"
+        assert "front" in sim._cameras
+
+
 class TestRemoveCameraPhase2:
     """Phase 2 (#14): new ``IsaacSimulation.remove_camera`` method.
 

@@ -164,6 +164,18 @@ doesn't have to special-case the no-render path. The frame-extraction
 path is real (`get_rgba` / `get_depth` against the camera's RTX handle)
 in `rtx_realtime` and `rtx_pathtracing` modes.
 
+In an RTX render mode, `add_camera` **warms up** the new camera before it
+returns: Isaac's RTX pipeline does not accumulate a frame until the world is
+stepped with rendering enabled, so a brand-new camera's first `get_rgba()`
+returns a malformed / empty buffer (shape `(0,)`). `add_camera` steps the
+world up to `STRANDS_ISAAC_CAMERA_WARMUP_STEPS` times (default 10) and
+returns as soon as the camera yields a valid frame, so the first
+`render(...)` / recording capture after `add_camera` sees a real frame
+instead of dropping the opening frames of a rollout. The warm-up is skipped
+in `headless` mode (no RTX frames are produced) and can be disabled with
+`STRANDS_ISAAC_CAMERA_WARMUP_STEPS=0`. It is best-effort: a step failure is
+logged and never fails `add_camera` (the camera is still registered).
+
 ## Stepping the world
 
 ```python

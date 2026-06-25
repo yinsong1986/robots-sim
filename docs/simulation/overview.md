@@ -62,6 +62,7 @@ will be shorthand for the same thing — kwargs are forwarded into
 | `STRANDS_ISAAC_HEADLESS` | `"true"` / `"false"` — overrides `headless` |
 | `STRANDS_ISAAC_RTX_PATHTRACING` | `"true"` / `"false"` — flip render mode |
 | `STRANDS_ISAAC_NUCLEUS_URL` | Override Nucleus server URL |
+| `STRANDS_ISAAC_CAMERA_WARMUP_STEPS` | Render-bearing world steps `add_camera` takes to warm a fresh RTX render product (default `10`; `0` disables) |
 
 These are useful for CI: a `Makefile` target can pin `STRANDS_ISAAC_HEADLESS=true`
 without code changes.
