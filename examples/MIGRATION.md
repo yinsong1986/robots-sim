@@ -104,18 +104,21 @@ sim.evaluate_benchmark(
 )
 ```
 
-### After — same task on Isaac Sim (Stage 3, Phase 1 shipped)
+### After — same task on Isaac Sim (Stage 3, in progress — blocked on [#140](https://github.com/strands-labs/robots-sim/issues/140))
 
 ```python
 import strands_robots_sim  # registers "isaac" via entry points
 from strands_robots.simulation import create_simulation
 from strands_robots.benchmarks.libero import load_libero_suite
 
-# Phase 1: lifecycle + procedural builders + loaders work today.
-# Phase 2: add_object / add_camera / replicate are still no-op stubs;
-# evaluate_benchmark on a real LIBERO scene needs Phase 2 data-plane
-# wiring before it produces meaningful trajectories.
-sim = create_simulation("isaac", render_mode="rtx_pathtracing", headless=True)
+# Lifecycle + procedural builders + loaders (USD/URDF, add_camera) work
+# today. This evaluate_benchmark path does NOT run end-to-end yet:
+# examples/libero/run_isaac.py currently crashes with an IndexError in
+# render() during the RTX warm-up loop, before evaluate_benchmark runs
+# (tracked in https://github.com/strands-labs/robots-sim/issues/140).
+# Treat this snippet as the target API shape, not a runnable demo, until
+# #140 is fixed.
+sim = create_simulation("isaac", render_mode="rtx_realtime", headless=True)
 sim.create_world()
 load_libero_suite("libero_spatial")
 
