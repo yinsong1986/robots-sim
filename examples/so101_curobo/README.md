@@ -43,6 +43,15 @@ MUJOCO_GL=egl python -m examples.so101_curobo.app --smoke --episodes 5 \
 MUJOCO_GL=egl python -m examples.so101_curobo.app --server-port 7863
 ```
 
+> **Re-running data generation?** A second run that reuses the same dataset
+> directory currently fails with `FileExistsError` (LeRobot's `create()` does
+> `mkdir(exist_ok=False)`, and the collector only clears a prior dir when
+> `--root` is given — `collector.py:243`). Until the overwrite/unique-path fix
+> lands ([#143](https://github.com/strands-labs/robots-sim/issues/143)), on
+> re-run either pass a **fresh `--root`**, use a **unique `--repo-id`**, or
+> delete the existing dataset dir (the HF cache dir when no `--root` is set)
+> first. The `--root` path above is cleared automatically on re-run.
+
 Load a recorded dataset back (no Hub round-trip):
 
 ```python
@@ -74,9 +83,13 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
 - **Isaac:** `--backend isaac` calls `create_simulation("isaac", render_mode="rtx_realtime")`.
   Needs the Isaac Sim runtime (~30 GB) and backend registration (#67 **T1**), plus a
   faithful SO-101 USD via `add_robot(usd_path=...)` (**T2**). Falls back to MuJoCo otherwise.
-- **cuRobo:** `--planner curobo` (+ `--curobo-urdf` / `SO101_URDF`). **Validated on
-  driver 550 / CUDA 12.4 / L4** (the docs' driver ≥ 580 is conservative — CUDA 12.x
-  kernels run on a 12.4 driver). Install recipe:
+- **cuRobo:** `--planner curobo` (+ `--curobo-urdf` / `SO101_URDF`).
+  **Driver:** NVIDIA's docs recommend driver ≥ 580.65.06 for cuRobo's latest
+  release, but this example is **validated on driver 550 / CUDA 12.4 / L4** —
+  the 580 floor is conservative, since CUDA 12.x kernels run on a 12.4 driver.
+  Treat **550** as the validated minimum here and **580** as NVIDIA's
+  recommendation for the upstream latest release. This is the canonical install
+  recipe (the `requirements.txt` comment points back here):
   ```bash
   export CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST=8.9
   python -m venv --system-site-packages .venv && source .venv/bin/activate
@@ -86,6 +99,9 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
   pip install -e . --no-build-isolation
   pip install 'cuda-core[cu12]'   # the refactored cuRobo's runtime kernel backend (required)
   ```
+  (`uv` users can substitute `uv venv --python 3.11` + `uv pip install -e .
+  --no-build-isolation` for the venv/build steps; the `cuda-core[cu12]` step is
+  still required either way.)
   `CuroboMotionPlanner` builds the SO-101 model from a URDF via the new
   `RobotBuilder` (T4, auto-derives the 5-DOF arm chain to `gripper_frame_link`)
   and chains `MotionPlanner.plan_pose` segments into the full pick-place (T5,
