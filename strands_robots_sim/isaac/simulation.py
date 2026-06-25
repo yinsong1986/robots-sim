@@ -1912,10 +1912,15 @@ class IsaacSimulation(SimEngine):
                         continue
                     try:
                         rgba = cam.handle.get_rgba()
-                        rgb = np.asarray(rgba)[..., :3]
-                        if rgb.ndim == 3 and rgb.shape[0] > 0 and rgb.shape[1] > 0:
-                            obs[cam_name] = rgb.astype(np.uint8)
-                    except (RuntimeError, ValueError, AttributeError, TypeError) as e:
+                        # Validate shape BEFORE slicing: a 0-D scalar
+                        # buffer from a not-yet-warmed RTX render product
+                        # makes ``[..., :3]`` raise ``IndexError`` (#140).
+                        # Skip such cameras rather than failing the whole
+                        # observation.
+                        arr = np.asarray(rgba)
+                        if arr.ndim == 3 and arr.shape[0] > 0 and arr.shape[1] > 0:
+                            obs[cam_name] = arr[..., :3].astype(np.uint8)
+                    except (RuntimeError, ValueError, AttributeError, TypeError, IndexError) as e:
                         logger.debug("camera %r frame unavailable: %s", cam_name, e)
 
             return obs
@@ -2186,26 +2191,32 @@ class IsaacSimulation(SimEngine):
             try:
                 rgba = cam.handle.get_rgba()
                 # ``get_rgba`` returns either ``(H, W, 4)`` or
-                # ``(H, W, 3)`` depending on the Isaac Sim build. Slice
-                # to RGB defensively so the returned shape is stable
-                # for downstream agents.
-                rgb = np.asarray(rgba)[..., :3]
-                # A camera whose RTX render product hasn't accumulated a
+                # ``(H, W, 3)`` depending on the Isaac Sim build. A
+                # camera whose RTX render product hasn't accumulated a
                 # frame yet (e.g. added after the last world step, not
-                # warmed up) returns a malformed / empty buffer -- a 1-D
-                # or 0-size array rather than ``(H, W, C)``. Guard so we
-                # raise a structured RuntimeError (caught below) instead
-                # of an unhandled IndexError when building the json
-                # ``resolution`` from ``rgb.shape[1]``. Caught during the
-                # isaac_gs example's GPU validation with multiple
-                # freshly-added cameras.
-                if rgb.ndim < 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0:
+                # warmed up, or during the RTX warm-up loop) returns a
+                # malformed / empty buffer -- a 0-D scalar, 1-D, or
+                # 0-size array rather than ``(H, W, C)``. Validate the
+                # shape BEFORE slicing: ``np.asarray(rgba)[..., :3]`` on a
+                # 0-D array raises ``IndexError`` ("too many indices for
+                # array: array is 0-dimensional"), which previously
+                # escaped the cleanup ``except`` (it wasn't in the tuple)
+                # and crashed the example's warm-up loop end-to-end
+                # (#140). Guard first so the not-ready case always
+                # surfaces as a structured RuntimeError (caught below),
+                # letting the warm-up loop retry. Regressed into view
+                # after #138 enabled ``rtx_realtime``.
+                arr = np.asarray(rgba)
+                if arr.ndim < 3 or arr.shape[0] == 0 or arr.shape[1] == 0:
                     raise RuntimeError(
                         f"camera {camera_name!r} returned a malformed RGB buffer "
-                        f"(shape {np.asarray(rgba).shape}); the RTX render product "
+                        f"(shape {arr.shape}); the RTX render product "
                         "likely hasn't accumulated a frame yet -- step the world a "
                         "few times after add_camera before rendering."
                     )
+                # Slice to RGB defensively so the returned shape is stable
+                # for downstream agents.
+                rgb = arr[..., :3]
                 depth_raw = cam.handle.get_depth()
                 if depth_raw is None:
                     # Camera was constructed without the depth annotator
@@ -2226,13 +2237,17 @@ class IsaacSimulation(SimEngine):
                     depth = np.zeros(rgb.shape[:2], dtype=np.float32)
                 else:
                     depth = np.asarray(depth_raw)
-            except (RuntimeError, ValueError, OSError, AttributeError, TypeError) as e:
+            except (RuntimeError, ValueError, OSError, AttributeError, TypeError, IndexError) as e:
                 # Cleanup-clause shape mirrors create_world (#52
                 # precedent). The Camera handle's ``get_rgba`` /
                 # ``get_depth`` can raise on a not-yet-stepped world
                 # (RTX render product hasn't accumulated samples) or
                 # surface drift; surface as the structured error
                 # envelope rather than letting the exception propagate.
+                # ``IndexError`` is included so a 0-D / scalar ``get_rgba``
+                # buffer during RTX warm-up surfaces here too rather than
+                # escaping the loop (#140), even should the pre-slice
+                # shape guard above ever be bypassed.
                 logger.error("Failed to render camera '%s': %s", camera_name, e)
                 return {
                     "status": "error",
