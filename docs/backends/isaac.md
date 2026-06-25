@@ -26,6 +26,12 @@ For introductory material, prefer:
 - **Fleet replication**: parallel environments via `omni.isaac.cloner.Cloner`
 - **Isaac Lab integration**: GPU-accelerated RL environments
 
+![Isaac Sim RTX render: a Franka Panda arm composited over a background, with a red cube](../assets/isaac_gs_composite.png)
+
+*RTX-rendered Franka Panda composited over a procedural background — output of
+[`examples/isaac_gs/render_demo.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/isaac_gs/render_demo.py),
+which drives `IsaacSimulation.render()` in `render_mode="rtx_realtime"`.*
+
 !!! note "On the `omni.isaac.*` vs `isaacsim.*` namespaces"
     This backend targets **Isaac Sim 6.0 (Python 3.12)** and uses the
     modern `isaacsim.*` namespace on the runtime path. Every Isaac import

@@ -140,6 +140,25 @@ demos under `examples/`:
 
 Each subdir has its own README with run instructions.
 
+### SO-101 cuRobo pick-and-place
+
+<video controls muted loop playsinline width="560" poster="../assets/so101_oblique.png">
+  <source src="../assets/so101_pickplace.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+  <a href="../assets/so101_pickplace.mp4">Download the clip</a>.
+</video>
+
+[`examples/so101_curobo/app.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/so101_curobo)
+plans a collision-aware pick-and-place with cuRobo and replays it on the Isaac
+Sim PhysX backend: the gripper grasps and lifts the cube, carries it to the
+open-top bin, and records a LeRobot dataset with `state`, `action`, and three
+camera views (front / top-down / oblique, shown above).
+
+![SO-101 pick-and-place, top-down camera](../assets/so101_topdown.png)
+
+*The same episode from the top-down camera — the SO-101 arm, the red cube, and
+the green open-top bin.*
+
 ## Cross-references
 
 - [Getting Started → Quickstart](../getting-started/quickstart.md) — the
