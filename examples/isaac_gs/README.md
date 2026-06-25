@@ -28,13 +28,14 @@ non-photoreal rasteriser.
 | Robot | SO-101 (MuJoCo MJCF) | **real Franka Panda USD** (9 DoF) |
 | Foreground depth | MuJoCo `render_depth` | Isaac camera `get_depth()` |
 | Background renderer | `mujoco_gs.backgrounds` | **reused verbatim** from `mujoco_gs.backgrounds` |
-| UI | live Gradio MJPEG | **render-stills / clip** (RTX isn't real-time-cheap) |
+| UI | live Gradio MJPEG | **live Gradio MJPEG (a few fps) + on-demand full-res stills** (RTX isn't real-time-cheap) |
 
 ## What's reused vs. new
 
-The background renderers (`PanoramaBackground` procedural default,
-`GsplatBackground` for real `.ply` / `.spz` captures) are backend-agnostic and
-**reused verbatim** from `examples.mujoco_gs.backgrounds` — they only need a
+The background renderers (`GsplatBackground` for real `.ply` / `.spz` captures
+— the default — and `PanoramaBackground` for the zero-ML-deps procedural
+fallback) are backend-agnostic and **reused verbatim** from
+`examples.mujoco_gs.backgrounds` — they only need a
 pinhole `CameraParams` (intrinsics + world pose) and numpy. This example
 supplies those `CameraParams` from the Isaac RTX camera instead of MuJoCo's
 `mj_data`.
@@ -52,15 +53,30 @@ supplies those `CameraParams` from the Isaac RTX camera instead of MuJoCo's
 ```bash
 pip install 'strands-robots-sim[isaac]'          # + a working Isaac Sim (RTX GPU)
 
-# Procedural panorama background (zero ML deps), default Franka:
+# Default: the real 3DGS tabletop scene (auto-downloaded + skybox-aligned),
+# default Franka. Falls back to the procedural panorama if gsplat isn't
+# installed — so this still runs with zero ML deps:
 python -m examples.isaac_gs.render_demo --frames 1 --out rollouts/isaac_gs
 
 # Sweep the arm across frames to show it moving on the backdrop:
 python -m examples.isaac_gs.render_demo --frames 12 --wave
 
-# Real captured 3DGS background (digital-twin use case; needs gsplat + a .ply):
-pip install gsplat
+# Force the procedural panorama background (zero ML deps), or point at your own
+# equirectangular panorama image:
+python -m examples.isaac_gs.render_demo --panorama /path/to/pano.jpg
+
+# Pick a different built-in 3DGS preset for the background:
+python -m examples.isaac_gs.render_demo --gsplat-scene 'tabletop (indoor room)'
+
+# Your own captured 3DGS background (digital-twin use case; needs gsplat + a .ply).
+# NOTE: a plain `pip install gsplat` silently disables the CUDA backend in the
+# Isaac container (no nvcc) and crashes at first rasterization. Install a
+# pre-built wheel matching your torch + CUDA build instead (see requirements.txt):
+pip install --index-url https://docs.gsplat.studio/whl/pt24cu118 'gsplat==1.5.3+pt24cu118'
 python -m examples.isaac_gs.render_demo --gsplat-ply /path/to/kitchen.ply
+
+# Load a non-default robot (e.g. an MJCF-imported SO-101 USD):
+python -m examples.isaac_gs.render_demo --robot-usd /path/to/so101.usd
 ```
 
 Frames are written as PNGs under the output dir; a grep-stable summary line
@@ -77,9 +93,13 @@ python -m examples.isaac_gs.app --server-port 7862
 ```
 
 Camera dropdown (oblique / front / topdown presets), a `.ply` background
-upload, and **Render** / **Wave + render** buttons. It's **render-on-demand**,
-not a live MJPEG stream: Isaac's RTX renderer isn't real-time-cheap like
-MuJoCo's offscreen path, and the `SimulationApp` boot is ~200 s.
+upload, and **Render** / **Wave + render** buttons. It boots the sim once at
+startup and serves a **live MJPEG stream** (`/live`) of the composite at a few
+fps for a hands-free view, alongside on-demand full-res stills from the
+buttons. Isaac's RTX renderer isn't real-time-cheap like MuJoCo's offscreen
+path (and the `SimulationApp` boot is ~200 s), so the stream runs at whatever
+rate the render achieves rather than a fixed frame rate. Pick the arm with
+`--robot` / `--robot-usd` and the initial view with `--camera`.
 
 **Threading**: Isaac's `SimulationApp` must be created on the main thread (it
 installs SIGINT handlers) and its RTX context is thread-affine, but Gradio
@@ -107,23 +127,24 @@ requests marshal to the main thread via a queue.
 
 ## Runtime dependencies
 
-This example exercises the Phase-2 camera + render wiring on `IsaacSimulation`:
+This example exercises the Phase-2 camera + render wiring on `IsaacSimulation`,
+all of which is now on `main`:
 
 | Need | Rides on |
 |---|---|
-| Camera intrinsics / pose / handle | [PR #61](https://github.com/strands-labs/robots-sim/pull/61) `add_camera` |
-| RGB + metric depth frames | [PR #62](https://github.com/strands-labs/robots-sim/pull/62) `render` |
-| Real Franka articulation | [PR #63](https://github.com/strands-labs/robots-sim/pull/63) `add_robot(usd_path=)` |
+| Camera intrinsics / pose / handle | [PR #61](https://github.com/strands-labs/robots-sim/pull/61) `add_camera` (merged) |
+| RGB + metric depth frames | [PR #62](https://github.com/strands-labs/robots-sim/pull/62) `render` (merged) |
+| Real Franka articulation | [PR #70](https://github.com/strands-labs/robots-sim/pull/70) `add_robot(usd_path=)` (merged) |
 
-Until those merge, `render` returns blank frames / the robot loads as a
-no-op stub on a stock `main` build. **Draft until they land.**
+These have all landed on `main`, so `render_demo.py` produces a real
+composited frame on a stock build today (see **GPU-validated** below).
 
 ## GPU-validated
 
 Target runtime is Isaac Sim 6.0 (`nvcr.io/nvidia/isaac-sim:6.0`, Python 3.12,
 NVIDIA L4), matching the `isaacsim>=6.0` / `requires-python>=3.12` migration.
 The frame below was validated on Isaac Sim 4.5 (`nvcr.io/nvidia/isaac-sim:4.5.0`)
-against a local integration of #61 + #62 + #63; the library's dual-path
+against a local integration of #61 + #62 + #70; the library's dual-path
 `isaacsim.*` / `omni.isaac.*` imports keep the same code path working on both:
 
 ```
@@ -137,10 +158,12 @@ a known Isaac issue, unrelated to this example's correctness.)
 
 ## Deliberate scope cuts
 
-* **Render-stills / clip, not a live Gradio view.** Isaac's RTX renderer isn't
-  real-time-cheap the way MuJoCo's offscreen renderer is, and the
-  `SimulationApp` boot is heavyweight (~200 s). A live-view / agent-driven
-  variant can layer on once the per-frame RTX cost is budgeted.
+* **CLI is render-stills / clip; the browser app adds a live MJPEG view.**
+  Isaac's RTX renderer isn't real-time-cheap the way MuJoCo's offscreen
+  renderer is, and the `SimulationApp` boot is heavyweight (~200 s). So
+  `render_demo.py` stays a render-and-save shape, while `app.py` boots once
+  and streams the composite live at whatever rate the RTX render achieves
+  (a few fps) plus on-demand full-res stills.
 * **DC-term GS color only** (inherited from the reused `GsplatBackground`) — no
   view-dependent spherical-harmonics.
 * **No view-dependent background relighting** — the captured 3DGS scene is a
