@@ -174,9 +174,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path / URL to a USD robot asset to load. Default: Isaac Sim's "
-            "bundled Franka Panda resolved from the assets root "
-            "(``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``), "
-            "reachable from the Omniverse CDN even without a local Nucleus."
+            "bundled Franka Panda resolved from the assets root. The asset "
+            "sub-path moved under a vendor folder in Isaac Sim 6.0 "
+            "(``Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd``) from the "
+            "legacy 4.x layout (``Isaac/Robots/Franka/franka.usd``); the "
+            "resolver HEAD-probes both and uses whichever exists, reachable "
+            "from the Omniverse CDN even without a local Nucleus."
         ),
     )
     p.add_argument(
@@ -193,20 +196,70 @@ def _split_csv(value: str) -> list[str]:
     return [tok.strip() for tok in value.split(",") if tok.strip()]
 
 
+def _asset_exists(url: str) -> "bool | None":
+    """Best-effort HEAD-probe for an asset URL.
+
+    Returns ``True`` / ``False`` when the probe is conclusive, or ``None``
+    when it can't be determined (non-HTTP URL such as an ``omniverse://``
+    Nucleus path, or a network error). ``None`` means "inconclusive --
+    don't rule the candidate in or out".
+
+    Ported from :func:`examples.libero.run_isaac._asset_exists` so this
+    SDG example resolves the same Isaac Sim 6.0 / legacy-4.x dual layout.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            return 200 <= resp.status < 400
+    except urllib.error.HTTPError as exc:
+        return exc.code < 400
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# Default Franka Panda USD sub-paths relative to the Isaac assets root.
+# NVIDIA relocated the asset under a vendor folder in Isaac Sim 6.0, so the
+# layout differs across releases. Probe the 6.0 path first (the current
+# target runtime), then fall back to the legacy 4.x path. Mirrors
+# ``examples/libero/run_isaac.py``'s ``_FRANKA_USD_SUBPATHS``. See
+# strands-labs/robots-sim#110 and #142.
+_FRANKA_USD_SUBPATHS = (
+    "Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd",  # Isaac Sim 6.0+
+    "Isaac/Robots/Franka/franka.usd",  # Isaac Sim 4.x and earlier
+)
+
+
 def _resolve_default_robot_usd() -> str | None:
     """Resolve the default Franka Panda USD URL from the Isaac assets root.
 
     Mirrors :func:`examples.libero.run_isaac._resolve_robot_asset`'s default
-    branch: ``get_assets_root_path()/Isaac/Robots/Franka/franka.usd``. The
-    helper is imported lazily because it's only resolvable after
-    ``create_world`` has booted ``SimulationApp``. Returns ``None`` if the
-    assets root can't be resolved (no internet + no Nucleus); callers
-    should surface a structured error in that case.
+    branch. The asset sub-path moved under a vendor folder in Isaac Sim 6.0
+    (``Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd``) from the legacy
+    4.x layout (``Isaac/Robots/Franka/franka.usd``); the resolver
+    HEAD-probes each candidate in :data:`_FRANKA_USD_SUBPATHS` order and
+    returns the first that resolves. The hard-coded legacy 4.x path 404s on
+    the Isaac Sim 6.0 Omniverse CDN, crashing ``add_robot`` before any
+    synthetic data is generated (strands-labs/robots-sim#142).
+
+    The ``get_assets_root_path`` helper is imported lazily because it's only
+    resolvable after ``create_world`` has booted ``SimulationApp``. Returns
+    ``None`` if the assets root can't be resolved (no internet + no Nucleus);
+    callers should surface a structured error in that case.
 
     Tries the modern ``isaacsim.storage.native`` namespace first (Isaac
     Sim 6.0 supported path) and falls back to the legacy
     ``omni.isaac.nucleus`` shim -- matches the dual-path policy in
     ``strands_robots_sim/isaac/simulation.py``.
+
+    Probe semantics match ``run_isaac._resolve_default_franka_usd``: if no
+    HTTP probe is conclusive (e.g. a Nucleus ``omniverse://`` root that can't
+    be HEAD-probed over HTTP), fall back to the first (6.0) candidate so the
+    caller still has a path to try.
     """
     try:
         from isaacsim.storage.native import (  # type: ignore[import-not-found]
@@ -220,7 +273,16 @@ def _resolve_default_robot_usd() -> str | None:
     assets_root = get_assets_root_path()
     if not assets_root:
         return None
-    return f"{assets_root}/Isaac/Robots/Franka/franka.usd"
+
+    candidates = [f"{assets_root}/{sub}" for sub in _FRANKA_USD_SUBPATHS]
+    for url in candidates:
+        if _asset_exists(url) is True:
+            return url
+    # No conclusive hit (every HTTP candidate 404'd, or the root is a
+    # non-HTTP Nucleus path that can't be probed). Fall back to the 6.0
+    # candidate -- the current target runtime -- so add_robot still gets a
+    # path to try rather than a silent no-op.
+    return candidates[0]
 
 
 def _build_scene(sim: IsaacSimulation, robot_usd: str | None) -> None:
