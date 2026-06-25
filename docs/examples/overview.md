@@ -142,10 +142,10 @@ Each subdir has its own README with run instructions.
 
 ### SO-101 cuRobo pick-and-place
 
-<video controls muted loop playsinline width="560" poster="../assets/so101_oblique.png">
-  <source src="../assets/so101_pickplace.mp4" type="video/mp4">
+<video controls muted loop playsinline width="560" poster="../../assets/so101_oblique.png">
+  <source src="../../assets/so101_pickplace.mp4" type="video/mp4">
   Your browser does not support the video tag.
-  <a href="../assets/so101_pickplace.mp4">Download the clip</a>.
+  <a href="../../assets/so101_pickplace.mp4">Download the clip</a>.
 </video>
 
 [`examples/so101_curobo/app.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/so101_curobo)
