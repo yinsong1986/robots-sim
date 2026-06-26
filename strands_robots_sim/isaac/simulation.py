@@ -866,6 +866,28 @@ class IsaacSimulation(SimEngine):
                 # mark the world destroyed below; programming bugs propagate.
                 logger.warning("World cleanup warning: %s", e)
 
+            # Clear the USD stage. SimulationApp is a process-wide singleton
+            # that outlives destroy(), so World.clear_instance() alone leaves
+            # every prim from this session on the stage. The next
+            # create_world() + add_robot() then builds onto a dirty stage and
+            # Isaac auto-suffixes any colliding path (e.g.
+            # /World/Physics_Materials/physics_material -> ..._1), so prim
+            # paths drift across destroy()/create_world() cycles and break
+            # determinism for multi-scene eval / benchmark loops. Issuing a
+            # fresh stage here honours this method's documented contract
+            # ("Only the World/Stage are cleared") and pins prim paths stable
+            # run-to-run.
+            try:
+                import omni.usd  # type: ignore[import-not-found]
+
+                omni.usd.get_context().new_stage()
+            except (RuntimeError, OSError, AttributeError, ImportError) as e:
+                # new_stage() can raise on a torn-down context or omni surface
+                # drift across versions; ImportError covers the no-Isaac path.
+                # Logged at WARNING because the world is still marked destroyed
+                # below; a stale stage only affects a subsequent create_world().
+                logger.warning("Stage clear warning: %s", e)
+
             # Clear entity tracking
             self._robots.clear()
             self._cameras.clear()

@@ -3352,3 +3352,83 @@ class TestAddRobotExplicitPathPriority:
         assert result["status"] == "error"
         assert "totally_custom_bot" in result["content"][0]["text"]
         assert "totally_custom_bot" not in sim._robots
+
+
+class TestIsaacSimulationDestroyStageClear:
+    """Regression pins for the destroy() USD-stage clear.
+
+    Issue: a ``destroy()`` that did not clear the USD stage left every prim
+    from the session on the process-wide ``SimulationApp`` singleton, so the
+    next ``create_world()`` + ``add_robot()`` built onto a dirty stage and
+    Isaac auto-suffixed colliding paths
+    (``/World/Physics_Materials/physics_material`` -> ``..._1``). Prim paths
+    then drifted run-to-run and broke determinism for multi-scene eval loops.
+    The real prim-count parity check lives in the GPU integ suite; these
+    mocked unit tests pin that destroy() actually issues a fresh stage and
+    that it never raises if Isaac is not importable.
+    """
+
+    def _make_created_sim(self):
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        sim = IsaacSimulation()
+        # Bypass the real create_world(): mark the world live with a mock so
+        # destroy() runs its full teardown path without needing Isaac.
+        sim._world = MagicMock()
+        sim._world_created = True
+        return sim
+
+    def test_destroy_issues_fresh_stage(self, monkeypatch):
+        """destroy() must call omni.usd.get_context().new_stage() so the
+        process-wide stage is empty for the next create_world().
+        """
+        import sys
+        import types
+
+        sim = self._make_created_sim()
+
+        omni_mod = types.ModuleType("omni")
+        omni_usd = MagicMock()
+        ctx = MagicMock()
+        omni_usd.get_context.return_value = ctx
+        omni_mod.usd = omni_usd
+
+        monkeypatch.setitem(sys.modules, "omni", omni_mod)
+        monkeypatch.setitem(sys.modules, "omni.usd", omni_usd)
+
+        result = sim.destroy()
+
+        assert result["status"] == "success"
+        ctx.new_stage.assert_called_once_with()
+        # The world handle must also be released.
+        assert sim._world is None
+        assert sim._world_created is False
+
+    def test_destroy_survives_missing_omni(self, monkeypatch):
+        """destroy() must not raise (and still report success) when omni is
+        not importable -- e.g. on a CI box without Isaac Sim. The ImportError
+        from ``import omni.usd`` is caught and logged, not propagated.
+        """
+        import builtins
+        import sys
+
+        sim = self._make_created_sim()
+
+        # Ensure any cached omni module cannot satisfy the import.
+        monkeypatch.delitem(sys.modules, "omni", raising=False)
+        monkeypatch.delitem(sys.modules, "omni.usd", raising=False)
+
+        real_import = builtins.__import__
+
+        def deny_omni(name, *args, **kwargs):
+            if name == "omni" or name.startswith("omni."):
+                raise ImportError("No module named 'omni'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", deny_omni)
+
+        result = sim.destroy()
+
+        assert result["status"] == "success"
+        assert sim._world is None
+        assert sim._world_created is False

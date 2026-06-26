@@ -254,3 +254,50 @@ class TestIsaacGPUIntegration:
             assert all(isinstance(v, float) for v in obs.values()), f"obs values: {obs}"
         finally:
             sim.destroy()
+
+
+@pytest.mark.skipif(not _GPU_AVAILABLE, reason="STRANDS_GPU_TEST=1 not set")
+class TestIsaacDestroyCreateDeterminism:
+    """destroy() + create_world() must produce a stable USD stage.
+
+    Reproduces the determinism regression: without a stage clear in
+    destroy(), a second create_world() + add_robot() on the same
+    process-wide SimulationApp builds onto the leftover prims and Isaac
+    auto-suffixes the colliding physics-material path, so the prim set
+    drifts run-to-run. Asserts the two cycles yield identical prim paths.
+    """
+
+    def _prim_paths(self) -> list[str]:
+        import omni.usd  # type: ignore[import-not-found]
+
+        stage = omni.usd.get_context().get_stage()
+        return sorted(str(p.GetPath()) for p in stage.Traverse())
+
+    def test_destroy_create_cycle_prim_paths_stable(self):
+        from strands_robots_sim.isaac import IsaacConfig, IsaacSimulation
+
+        available, msg = IsaacSimulation.is_available()
+        if not available:
+            pytest.skip(f"Isaac Sim not available: {msg}")
+
+        config = IsaacConfig(num_envs=1, headless=True)
+
+        def one_cycle() -> list[str]:
+            sim = IsaacSimulation(config)
+            r = sim.create_world(timestep=1 / 120, gravity=[0, 0, -9.81])
+            assert r["status"] == "success", f"create_world: {r}"
+            r = sim.add_robot("so100", position=[0, 0, 0])
+            assert r["status"] == "success", f"add_robot: {r}"
+            sim.step(5)
+            paths = self._prim_paths()
+            sim.destroy()
+            return paths
+
+        paths1 = one_cycle()
+        paths2 = one_cycle()
+
+        # The second cycle must not gain a deduped physics_material_1 (or any
+        # other auto-suffixed leftover) from a dirty stage.
+        drift = set(paths2) - set(paths1)
+        assert not drift, f"prim paths drifted across destroy()/create_world(): {drift}"
+        assert paths1 == paths2, "prim path sets differ between identical cycles"
