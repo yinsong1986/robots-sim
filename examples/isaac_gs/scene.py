@@ -27,15 +27,23 @@ class SceneBuild:
 
 # Hero camera presets (pos, target, fov_deg) framing the Franka in the 3DGS
 # room. Adapted from the MuJoCo-GS demo's authored cameras (the tabletop scene
-# + its skybox alignment were tuned together with those), then pulled back
-# ~1.3x and aimed higher (target z~0.3-0.4 rather than the workspace floor) so
-# the WHOLE arm fits with margin -- the Franka's default pose stands tall, and
-# a low aim clipped the top. Eyes stay INSIDE the ~2 m captured shell (z < the
-# ~1.6 m ceiling) so the splat still fills the frame; aiming higher captures
-# the arm without grazing the unobserved ceiling.
+# + its skybox alignment were tuned together with those), then pulled back and
+# aimed higher (target z~0.55 rather than the workspace floor) so the WHOLE arm
+# fits with margin.
+#
+# Framing was validated against actual RTX renders (a plain-RGB framing probe,
+# not just geometry math): the earlier "front" pose ([0.05,-1.25,0.75] aimed at
+# z=0.40, fov 58) put the eye too close and too low, so the Franka's default
+# upright pose pushed the wrist + gripper off the TOP-RIGHT of the frame. The
+# pose below pulls the eye back to y=-1.95 / up to z=1.05 and aims at z=0.55
+# with a narrower 48 deg fov, which keeps the full arm base->gripper in frame
+# with comfortable margin (so it also stays framed across the --wave joint-0
+# sweep). Eyes stay INSIDE the ~2 m captured shell (z < the ~1.6 m ceiling) so
+# the splat still fills the frame; aiming higher captures the arm without
+# grazing the unobserved ceiling.
 CAMERA_PRESETS: "dict[str, tuple[list[float], list[float], float]]" = {
     "oblique": ([0.96, -0.93, 0.88], [0.05, 0.05, 0.40], 55.0),
-    "front": ([0.05, -1.25, 0.75], [0.05, 0.05, 0.40], 58.0),
+    "front": ([0.05, -1.95, 1.05], [0.05, 0.05, 0.55], 48.0),
     # A high, slightly-offset eye (a perfectly vertical look-at is degenerate
     # for a +Z-up roll axis); kept under the ~1.6 m shell ceiling.
     "topdown": ([0.05, -0.61, 1.56], [0.05, 0.05, 0.30], 62.0),
@@ -203,7 +211,7 @@ def build_default_scene(
     camera_target: "list[float] | None" = None,
     camera_width: int = 640,
     camera_height: int = 480,
-    camera_fov: float = 58.0,
+    camera_fov: float = 48.0,
 ) -> SceneBuild:
     """Build the demo scene on a fresh ``IsaacSimulation``.
 
@@ -272,8 +280,8 @@ def build_default_scene(
     # Default camera == the "front" CAMERA_PRESETS pose. The app skips
     # re-adding "front" since this creates it, so this default must stay in
     # sync with CAMERA_PRESETS["front"]; render_demo renders it too.
-    pos = camera_position or [0.05, -1.25, 0.75]
-    tgt = camera_target or [0.05, 0.05, 0.40]
+    pos = camera_position or [0.05, -1.95, 1.05]
+    tgt = camera_target or [0.05, 0.05, 0.55]
     ca = sim.add_camera(
         name=camera_name,
         position=pos,

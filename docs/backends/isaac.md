@@ -32,6 +32,16 @@ For introductory material, prefer:
 [`examples/isaac_gs/render_demo.py`](https://github.com/strands-labs/robots-sim/tree/main/examples/isaac_gs/render_demo.py),
 which drives `IsaacSimulation.render()` in `render_mode="rtx_realtime"`.*
 
+<video controls muted loop playsinline width="560" poster="../assets/isaac_gs_wave_poster.png">
+  <source src="../assets/isaac_gs_wave.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+  <a href="../assets/isaac_gs_wave.mp4">Download the clip</a>.
+</video>
+
+*The same RTX pipeline driven across frames: `render_demo.py --wave` steps the
+Franka through a waving motion and captures each frame with
+`IsaacSimulation.render()`, demonstrating per-frame RTX capture (24 frames).*
+
 !!! note "On the `omni.isaac.*` vs `isaacsim.*` namespaces"
     This backend targets **Isaac Sim 6.0 (Python 3.12)** and uses the
     modern `isaacsim.*` namespace on the runtime path. Every Isaac import
