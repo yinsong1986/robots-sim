@@ -10,6 +10,12 @@
 # Image IO for saving composited PNGs (falls back to numpy .npy if absent).
 pillow>=10.0
 
+# Video assembly for the multi-frame / --wave clip output (MP4 via libx264,
+# or GIF). Matches examples/mujoco_gs's imageio encode. PNG stills still work
+# without these; only the assembled clip needs them.
+imageio>=2.19
+imageio-ffmpeg>=0.4  # ffmpeg backend for MP4 (libx264)
+
 # numpy is already pulled in by strands-robots-sim; pinned loosely here for
 # the standalone-install case.
 numpy>=1.24

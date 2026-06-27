@@ -7,7 +7,8 @@ example -- the digital-twin companion to ``examples/mujoco_gs``.
 Builds the default scene (real Franka + red cube + RTX camera),
 renders one or more depth-composited frames (Isaac RTX foreground
 z-composited over a captured-real 3DGS scene, or the procedural
-panorama by default), and writes them to disk.
+panorama by default), writes them to disk as PNG stills, and — for a
+multi-frame run — assembles them into a video clip (MP4/GIF).
 
 This ships a **render-stills / short-clip** entry point rather than a
 live Gradio view (like ``mujoco_gs/app.py``): Isaac's RTX renderer
@@ -15,6 +16,18 @@ isn't real-time-cheap the way MuJoCo's offscreen renderer is, and the
 SimulationApp boot is heavyweight (~200 s), so a render-and-save shape
 is the honest fit. A live-view / agent-driven variant can layer on
 once the per-frame RTX cost is budgeted.
+
+Output
+------
+By default each composited frame is written as a PNG still. When more
+than one frame is rendered (``--frames > 1`` or ``--wave``) the frames
+are *also* assembled into a video clip, so the example delivers the
+"short-clip" its name promises — at output parity with
+``examples/mujoco_gs/libero_groot.py`` (``imageio`` libx264, matching
+``mimsave(..., codec="libx264", quality=7, macro_block_size=8)``).
+``--mp4`` / ``--gif`` pick the clip container (default: MP4 for a
+multi-frame run); ``--out-video`` overrides the path; ``--fps`` sets the
+frame rate; ``--no-stills`` skips the per-frame PNGs.
 
 Usage
 -----
@@ -26,8 +39,11 @@ Usage
     # Real captured 3DGS background (requires gsplat + a .ply):
     python -m examples.isaac_gs.render_demo --gsplat-ply /path/to/kitchen.ply
 
-    # Sweep a joint across frames to show the arm moving on the backdrop:
-    python -m examples.isaac_gs.render_demo --frames 12 --wave
+    # Sweep a joint across frames -> PNG stills + an assembled MP4 clip:
+    python -m examples.isaac_gs.render_demo --frames 24 --wave
+
+    # Same, but write a GIF (and skip the per-frame PNGs):
+    python -m examples.isaac_gs.render_demo --frames 24 --wave --gif --no-stills
 
 Requires
 --------
@@ -88,7 +104,82 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
+    p.add_argument(
+        "--mp4",
+        dest="mp4",
+        action="store_true",
+        default=None,
+        help="Assemble the rendered frames into an MP4 clip (libx264). "
+        "This is the default for a multi-frame run (--frames > 1 / --wave).",
+    )
+    p.add_argument(
+        "--gif",
+        dest="gif",
+        action="store_true",
+        default=None,
+        help="Assemble the rendered frames into an animated GIF instead of an MP4.",
+    )
+    p.add_argument(
+        "--out-video",
+        default=None,
+        help="Output path for the assembled clip. Default: " "<out>/<ts>--isaac_gs.{mp4,gif}. Implies clip assembly.",
+    )
+    p.add_argument("--fps", type=int, default=20, help="Frame rate for the assembled clip (default: 20).")
+    p.add_argument(
+        "--no-stills",
+        dest="stills",
+        action="store_false",
+        default=True,
+        help="Skip writing the per-frame PNG stills (only emit the assembled clip).",
+    )
     return p
+
+
+def _want_video(args: argparse.Namespace) -> bool:
+    """Decide whether to assemble a clip from the rendered frames.
+
+    A clip is produced when (a) the user asked for one explicitly
+    (``--mp4`` / ``--gif`` / ``--out-video``), or (b) the run is
+    multi-frame (``--frames > 1`` or ``--wave``) — mirroring
+    ``mujoco_gs/libero_groot.py``'s always-a-video output. A single
+    still has nothing to animate, so a bare ``--frames 1`` stays
+    PNG-only unless a clip flag is passed.
+    """
+    if args.mp4 or args.gif or args.out_video:
+        return True
+    return bool(args.wave or args.frames > 1)
+
+
+def _video_path(args: argparse.Namespace, out_dir: str, ts: str) -> str:
+    if args.out_video:
+        d = os.path.dirname(args.out_video)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        return args.out_video
+    ext = "gif" if args.gif else "mp4"
+    return os.path.join(out_dir, f"{ts}--isaac_gs.{ext}")
+
+
+def _encode_clip(frames, path: str, fps: int = 20) -> None:
+    """Assemble RGB frames into a clip at ``path`` (.mp4 or .gif).
+
+    Mirrors ``examples/mujoco_gs/libero_groot.py``'s ``_encode_mp4`` for
+    output parity (``imageio`` libx264, ``quality=7``,
+    ``macro_block_size=8``). GIF output skips the libx264-only knobs.
+    """
+    try:
+        import imageio
+    except ImportError as e:  # pragma: no cover
+        raise ImportError(
+            "imageio (with imageio-ffmpeg for MP4) is required to assemble the clip; "
+            "`pip install imageio imageio-ffmpeg`."
+        ) from e
+
+    if str(path).lower().endswith(".gif"):
+        # Pillow's GIF writer takes per-frame duration (ms), not fps.
+        imageio.mimsave(path, list(frames), duration=1000.0 / max(1, int(fps)))
+    else:
+        imageio.mimsave(path, list(frames), fps=int(fps), codec="libx264", quality=7, macro_block_size=8)
 
 
 def _date_out(out: "str | None") -> str:
@@ -160,6 +251,8 @@ def main() -> None:
 
         compositor = IsaacHybridCompositor(sim, background=_make_background(args))
 
+        want_video = _want_video(args)
+        rendered = []
         ts = _dt.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         for i in range(max(1, args.frames)):
             if args.wave and build.robot_joint_count > 0:
@@ -173,13 +266,27 @@ def main() -> None:
                     sim.step(5)
 
             frame = compositor.render(camera_name=build.camera_name)
-            path = os.path.join(out_dir, f"{ts}--isaac_gs--frame{i:03d}.png")
-            _save_png(path, frame.rgb)
             fg_px = int(frame.mask.sum())
-            print(f"[frame {i}] saved {path}  foreground_px={fg_px}  ({frame.rgb.shape[1]}x{frame.rgb.shape[0]})")
+            if want_video:
+                rendered.append(frame.rgb)
+            if args.stills:
+                path = os.path.join(out_dir, f"{ts}--isaac_gs--frame{i:03d}.png")
+                _save_png(path, frame.rgb)
+                print(f"[frame {i}] saved {path}  foreground_px={fg_px}  ({frame.rgb.shape[1]}x{frame.rgb.shape[0]})")
+            else:
+                print(f"[frame {i}] rendered  foreground_px={fg_px}  ({frame.rgb.shape[1]}x{frame.rgb.shape[0]})")
+
+        video_path = None
+        if want_video and rendered:
+            video_path = _video_path(args, out_dir, ts)
+            _encode_clip(rendered, video_path, fps=args.fps)
+            print(f"[video] assembled {video_path}  frames={len(rendered)}  fps={args.fps}")
 
         # Grep-stable summary line.
-        print(f"isaac_gs  frames={args.frames}  robot={build.robot_name}  out={out_dir}  backend=isaac")
+        print(
+            f"isaac_gs  frames={args.frames}  robot={build.robot_name}  "
+            f"out={out_dir}  video={video_path}  backend=isaac"
+        )
     finally:
         sim.destroy()
 
