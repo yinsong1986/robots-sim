@@ -5,6 +5,27 @@ idea — a simulated robot composited against a photoreal 3D Gaussian Splatting
 (3DGS) background with per-pixel, depth-aware occlusion — but with a
 **deliberately different motivation**.
 
+## Gallery
+
+A real **Franka Panda** rendered by Isaac Sim's **RTX** renderer and
+z-composited over a 3DGS / panorama backdrop with per-pixel, depth-aware
+occlusion — the digital-twin companion to `mujoco_gs`'s SO-arm gallery.
+
+![Franka waving on the backdrop — Isaac RTX foreground composited frame-by-frame](assets/wave.gif)
+
+*The arm waving on the backdrop — the Isaac RTX foreground composited
+frame-by-frame over the background via `IsaacHybridCompositor`, then assembled
+into a clip by `render_demo.py --wave` (the same `imageio` libx264 path
+`mujoco_gs` uses). Reproduce with
+`python -m examples.isaac_gs.render_demo --frames 24 --wave`.*
+
+![Front hero view of the Franka on the backdrop](assets/hero_front.jpg)
+
+*The reframed `front` hero camera: a clean full-arm shot of the Franka
+composited over the backdrop. These were rendered on the procedural
+`PanoramaBackground` fallback (gsplat not installed); the real captured-3DGS
+path (`--gsplat-ply`) swaps the backdrop for a photoreal capture.*
+
 ## Why this exists (and how it differs from `mujoco_gs`)
 
 `mujoco_gs` exists because MuJoCo's renderer **isn't** photoreal, so it
@@ -58,8 +79,17 @@ pip install 'strands-robots-sim[isaac]'          # + a working Isaac Sim (RTX GP
 # installed — so this still runs with zero ML deps:
 python -m examples.isaac_gs.render_demo --frames 1 --out rollouts/isaac_gs
 
-# Sweep the arm across frames to show it moving on the backdrop:
-python -m examples.isaac_gs.render_demo --frames 12 --wave
+# Sweep the arm across frames to show it moving on the backdrop. A
+# multi-frame run writes the PNG stills *and* assembles them into an MP4
+# clip (libx264) — at output parity with examples/mujoco_gs:
+python -m examples.isaac_gs.render_demo --frames 24 --wave
+
+# Write a GIF instead of an MP4, and skip the per-frame PNGs:
+python -m examples.isaac_gs.render_demo --frames 24 --wave --gif --no-stills
+
+# Override the clip path / frame rate:
+python -m examples.isaac_gs.render_demo --frames 24 --wave \
+    --out-video rollouts/isaac_gs/wave.mp4 --fps 20
 
 # Force the procedural panorama background (zero ML deps), or point at your own
 # equirectangular panorama image:
@@ -79,8 +109,12 @@ python -m examples.isaac_gs.render_demo --gsplat-ply /path/to/kitchen.ply
 python -m examples.isaac_gs.render_demo --robot-usd /path/to/so101.usd
 ```
 
-Frames are written as PNGs under the output dir; a grep-stable summary line
-(`isaac_gs  frames=N  robot=...  out=...  backend=isaac`) closes the run.
+Frames are written as PNGs under the output dir; a multi-frame run
+(`--frames > 1` or `--wave`) also assembles them into a video clip
+(MP4 by default, `--gif` for a GIF, `--out-video` to override the path,
+`--no-stills` to emit only the clip). A grep-stable summary line
+(`isaac_gs  frames=N  robot=...  out=...  video=...  backend=isaac`)
+closes the run.
 
 ## Browser app (`app.py`)
 
@@ -158,12 +192,14 @@ a known Isaac issue, unrelated to this example's correctness.)
 
 ## Deliberate scope cuts
 
-* **CLI is render-stills / clip; the browser app adds a live MJPEG view.**
+* **CLI is render-stills + clip; the browser app adds a live MJPEG view.**
   Isaac's RTX renderer isn't real-time-cheap the way MuJoCo's offscreen
   renderer is, and the `SimulationApp` boot is heavyweight (~200 s). So
-  `render_demo.py` stays a render-and-save shape, while `app.py` boots once
-  and streams the composite live at whatever rate the RTX render achieves
-  (a few fps) plus on-demand full-res stills.
+  `render_demo.py` stays a render-and-save shape — PNG stills plus, for a
+  multi-frame run, an assembled MP4/GIF clip (same `imageio` libx264 path
+  as `mujoco_gs`) — while `app.py` boots once and streams the composite
+  live at whatever rate the RTX render achieves (a few fps) plus on-demand
+  full-res stills.
 * **DC-term GS color only** (inherited from the reused `GsplatBackground`) — no
   view-dependent spherical-harmonics.
 * **No view-dependent background relighting** — the captured 3DGS scene is a
