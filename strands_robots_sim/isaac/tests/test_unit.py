@@ -1353,6 +1353,123 @@ class TestAddObjectPhase2:
         assert "/World/Objects/cube" in sim._prim_registry
 
 
+class TestAddObjectPhysicsViewNotReady:
+    """Regression coverage for #159: dynamic-rigid velocity query race.
+
+    Isaac's ``RigidPrim.__init__`` eagerly calls ``_on_physics_ready`` ->
+    ``get_linear_velocities()`` when a physics simulation view already
+    exists. During :meth:`load_scene` the world has already been reset
+    (ground plane + robot registered), so constructing a ``Dynamic*``
+    prim for a LIBERO task object would hit ``omni.physics.tensors``
+    *before* the new prim is part of the tensor view, raising a bare::
+
+        Exception("Failed to get rigid body velocities from backend")
+
+    ``_construct_shape_prim`` *prevents* this (rather than catching it --
+    a bare ``except Exception`` is forbidden in simulation.py by the
+    exception-hygiene pin) by stopping the timeline so the physics sim
+    view clears before a dynamic prim is constructed. The prim then
+    initialises cleanly on the next ``world.reset()``.
+    """
+
+    def test_dynamic_prim_stops_timeline_when_physics_view_active(self) -> None:
+        """When a physics sim view is live, constructing a dynamic prim
+        stops the timeline first so RigidPrim.__init__ skips its eager
+        velocity query (the canonical #159 flow).
+        """
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with (
+            patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}),
+            patch.object(sim, "_physics_sim_view_active", return_value=True),
+            patch.object(sim, "_stop_timeline_for_deferred_physics") as stop_mock,
+        ):
+            result = sim.add_object("mug_1_main", shape="box", position=[0.1, 0.2, 0.8])
+
+        assert result["status"] == "success"
+        # Timeline stopped exactly once, before construction.
+        stop_mock.assert_called_once()
+        fake_objects.DynamicCuboid.assert_called_once()
+        scene.add.assert_called_once_with(fake_objects.DynamicCuboid.return_value)
+        assert "mug_1_main" in sim._objects
+
+    def test_dynamic_prim_no_stop_when_physics_view_inactive(self) -> None:
+        """With no live physics sim view (e.g. pre-first-reset), the eager
+        query never runs, so the timeline is left untouched.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with (
+            patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}),
+            patch.object(sim, "_physics_sim_view_active", return_value=False),
+            patch.object(sim, "_stop_timeline_for_deferred_physics") as stop_mock,
+        ):
+            result = sim.add_object("mug_1_main", shape="box")
+
+        assert result["status"] == "success"
+        stop_mock.assert_not_called()
+
+    def test_static_prim_never_stops_timeline(self) -> None:
+        """``Fixed*`` prims don't take the RigidPrim velocity path, so the
+        timeline is never stopped for them even with a live physics view.
+        """
+        sim, _ = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with (
+            patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}),
+            patch.object(sim, "_physics_sim_view_active", return_value=True),
+            patch.object(sim, "_stop_timeline_for_deferred_physics") as stop_mock,
+        ):
+            result = sim.add_object("table", shape="box", is_static=True)
+
+        assert result["status"] == "success"
+        stop_mock.assert_not_called()
+        fake_objects.FixedCuboid.assert_called_once()
+
+    def test_physics_sim_view_active_false_without_isaac(self) -> None:
+        """Outside Isaac (``isaacsim.core.simulation_manager`` absent),
+        ``_physics_sim_view_active`` reports ``False`` so dynamic-prim
+        construction proceeds unchanged.
+        """
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        # No isaacsim module on this dev box -> ImportError -> False.
+        assert IsaacSimulation._physics_sim_view_active() is False
+
+    def test_stop_timeline_is_best_effort_without_omni(self) -> None:
+        """``_stop_timeline_for_deferred_physics`` swallows a missing
+        ``omni.timeline`` (partial install) rather than raising.
+        """
+        from strands_robots_sim.isaac.simulation import IsaacSimulation
+
+        # omni.timeline isn't importable here; the call must not raise.
+        IsaacSimulation._stop_timeline_for_deferred_physics()
+
+    def test_load_scene_stops_timeline_for_dynamic_objects(self, tmp_path) -> None:
+        """End-to-end: the #159 traceback path. With a live physics view,
+        ``load_scene`` stops the timeline before each dynamic LIBERO
+        object so construction never hits the eager velocity query, and
+        every object is realized instead of aborting on_episode_start.
+        """
+        scene_path = TestLoadSceneLibero()._write_scene(tmp_path)
+        sim, scene = _make_simulation_with_world()
+        fake_objects = _patched_isaac_objects_module()
+        with (
+            patch.dict("sys.modules", {"isaacsim.core.api.objects": fake_objects}),
+            patch.object(sim, "_physics_sim_view_active", return_value=True),
+            patch.object(sim, "_stop_timeline_for_deferred_physics") as stop_mock,
+        ):
+            result = sim.load_scene(scene_path)
+
+        assert result["status"] == "success"
+        realized = result["content"][0]["json"]["realized"]
+        assert set(realized) == {"living_room_table", "mug_1_main", "plate_1_main"}
+        assert result["content"][0]["json"]["object_count"] == 3
+        # Two dynamic objects (mug, plate) -> two timeline stops; the
+        # static table fixture does not stop the timeline.
+        assert stop_mock.call_count == 2
+
+
 class TestRemoveObjectPhase2:
     """Phase 2 wiring (#14) for ``IsaacSimulation.remove_object``.
 
