@@ -1409,7 +1409,7 @@ class IsaacSimulation(SimEngine):
             prim_path = f"{self._config.stage_path}/Objects/{name}"
 
             try:
-                handle, resolved_size = self._create_shape_prim(
+                handle, resolved_size = self._construct_shape_prim(
                     shape=shape,
                     prim_path=prim_path,
                     name=name,
@@ -1437,6 +1437,17 @@ class IsaacSimulation(SimEngine):
                 # -- see #52 for the gravity precedent), ImportError
                 # (omni.isaac.core.objects unavailable on a partial
                 # Isaac install). Programming bugs propagate.
+                #
+                # NOTE: the bare ``Exception`` ``omni.physics.tensors``
+                # raises when a Dynamic* prim's eager
+                # ``RigidPrim._on_physics_ready`` queries velocities
+                # before the physics-tensor view includes it (#159) is
+                # NOT caught here -- ``_construct_shape_prim`` prevents it
+                # up front by stopping the timeline (clearing the physics
+                # sim view) before constructing dynamic prims, so the
+                # eager query never runs. That keeps this clause free of a
+                # bare ``except Exception`` (forbidden by the
+                # exception-hygiene pin, PR #31).
                 logger.error(
                     "Failed to add object '%s' (shape=%s, static=%s): %s",
                     name,
@@ -1485,6 +1496,112 @@ class IsaacSimulation(SimEngine):
                     }
                 ],
             }
+
+    def _construct_shape_prim(
+        self,
+        *,
+        shape: str,
+        prim_path: str,
+        name: str,
+        position: list[float],
+        orientation: list[float],
+        size: list[float] | None,
+        color: list[float] | None,
+        mass: float,
+        is_static: bool,
+    ) -> tuple[Any, list[float]]:
+        """Construct a shape prim, deferring physics init when needed.
+
+        Wraps :meth:`_create_shape_prim` to work around an eager
+        velocity query in Isaac's ``RigidPrim.__init__``. When a physics
+        simulation view already exists (e.g. the ground plane and robot
+        were registered and the world was reset/played earlier), the
+        ``Dynamic*`` constructors run ``RigidPrim._on_physics_ready``
+        during ``__init__``, which calls ``get_linear_velocities()`` ->
+        ``omni.physics.tensors`` *before the new prim is part of that
+        tensor view*. The backend then raises a bare::
+
+            Exception("Failed to get rigid body velocities from backend")
+
+        which is fatal for :meth:`load_scene` -- it builds a LIBERO
+        task's movable objects as ``Dynamic*`` prims after the world has
+        already been initialised (see
+        `#159 <https://github.com/strands-labs/robots-sim/issues/159>`_).
+
+        We *prevent* the failure rather than catching it: a bare
+        ``except Exception`` is forbidden in this module by the
+        exception-hygiene pin (PR #31), and ``omni.physics.tensors``
+        raises exactly that bare type. Instead, before constructing a
+        ``Dynamic*`` prim while a physics sim view is live, we stop the
+        timeline so ``SimulationManager.get_physics_sim_view()`` returns
+        ``None``. ``RigidPrim.__init__`` then skips its eager
+        ``_on_physics_ready`` velocity query, and the prim is initialised
+        cleanly on the next ``world.reset()`` that ``world.scene.add``
+        schedules -- mirroring Isaac's own "build rigid bodies, then
+        reset once" scene-construction ordering.
+
+        Static (``Fixed*``) prims don't take the ``RigidPrim`` velocity
+        path, so they never hit this and the timeline is left untouched.
+
+        Returns the same ``(handle, resolved_size)`` tuple as
+        :meth:`_create_shape_prim`.
+        """
+        if not is_static and self._physics_sim_view_active():
+            logger.info(
+                "Stopping timeline before constructing dynamic prim '%s': a physics "
+                "sim view is live, so RigidPrim.__init__ would query velocities for a "
+                "prim not yet in the tensor view (#159). The prim will initialise on "
+                "the next reset().",
+                name,
+            )
+            self._stop_timeline_for_deferred_physics()
+        return self._create_shape_prim(
+            shape=shape,
+            prim_path=prim_path,
+            name=name,
+            position=position,
+            orientation=orientation,
+            size=size,
+            color=color,
+            mass=mass,
+            is_static=is_static,
+        )
+
+    @staticmethod
+    def _physics_sim_view_active() -> bool:
+        """Return True if Isaac currently holds a physics simulation view.
+
+        ``RigidPrim.__init__`` only runs its eager ``_on_physics_ready``
+        velocity query when ``SimulationManager.get_physics_sim_view()``
+        is not ``None`` (i.e. the world has been reset/played). Best
+        effort: a missing ``SimulationManager`` (Isaac not installed /
+        partial install) is treated as "no view", so the dynamic-prim
+        construction proceeds unchanged outside Isaac.
+        """
+        try:
+            from isaacsim.core.simulation_manager import (  # type: ignore[import-not-found]
+                SimulationManager,
+            )
+
+            return SimulationManager.get_physics_sim_view() is not None
+        except (ImportError, AttributeError, RuntimeError):
+            return False
+
+    @staticmethod
+    def _stop_timeline_for_deferred_physics() -> None:
+        """Stop the Isaac timeline so the physics-tensor view is cleared.
+
+        After this returns, ``SimulationManager.get_physics_sim_view()``
+        yields ``None`` and ``RigidPrim.__init__`` skips its eager
+        ``_on_physics_ready`` velocity query. Best-effort: a missing
+        ``omni.timeline`` (partial Isaac install) is logged and ignored.
+        """
+        try:
+            import omni.timeline  # type: ignore[import-not-found]
+
+            omni.timeline.get_timeline_interface().stop()
+        except (ImportError, AttributeError, RuntimeError) as e:
+            logger.warning("Could not stop timeline to defer physics init: %s", e)
 
     def _create_shape_prim(
         self,
