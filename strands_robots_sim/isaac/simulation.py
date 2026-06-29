@@ -1510,16 +1510,14 @@ class IsaacSimulation(SimEngine):
         mass: float,
         is_static: bool,
     ) -> tuple[Any, list[float]]:
-        """Construct a shape prim, deferring physics init when needed.
+        """Construct a shape prim, deferring physics init for dynamic bodies.
 
         Wraps :meth:`_create_shape_prim` to work around an eager
-        velocity query in Isaac's ``RigidPrim.__init__``. When a physics
-        simulation view already exists (e.g. the ground plane and robot
-        were registered and the world was reset/played earlier), the
+        velocity query in Isaac's ``RigidPrim.__init__``. The
         ``Dynamic*`` constructors run ``RigidPrim._on_physics_ready``
         during ``__init__``, which calls ``get_linear_velocities()`` ->
-        ``omni.physics.tensors`` *before the new prim is part of that
-        tensor view*. The backend then raises a bare::
+        ``omni.physics.tensors`` *before the new prim is part of the
+        physics-tensor view*. The backend then raises a bare::
 
             Exception("Failed to get rigid body velocities from backend")
 
@@ -1531,14 +1529,25 @@ class IsaacSimulation(SimEngine):
         We *prevent* the failure rather than catching it: a bare
         ``except Exception`` is forbidden in this module by the
         exception-hygiene pin (PR #31), and ``omni.physics.tensors``
-        raises exactly that bare type. Instead, before constructing a
-        ``Dynamic*`` prim while a physics sim view is live, we stop the
-        timeline so ``SimulationManager.get_physics_sim_view()`` returns
-        ``None``. ``RigidPrim.__init__`` then skips its eager
-        ``_on_physics_ready`` velocity query, and the prim is initialised
-        cleanly on the next ``world.reset()`` that ``world.scene.add``
-        schedules -- mirroring Isaac's own "build rigid bodies, then
-        reset once" scene-construction ordering.
+        raises exactly that bare type. Before constructing any
+        ``Dynamic*`` prim we stop the timeline, which clears the
+        physics-tensor view so ``RigidPrim.__init__`` skips its eager
+        ``_on_physics_ready`` velocity query; the prim is then
+        initialised cleanly on the next ``world.reset()`` that
+        ``world.scene.add`` schedules -- mirroring Isaac's own "build
+        rigid bodies, then reset once" scene-construction ordering.
+
+        The stop is *unconditional* for dynamic prims rather than gated on
+        a ``SimulationManager.get_physics_sim_view()`` probe. The earlier
+        probe-gated guard (PR #161) was a no-op on the actual ``#159``
+        ``load_scene`` path: in a real Isaac 6.0 run the probe reported no
+        live view while ``RigidPrim.__init__`` still issued the eager
+        velocity query and crashed -- the probe checks a *different*
+        tensor-view handle than the one ``RigidPrim`` keys off, so the two
+        fell out of sync. ``timeline.stop()`` is idempotent (a no-op when
+        the timeline is already stopped, the common scene-build case), so
+        always stopping is safe and strictly covers the path the probe
+        missed.
 
         Static (``Fixed*``) prims don't take the ``RigidPrim`` velocity
         path, so they never hit this and the timeline is left untouched.
@@ -1546,12 +1555,12 @@ class IsaacSimulation(SimEngine):
         Returns the same ``(handle, resolved_size)`` tuple as
         :meth:`_create_shape_prim`.
         """
-        if not is_static and self._physics_sim_view_active():
+        if not is_static:
             logger.info(
-                "Stopping timeline before constructing dynamic prim '%s': a physics "
-                "sim view is live, so RigidPrim.__init__ would query velocities for a "
-                "prim not yet in the tensor view (#159). The prim will initialise on "
-                "the next reset().",
+                "Stopping timeline before constructing dynamic prim '%s' so "
+                "RigidPrim.__init__ skips its eager velocity query for a prim not "
+                "yet in the tensor view (#159). The prim initialises on the next "
+                "reset(). Idempotent if the timeline is already stopped.",
                 name,
             )
             self._stop_timeline_for_deferred_physics()
@@ -1568,33 +1577,15 @@ class IsaacSimulation(SimEngine):
         )
 
     @staticmethod
-    def _physics_sim_view_active() -> bool:
-        """Return True if Isaac currently holds a physics simulation view.
-
-        ``RigidPrim.__init__`` only runs its eager ``_on_physics_ready``
-        velocity query when ``SimulationManager.get_physics_sim_view()``
-        is not ``None`` (i.e. the world has been reset/played). Best
-        effort: a missing ``SimulationManager`` (Isaac not installed /
-        partial install) is treated as "no view", so the dynamic-prim
-        construction proceeds unchanged outside Isaac.
-        """
-        try:
-            from isaacsim.core.simulation_manager import (  # type: ignore[import-not-found]
-                SimulationManager,
-            )
-
-            return SimulationManager.get_physics_sim_view() is not None
-        except (ImportError, AttributeError, RuntimeError):
-            return False
-
-    @staticmethod
     def _stop_timeline_for_deferred_physics() -> None:
         """Stop the Isaac timeline so the physics-tensor view is cleared.
 
-        After this returns, ``SimulationManager.get_physics_sim_view()``
-        yields ``None`` and ``RigidPrim.__init__`` skips its eager
-        ``_on_physics_ready`` velocity query. Best-effort: a missing
-        ``omni.timeline`` (partial Isaac install) is logged and ignored.
+        After this returns the physics-tensor view is torn down, so
+        ``RigidPrim.__init__`` skips its eager ``_on_physics_ready``
+        velocity query and a freshly constructed ``Dynamic*`` prim
+        initialises only on the next ``world.reset()``. Best-effort: a
+        missing ``omni.timeline`` (partial Isaac install) is logged and
+        ignored.
         """
         try:
             import omni.timeline  # type: ignore[import-not-found]
