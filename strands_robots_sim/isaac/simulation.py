@@ -1576,8 +1576,7 @@ class IsaacSimulation(SimEngine):
             is_static=is_static,
         )
 
-    @staticmethod
-    def _stop_timeline_for_deferred_physics() -> None:
+    def _stop_timeline_for_deferred_physics(self) -> None:
         """Stop the Isaac timeline so the physics-tensor view is cleared.
 
         After this returns the physics-tensor view is torn down, so
@@ -1586,6 +1585,22 @@ class IsaacSimulation(SimEngine):
         initialises only on the next ``world.reset()``. Best-effort: a
         missing ``omni.timeline`` (partial Isaac install) is logged and
         ignored.
+
+        ``timeline.stop()`` is **asynchronous**: it posts a
+        ``GLOBAL_EVENT_STOP`` that tears the physics-tensor view down only
+        on a later app tick. ``RigidPrim.__init__`` gates its eager
+        velocity query on ``SimulationManager.get_physics_sim_view() is not
+        None`` (rigid_prim.py:200), and that handle stays non-``None`` until
+        the stop event is dispatched -- so stopping the timeline and then
+        immediately constructing a ``Dynamic*`` prim still crashed with the
+        bare ``Exception("Failed to get rigid body velocities from
+        backend")`` (#159 reopened: the unconditional stop from PR #163 was
+        necessary but not sufficient). We therefore **pump the app** after
+        the stop so the event dispatches and the view is actually ``None``
+        before the prim is built. ``SimulationApp.update()`` is render-only
+        (it does not advance physics), so it doesn't drift the already-placed
+        prims; verified against an Isaac 6.0 run where the view reads
+        non-``None`` immediately after ``stop()`` and ``None`` after the pump.
         """
         try:
             import omni.timeline  # type: ignore[import-not-found]
@@ -1593,6 +1608,33 @@ class IsaacSimulation(SimEngine):
             omni.timeline.get_timeline_interface().stop()
         except (ImportError, AttributeError, RuntimeError) as e:
             logger.warning("Could not stop timeline to defer physics init: %s", e)
+            return
+
+        # Pump the app so the (async) STOP event dispatches and the
+        # physics-tensor view is torn down before the Dynamic* prim is
+        # constructed. Prefer SimulationApp.update() (render-only, no physics
+        # advance); bounded so a host that never clears the view fails loud at
+        # construction rather than spinning here.
+        app = getattr(self, "_app", None)
+        update = getattr(app, "update", None) if app is not None else None
+        if not callable(update):
+            return
+        try:
+            from isaacsim.core.simulation_manager import (  # type: ignore[import-not-found]
+                SimulationManager,
+            )
+        except (ImportError, AttributeError):
+            SimulationManager = None  # type: ignore[assignment]
+
+        _MAX_PUMP_TICKS = 8
+        for _ in range(_MAX_PUMP_TICKS):
+            if SimulationManager is not None:
+                try:
+                    if SimulationManager.get_physics_sim_view() is None:
+                        return
+                except (AttributeError, RuntimeError):
+                    SimulationManager = None  # type: ignore[assignment]
+            update()
 
     def _create_shape_prim(
         self,

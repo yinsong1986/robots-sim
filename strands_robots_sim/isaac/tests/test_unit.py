@@ -1441,10 +1441,73 @@ class TestAddObjectPhysicsViewNotReady:
         """``_stop_timeline_for_deferred_physics`` swallows a missing
         ``omni.timeline`` (partial install) rather than raising.
         """
-        from strands_robots_sim.isaac.simulation import IsaacSimulation
-
         # omni.timeline isn't importable here; the call must not raise.
-        IsaacSimulation._stop_timeline_for_deferred_physics()
+        sim, _ = _make_simulation_with_world()
+        sim._stop_timeline_for_deferred_physics()
+
+    def test_stop_timeline_pumps_app_until_physics_view_cleared(self) -> None:
+        """#159 (reopened): ``timeline.stop()`` is async -- the physics-tensor
+        view stays live until the STOP event dispatches on an app tick. The
+        method must pump ``SimulationApp.update()`` after the stop until
+        ``SimulationManager.get_physics_sim_view()`` is ``None``, so a
+        ``Dynamic*`` prim built next doesn't hit the eager velocity query.
+        """
+        import types
+
+        sim, _ = _make_simulation_with_world()
+        sim._app = MagicMock()
+
+        omni_mod = types.ModuleType("omni")
+        omni_timeline = MagicMock()
+        omni_mod.timeline = omni_timeline
+        sim_mgr_mod = MagicMock()
+        # The view is non-None until the 3rd app.update() tick, mirroring the
+        # real Isaac 6.0 behaviour observed in the diagnostic run.
+        view_seq = [object(), object(), None, None]
+        sim_mgr_mod.SimulationManager.get_physics_sim_view.side_effect = lambda: view_seq.pop(0)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni": omni_mod,
+                "omni.timeline": omni_timeline,
+                "isaacsim.core.simulation_manager": sim_mgr_mod,
+            },
+        ):
+            sim._stop_timeline_for_deferred_physics()
+
+        # Timeline stopped once; app pumped until the view read None.
+        omni_timeline.get_timeline_interface.return_value.stop.assert_called_once()
+        assert sim._app.update.call_count == 2
+
+    def test_stop_timeline_pump_is_bounded(self) -> None:
+        """If the physics view never clears, the pump is bounded (fails loud
+        at prim construction instead of spinning forever here).
+        """
+        import types
+
+        sim, _ = _make_simulation_with_world()
+        sim._app = MagicMock()
+
+        omni_mod = types.ModuleType("omni")
+        omni_timeline = MagicMock()
+        omni_mod.timeline = omni_timeline
+        sim_mgr_mod = MagicMock()
+        # Never clears.
+        sim_mgr_mod.SimulationManager.get_physics_sim_view.return_value = object()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "omni": omni_mod,
+                "omni.timeline": omni_timeline,
+                "isaacsim.core.simulation_manager": sim_mgr_mod,
+            },
+        ):
+            sim._stop_timeline_for_deferred_physics()
+
+        # Bounded at _MAX_PUMP_TICKS (8) updates, then returns.
+        assert sim._app.update.call_count == 8
 
     def test_load_scene_stops_timeline_for_dynamic_objects(self, tmp_path) -> None:
         """End-to-end #159 traceback path, with no probe simulating a live
