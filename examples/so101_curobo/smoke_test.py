@@ -126,6 +126,57 @@ def test_rerun_default_root_is_idempotent():
     assert out["second"]["total_frames"] > 0
 
 
+def test_resolve_so101_urdf_precedence(monkeypatch, tmp_path):
+    """``resolve_so101_urdf`` honours explicit arg -> SO101_URDF -> cache.
+
+    Pure-Python (no cuRobo/Isaac); the cache fallback is mocked so the test
+    runs anywhere. Guards the #67-followup that defaults the cuRobo/URDF path
+    to the auto-downloaded strands-robots SO-101 URDF.
+    """
+    from examples.so101_curobo import planner as P
+
+    explicit = tmp_path / "explicit.urdf"
+    explicit.write_text("<robot/>")
+    env_urdf = tmp_path / "env.urdf"
+    env_urdf.write_text("<robot/>")
+    cache_urdf = tmp_path / "cache" / "so101_new_calib.urdf"
+    cache_urdf.parent.mkdir()
+    cache_urdf.write_text("<robot/>")
+    (cache_urdf.parent / "assets").mkdir()
+
+    # Mock the cache resolver so we don't depend on a real download.
+    monkeypatch.setattr(
+        P,
+        "_so101_cache_urdf",
+        lambda: (str(cache_urdf), str(cache_urdf.parent / "assets")),
+    )
+
+    # 1. explicit wins over everything.
+    monkeypatch.setenv("SO101_URDF", str(env_urdf))
+    assert P.resolve_so101_urdf(str(explicit)) == str(explicit)
+
+    # 2. env wins when no explicit arg.
+    assert P.resolve_so101_urdf(None) == str(env_urdf)
+
+    # 3. cache fallback when neither explicit nor env is set.
+    monkeypatch.delenv("SO101_URDF", raising=False)
+    assert P.resolve_so101_urdf(None) == str(cache_urdf)
+    # ...and the mesh dir resolves to the cache assets/ subdir.
+    monkeypatch.delenv("SO101_ASSET", raising=False)
+    assert P.resolve_so101_asset("") == str(cache_urdf.parent / "assets")
+
+
+def test_resolve_so101_urdf_none_when_unavailable(monkeypatch):
+    """With no explicit arg, no env, and no cache, the resolver returns None so
+    callers keep their existing fail-with-hint behaviour.
+    """
+    from examples.so101_curobo import planner as P
+
+    monkeypatch.delenv("SO101_URDF", raising=False)
+    monkeypatch.setattr(P, "_so101_cache_urdf", lambda: (None, ""))
+    assert P.resolve_so101_urdf(None) is None
+
+
 def main() -> int:
     ok, why = _deps_ok()
     if not ok:

@@ -142,8 +142,6 @@ class SO101CuroboDemo:
             # conventions + EE frame), and the Isaac backend has no data_config
             # path at all -- it requires a URDF. In both cases load the arm from
             # that URDF so plans execute correctly / the backend can build it.
-            import os
-
             needs_urdf = getattr(self.planner.primary, "name", "") == "curobo" or self.backend in (
                 "isaac",
                 "isaacsim",
@@ -151,7 +149,14 @@ class SO101CuroboDemo:
             )
             robot_urdf = None
             if needs_urdf:
-                robot_urdf = self.planner_kwargs.get("urdf_path") or os.environ.get("SO101_URDF")
+                # Same precedence as the cuRobo planner (explicit kwarg ->
+                # SO101_URDF -> the auto-downloaded strands-robots cache URDF) so
+                # the sim arm loads the EXACT URDF cuRobo plans with, and the
+                # cuRobo/URDF path works out-of-the-box once the MuJoCo demo has
+                # populated the SO-101 asset cache.
+                from .planner import resolve_so101_urdf
+
+                robot_urdf = resolve_so101_urdf(self.planner_kwargs.get("urdf_path"))
             self.scene = build_pick_place_scene(
                 self.sim, camera_size=self.camera_size, backend=backend, robot_urdf=robot_urdf
             )

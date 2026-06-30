@@ -31,8 +31,17 @@ import os
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--urdf", default=os.environ.get("SO101_URDF"))
-    ap.add_argument("--asset", default=os.environ.get("SO101_ASSET"))
+    ap.add_argument(
+        "--urdf",
+        default=os.environ.get("SO101_URDF"),
+        help="SO-101 URDF. Defaults to $SO101_URDF, else the auto-downloaded "
+        "strands-robots SO-101 cache URDF (the one the MuJoCo demo fetches).",
+    )
+    ap.add_argument(
+        "--asset",
+        default=os.environ.get("SO101_ASSET"),
+        help="Mesh dir for the URDF. Defaults to $SO101_ASSET, else the cache mesh dir.",
+    )
     ap.add_argument("--cube-xy", nargs=2, type=float, default=[0.34, 0.0])
     ap.add_argument("--place-xy", nargs=2, type=float, default=[0.0, 0.25])
     ap.add_argument(

@@ -83,7 +83,13 @@ recipe: `create() → add_frame()* → save_episode() → finalize()`.
 - **Isaac:** `--backend isaac` calls `create_simulation("isaac", render_mode="rtx_realtime")`.
   Needs the Isaac Sim runtime (~30 GB) and backend registration (#67 **T1**), plus a
   faithful SO-101 USD via `add_robot(usd_path=...)` (**T2**). Falls back to MuJoCo otherwise.
-- **cuRobo:** `--planner curobo` (+ `--curobo-urdf` / `SO101_URDF`).
+- **cuRobo:** `--planner curobo` (+ optional `--curobo-urdf` / `SO101_URDF`).
+  **SO-101 URDF resolution:** the URDF is resolved in this order — explicit
+  `--curobo-urdf` → `SO101_URDF` env → the **auto-downloaded `strands-robots`
+  SO-101 cache URDF** (`~/.strands_robots/assets/robotstudio_so101/`, the same
+  asset the default MuJoCo demo fetches). So once you've run the MuJoCo demo
+  (or on any box with internet), `--planner curobo` finds a URDF + meshes
+  with **no flag needed**; pass `--curobo-urdf` only to override with your own.
   **Driver:** NVIDIA's docs recommend driver ≥ 580.65.06 for cuRobo's latest
   release, but this example is **validated on driver 550 / CUDA 12.4 / L4** —
   the 580 floor is conservative, since CUDA 12.x kernels run on a 12.4 driver.

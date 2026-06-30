@@ -121,8 +121,18 @@ def main(argv: "list[str] | None" = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--backend", default="mujoco", choices=["mujoco", "isaac"])
     p.add_argument("--planner", default="auto", choices=["auto", "scripted", "curobo", "precomputed"])
-    p.add_argument("--curobo-urdf", default=None, help="SO-101 URDF for cuRobo (or env SO101_URDF).")
-    p.add_argument("--curobo-asset", default="", help="Mesh root for the SO-101 URDF (or env SO101_ASSET).")
+    p.add_argument(
+        "--curobo-urdf",
+        default=None,
+        help="SO-101 URDF for cuRobo. Defaults to env SO101_URDF, else the "
+        "auto-downloaded strands-robots SO-101 cache URDF (no flag needed once "
+        "the MuJoCo demo has populated the asset cache).",
+    )
+    p.add_argument(
+        "--curobo-asset",
+        default="",
+        help="Mesh root for the SO-101 URDF. Defaults to env SO101_ASSET, else the cache mesh dir.",
+    )
     p.add_argument(
         "--curobo-traj",
         default=None,

@@ -53,6 +53,90 @@ def curobo_available() -> bool:
         return False
 
 
+def _so101_cache_urdf() -> "tuple[Optional[str], str]":
+    """Best-effort: resolve the SO-101 URDF + mesh dir from the strands-robots cache.
+
+    The default MuJoCo demo already auto-downloads the SO-101 model into the
+    external ``~/.strands_robots`` cache (via ``strands_robots.assets``), and
+    that download ships a URDF (``so101_new_calib.urdf``) and a ``assets/``
+    mesh dir alongside the MJCF. The cuRobo / URDF-sim paths previously
+    *ignored* that and forced the user to supply ``--curobo-urdf`` /
+    ``SO101_URDF`` by hand even though a perfectly good URDF was already on
+    disk. This resolves that cached URDF so the cuRobo path works
+    out-of-the-box on the same machine the MuJoCo demo already ran on.
+
+    Returns ``(urdf_path, asset_path)``; ``urdf_path`` is ``None`` when the
+    cache / package isn't available (so callers keep their existing
+    "raise an actionable error" behaviour). ``resolve_model_dir`` triggers the
+    same auto-download the MuJoCo path uses, so a clean box with internet
+    populates the cache here too.
+    """
+    try:
+        import glob
+
+        from strands_robots.assets import resolve_model_dir  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return None, ""
+    try:
+        model_dir = resolve_model_dir("so101")
+    except Exception:  # noqa: BLE001
+        return None, ""
+    if not model_dir:
+        return None, ""
+    model_dir = str(model_dir)
+    # Prefer the new-calibration URDF; fall back to any *.urdf in the dir.
+    preferred = os.path.join(model_dir, "so101_new_calib.urdf")
+    if os.path.exists(preferred):
+        urdf = preferred
+    else:
+        matches = sorted(glob.glob(os.path.join(model_dir, "*.urdf")))
+        urdf = matches[0] if matches else None
+    if not urdf:
+        return None, ""
+    # Meshes live in the cache dir's ``assets/`` subdir when present; cuRobo's
+    # RobotBuilder resolves ``package://`` / relative mesh refs against it.
+    asset_dir = os.path.join(model_dir, "assets")
+    asset_path = asset_dir if os.path.isdir(asset_dir) else model_dir
+    return urdf, asset_path
+
+
+def resolve_so101_urdf(urdf_path: "Optional[str]" = None) -> "Optional[str]":
+    """Resolve the SO-101 URDF with the documented precedence.
+
+    1. explicit ``urdf_path`` argument,
+    2. the ``SO101_URDF`` env var,
+    3. the auto-downloaded ``strands_robots`` SO-101 cache URDF
+       (see :func:`_so101_cache_urdf`).
+
+    Returns ``None`` only when none of the three resolve, so callers keep
+    their existing fail-with-hint behaviour for a box that has neither an
+    explicit URDF nor the cache.
+    """
+    if urdf_path:
+        return urdf_path
+    env = os.environ.get("SO101_URDF")
+    if env:
+        return env
+    cached, _ = _so101_cache_urdf()
+    return cached
+
+
+def resolve_so101_asset(asset_path: str = "") -> str:
+    """Resolve the SO-101 mesh dir (for cuRobo) with the same precedence.
+
+    explicit ``asset_path`` -> ``SO101_ASSET`` env -> the cache mesh dir.
+    Returns ``""`` when none resolve (cuRobo treats that as "no extra mesh
+    search path", unchanged from before).
+    """
+    if asset_path:
+        return asset_path
+    env = os.environ.get("SO101_ASSET")
+    if env:
+        return env
+    _, cached_assets = _so101_cache_urdf()
+    return cached_assets
+
+
 CUROBO_AVAILABLE = curobo_available()
 
 # The SO-101 gripper's fingers extend along the gripper_frame_link +Z axis. From
@@ -352,10 +436,8 @@ class CuroboMotionPlanner:
         fingertip_offset: Optional[Sequence[float]] = None,
         **_ignored,
     ):
-        import os
-
-        self.urdf_path = urdf_path or os.environ.get("SO101_URDF")
-        self.asset_path = asset_path or os.environ.get("SO101_ASSET", "")
+        self.urdf_path = resolve_so101_urdf(urdf_path)
+        self.asset_path = resolve_so101_asset(asset_path)
         self.tool_frame = tool_frame
         self.self_collision = self_collision
         self.device = device
@@ -425,8 +507,10 @@ class CuroboMotionPlanner:
 
         if not self.urdf_path or not os.path.exists(self.urdf_path):
             raise RuntimeError(
-                "CuroboMotionPlanner needs an SO-101 URDF. Pass urdf_path=... or set "
-                "SO101_URDF (+ SO101_ASSET for meshes). See README (#67 T2/T4)."
+                "CuroboMotionPlanner needs an SO-101 URDF. It auto-resolves the "
+                "strands-robots SO-101 cache URDF (the one the MuJoCo demo "
+                "downloads), but that wasn't found here -- pass urdf_path=... or "
+                "set SO101_URDF (+ SO101_ASSET for meshes). See README (#67 T2/T4)."
             )
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
         from curobo.robot_builder import RobotBuilder
@@ -772,12 +856,17 @@ _CUROBO_KEYS = (
 
 
 def _curobo_usable(kwargs: dict) -> bool:
-    """cuRobo is usable only if installed AND an SO-101 URDF is resolvable."""
-    import os
+    """cuRobo is usable only if installed AND an SO-101 URDF is resolvable.
 
+    URDF resolution follows :func:`resolve_so101_urdf` (explicit kwarg ->
+    ``SO101_URDF`` -> the auto-downloaded strands-robots cache URDF), so the
+    ``auto`` path now selects cuRobo out-of-the-box on a box that already ran
+    the MuJoCo demo, instead of silently falling back to scripted just because
+    no URDF flag was passed.
+    """
     if not CUROBO_AVAILABLE:
         return False
-    return bool(kwargs.get("urdf_path") or os.environ.get("SO101_URDF"))
+    return bool(resolve_so101_urdf(kwargs.get("urdf_path")))
 
 
 def make_planner(prefer: str = "auto", robot_cfg: str = "so101", **kwargs):
